@@ -819,6 +819,31 @@ the final image. Migrations are copied into the Rust builder because
 Local dashboard builds and tests use Vite 7 and Vitest 4. Use Node 22.12+
 (22.x) or Node 24+; the Docker frontend stage uses Node 22.
 
+For a development container, the dashboard can be served from a mounted Vite
+`dist/` instead of the bundle embedded in the Rust binary. Mount
+`dashboard-frontend/dist` read-only at `/dashboard-dist` and set the runtime
+environment variable `LLMCONDUIT_DASHBOARD_RUNTIME_DIR=/dashboard-dist` on the
+gateway container. In another terminal, run:
+
+```bash
+cd dashboard-frontend
+npm ci
+npm run build -- --watch
+```
+
+Vite rebuilds the frontend when its sources change; refreshing `/dashboard`
+then loads the new UI from the same authenticated origin. Only the initial
+gateway image needs this runtime-directory support. Backend changes still
+require a Rust compile and process restart. The `dev` Dockerfile target runs
+`/usr/local/bin/dev-gateway` with `cargo watch`: mount the repo read-only at
+`/app` and persistent writable volumes at `/cargo-home` and `/cargo-target`.
+The watcher compiles as the checkout owner and launches the gateway as uid
+65532, which keeps the existing `/data` volume writable without changing its
+ownership. The first compile is a cold build; subsequent Rust edits compile
+incrementally and restart the gateway without rebuilding its image. Active
+streams disconnect on restart. Leave
+`LLMCONDUIT_DASHBOARD_RUNTIME_DIR` unset to use the embedded production bundle.
+
 The quickest local deployment uses the checked-in Docker-ready config and a
 named data volume:
 

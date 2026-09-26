@@ -1,5 +1,21 @@
 # syntax=docker/dockerfile:1
 
+# Source-mounted development server. Cargo recompiles changed Rust modules and
+# restarts the process; the target and registry live on persistent volumes.
+FROM rust:1-bookworm AS dev
+
+RUN cargo install cargo-watch --locked \
+    && install -d -m 0777 /cargo-home /cargo-target
+
+COPY scripts/dev-gateway.sh /usr/local/bin/dev-gateway
+RUN chmod 0755 /usr/local/bin/dev-gateway
+
+ENV HOME=/tmp \
+    CARGO_HOME=/cargo-home \
+    CARGO_TARGET_DIR=/cargo-target \
+    CARGO_PROFILE_DEV_DEBUG=0
+WORKDIR /app
+
 FROM node:22-bookworm-slim AS dashboard-builder
 
 WORKDIR /app/dashboard-frontend

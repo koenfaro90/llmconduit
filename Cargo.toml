@@ -80,6 +80,7 @@ utoipa = { version = "5", features = ["axum_extras"] }
 
 [dev-dependencies]
 pretty_assertions = "1"
+tempfile = "3"
 # `test-util` enables tokio's paused-clock test controls (`pause`/`advance`,
 # `#[tokio::test(start_paused = true)]`) used to deterministically exercise the
 # axum SSE keep-alive idle timer in tests. `net`/`io-util` drive the real-TCP WS

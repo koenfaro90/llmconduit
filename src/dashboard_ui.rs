@@ -1,11 +1,13 @@
-//! Serve the React+TS+Vite dashboard SPA embedded into the binary at compile
-//! time (D8), with the D7 auth gate.
+//! Serve the React+TS+Vite dashboard SPA with the D7 auth gate. Production
+//! uses the embedded build; development can read a mounted Vite `dist/` at
+//! request time so frontend edits do not require a Rust or container rebuild.
 //!
 //! `build.rs` guarantees `$OUT_DIR/dashboard_dist/` exists (a node-less stub by
 //! default, the real Vite `dist/` when built with `LLMCONDUIT_BUILD_DASHBOARD=1`),
-//! so `include_dir!` always compiles. The `static DASHBOARD_DIST: Dir<'static>`
-//! binding is REQUIRED — a bare `include_dir!(concat!(env!("OUT_DIR"), …))` does
-//! not type-check.
+//! so `include_dir!` always compiles. `LLMCONDUIT_DASHBOARD_RUNTIME_DIR` selects
+//! a mounted build at runtime for development. The `static DASHBOARD_DIST:
+//! Dir<'static>` binding is REQUIRED — a bare
+//! `include_dir!(concat!(env!("OUT_DIR"), …))` does not type-check.
 //!
 //! Routes (registered by `http.rs` only when `--with-debug-ui` is set AND the
 //! D7 startup decision permits it):
@@ -38,13 +40,75 @@ use axum::response::IntoResponse;
 use axum::response::Response;
 use include_dir::Dir;
 use include_dir::include_dir;
+use std::io;
+use std::path::Component;
+use std::path::Path as FsPath;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::OnceLock;
+use tokio::io::AsyncReadExt;
 use uuid::Uuid;
 
 /// The embedded dashboard build. Backed by `$OUT_DIR/dashboard_dist/`, which
 /// `build.rs` always materializes (stub or real). The `Dir<'static>` type on
 /// this `static` is what makes `include_dir!` type-check.
 static DASHBOARD_DIST: Dir<'static> = include_dir!("$OUT_DIR/dashboard_dist");
+
+/// An opt-in development override. It is intentionally env-only and leaves the
+/// embedded production build untouched when unset.
+static DASHBOARD_RUNTIME_DIR: OnceLock<Option<PathBuf>> = OnceLock::new();
+const MAX_RUNTIME_INDEX_BYTES: u64 = 1024 * 1024;
+const MAX_RUNTIME_ASSET_BYTES: u64 = 32 * 1024 * 1024;
+
+fn dashboard_runtime_dir() -> Option<&'static FsPath> {
+    DASHBOARD_RUNTIME_DIR
+        .get_or_init(|| std::env::var_os("LLMCONDUIT_DASHBOARD_RUNTIME_DIR").map(PathBuf::from))
+        .as_deref()
+}
+
+/// Canonicalize both sides so a symlink inside a mounted dist cannot turn the
+/// unauthenticated asset route into a file reader outside that mount.
+async fn read_runtime_file(
+    root: &FsPath,
+    relative: &FsPath,
+    max_bytes: u64,
+) -> io::Result<Vec<u8>> {
+    if !root.is_absolute()
+        || !relative
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "invalid dashboard path",
+        ));
+    }
+    let root = tokio::fs::canonicalize(root).await?;
+    let file = tokio::fs::canonicalize(root.join(relative)).await?;
+    if !file.starts_with(&root) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "dashboard path escapes dist",
+        ));
+    }
+    let metadata = tokio::fs::metadata(&file).await?;
+    if !metadata.is_file() || metadata.len() > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid dashboard file",
+        ));
+    }
+    let mut reader = tokio::fs::File::open(file).await?.take(max_bytes + 1);
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes).await?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "dashboard file too large",
+        ));
+    }
+    Ok(bytes)
+}
 
 /// Base CSP for `/dashboard` (the `script-src` gets a per-response nonce appended
 /// for the bootstrap inline script). Matches the D7 spec exactly.
@@ -99,7 +163,7 @@ const GITHUB_LOGIN_SHELL_TEMPLATE: &str = r#"<!doctype html>
 </body>
 </html>"#;
 
-/// `GET /dashboard` — auth-aware shell. Authenticated → the embedded SPA with an
+/// `GET /dashboard` — auth-aware shell. Authenticated → the selected SPA with an
 /// injected bootstrap script + a refreshed CSRF cookie. Unauthenticated → the
 /// login shell. Always carries the dashboard CSP + security headers + `no-store`
 /// (transcripts/credentials must not be cached).
@@ -110,7 +174,7 @@ const GITHUB_LOGIN_SHELL_TEMPLATE: &str = r#"<!doctype html>
     operation_id = "dashboard_index",
     responses(
         (status = 200, description = "HTML. With a valid session (`llmconduit_session` cookie, bearer token, or dev-open): the embedded SPA `index.html` with a nonce-bearing bootstrap script element setting `window.__LLMCONDUIT_DASHBOARD__ = {authenticated: true, csrf_token, mutations_enabled, user, auth_mode}` and a freshly issued `llmconduit_csrf` cookie. Without one: the login shell (token/username form posting to `/dashboard/login`) — never a 401. Both carry the dashboard CSP (per-response `script-src` nonce), `X-Frame-Options: DENY`, `nosniff`, `no-referrer` and `Cache-Control: no-store`.", content_type = "text/html", body = String),
-        (status = 500, description = "Authenticated, but the embedded dashboard build has no `index.html`. Plain text `dashboard index.html missing from embedded build`.", content_type = "text/plain", body = String),
+        (status = 500, description = "Authenticated, but the selected dashboard build has no readable `index.html`.", content_type = "text/plain", body = String),
     )
 )]
 pub async fn dashboard_index(
@@ -121,7 +185,9 @@ pub async fn dashboard_index(
     let nonce = new_nonce();
     let auth_mode = crate::accounts_api::auth_mode(&gateway, &auth).await;
     match session {
-        Some(session) => serve_authenticated_shell(&auth, &nonce, session.user.as_ref(), auth_mode),
+        Some(session) => {
+            serve_authenticated_shell(&auth, &nonce, session.user.as_ref(), auth_mode).await
+        }
         None => serve_login_shell(&auth, &nonce, auth_mode),
     }
 }
@@ -129,21 +195,39 @@ pub async fn dashboard_index(
 /// Build the authenticated SPA response: inject the bootstrap script into
 /// `index.html`, set a fresh `llmconduit_csrf` cookie, and stamp the CSP +
 /// headers.
-fn serve_authenticated_shell(
+async fn serve_authenticated_shell(
     auth: &DashboardAuth,
     nonce: &str,
     user: Option<&crate::accounts::SessionUser>,
     auth_mode: &str,
 ) -> Response {
-    let Some(file) = DASHBOARD_DIST.get_file("index.html") else {
-        return security_headers(
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "dashboard index.html missing from embedded build",
-            )
-                .into_response(),
-            None,
-        );
+    let html = if let Some(root) = dashboard_runtime_dir() {
+        match read_runtime_file(root, FsPath::new("index.html"), MAX_RUNTIME_INDEX_BYTES).await {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            Err(error) => {
+                tracing::error!(%error, dir = %root.display(), "cannot read dashboard runtime index");
+                return security_headers(
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "dashboard runtime index.html unavailable",
+                    )
+                        .into_response(),
+                    None,
+                );
+            }
+        }
+    } else {
+        let Some(file) = DASHBOARD_DIST.get_file("index.html") else {
+            return security_headers(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "dashboard index.html missing from embedded build",
+                )
+                    .into_response(),
+                None,
+            );
+        };
+        String::from_utf8_lossy(file.contents()).into_owned()
     };
     let csrf = auth.issue_csrf_token();
     let user_json = serde_json::to_string(&user).unwrap_or_else(|_| "null".to_string());
@@ -155,7 +239,7 @@ fn serve_authenticated_shell(
         mutations = auth.mutations_enabled(),
         mode = json_string(auth_mode),
     );
-    let html = inject_before_head_close(&String::from_utf8_lossy(file.contents()), &bootstrap);
+    let html = inject_before_head_close(&html, &bootstrap);
 
     let mut response = ([(header::CONTENT_TYPE, "text/html; charset=utf-8")], html).into_response();
     let secure = auth.secure_cookies();
@@ -181,7 +265,7 @@ fn serve_login_shell(auth: &DashboardAuth, nonce: &str, auth_mode: &str) -> Resp
 
 /// `GET /dashboard/assets/{*path}` — serve a static asset from `dist/assets/`.
 /// The captured `path` is the portion AFTER `assets/`; we look it up under
-/// `assets/` in the embedded tree and 404 if absent. Carries the security
+/// `assets/` in the selected tree and 404 if absent. Carries the security
 /// headers (no CSP needed on a sub-resource, but `nosniff`/`no-referrer`/
 /// frame-deny still apply) but NOT `no-store` — hashed Vite assets are
 /// immutable and may be cached.
@@ -194,14 +278,40 @@ fn serve_login_shell(auth: &DashboardAuth, nonce: &str, auth_mode: &str) -> Resp
         ("path" = String, Path, description = "Wildcard (axum `{*path}`): the file path below the embedded `assets/` directory, e.g. `index-DEADBEEF.js`; may contain `/`."),
     ),
     responses(
-        (status = 200, description = "The embedded file bytes. `Content-Type` is derived from the extension (html, js/mjs, css, json/map, svg, png, jpg/jpeg, gif, webp, ico, woff2, woff, ttf, txt, wasm; anything else `application/octet-stream`). No session required; `X-Frame-Options: DENY`, `nosniff`, `no-referrer`, but no `Cache-Control: no-store` (hashed assets are immutable)."),
+        (status = 200, description = "The selected build's file bytes. `Content-Type` is derived from the extension (html, js/mjs, css, json/map, svg, png, jpg/jpeg, gif, webp, ico, woff2, woff, ttf, txt, wasm; anything else `application/octet-stream`). No session required; `X-Frame-Options: DENY`, `nosniff`, `no-referrer`, but no `Cache-Control: no-store` (hashed assets are immutable)."),
         (status = 404, description = "No embedded file at that path. Plain text `asset not found`.", content_type = "text/plain", body = String),
     )
 )]
 pub async fn dashboard_asset(Path(path): Path<String>) -> Response {
     let asset_path = format!("assets/{path}");
+    if let Some(root) = dashboard_runtime_dir() {
+        return match read_runtime_file(root, FsPath::new(&asset_path), MAX_RUNTIME_ASSET_BYTES)
+            .await
+        {
+            Ok(bytes) => {
+                asset_security_headers(serve_file(&asset_path, axum::body::Body::from(bytes)))
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                asset_security_headers((StatusCode::NOT_FOUND, "asset not found").into_response())
+            }
+            Err(error) => {
+                tracing::error!(%error, path = %asset_path, "cannot read dashboard runtime asset");
+                asset_security_headers(
+                    (StatusCode::INTERNAL_SERVER_ERROR, "asset unavailable").into_response(),
+                )
+            }
+        };
+    }
     match DASHBOARD_DIST.get_file(&asset_path) {
-        Some(file) => asset_security_headers(serve_file(&asset_path, file.contents())),
+        Some(file) => asset_security_headers(serve_file(
+            &asset_path,
+            axum::body::Body::from(file.contents()),
+        )),
         None => asset_security_headers((StatusCode::NOT_FOUND, "asset not found").into_response()),
     }
 }
@@ -307,7 +417,7 @@ pub fn first_embedded_asset_path() -> Option<String> {
 
 /// Build a `200 OK` body for an embedded file, tagging `Content-Type` from the
 /// path's extension (falling back to `application/octet-stream`).
-fn serve_file(path: &str, contents: &'static [u8]) -> Response {
+fn serve_file(path: &str, contents: axum::body::Body) -> Response {
     (
         [(
             header::CONTENT_TYPE,
@@ -345,7 +455,9 @@ fn content_type_for(path: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::content_type_for;
+    use super::{content_type_for, read_runtime_file};
+    use std::io::ErrorKind;
+    use std::path::Path;
 
     #[test]
     fn maps_known_vite_asset_extensions() {
@@ -370,5 +482,64 @@ mod tests {
         );
         // No extension: `rsplit('.')` yields the whole string, which we reject.
         assert_eq!(content_type_for("noext"), "application/octet-stream");
+    }
+
+    #[tokio::test]
+    async fn runtime_dist_reads_new_bytes_without_rebuilding() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let index = dir.path().join("index.html");
+        std::fs::write(&index, "first").expect("write first build");
+        assert_eq!(
+            read_runtime_file(dir.path(), Path::new("index.html"), 1024)
+                .await
+                .expect("read first build"),
+            b"first"
+        );
+
+        std::fs::write(&index, "second").expect("write second build");
+        assert_eq!(
+            read_runtime_file(dir.path(), Path::new("index.html"), 1024)
+                .await
+                .expect("read second build"),
+            b"second"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_dist_rejects_parent_paths_and_large_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("asset.js"), b"12345").expect("write asset");
+        assert_eq!(
+            read_runtime_file(dir.path(), Path::new("../asset.js"), 1024)
+                .await
+                .expect_err("parent path rejected")
+                .kind(),
+            ErrorKind::PermissionDenied
+        );
+        assert_eq!(
+            read_runtime_file(dir.path(), Path::new("asset.js"), 4)
+                .await
+                .expect_err("oversized asset rejected")
+                .kind(),
+            ErrorKind::InvalidData
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn runtime_dist_rejects_symlinks_outside_the_mount() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let dist = root.path().join("dist");
+        std::fs::create_dir(&dist).expect("create dist");
+        let outside = root.path().join("private.txt");
+        std::fs::write(&outside, "private").expect("write private file");
+        std::os::unix::fs::symlink(&outside, dist.join("asset.txt")).expect("create symlink");
+        assert_eq!(
+            read_runtime_file(&dist, Path::new("asset.txt"), 1024)
+                .await
+                .expect_err("outside symlink rejected")
+                .kind(),
+            ErrorKind::PermissionDenied
+        );
     }
 }
