@@ -4,7 +4,7 @@ test.describe('Argus dashboard', () => {
   test('login shell renders before auth', async ({ page, consoleErrors }) => {
     await installDeterminism(page);
     await page.goto('/dashboard/?mock=1', { waitUntil: 'networkidle' });
-    await expect(page.getByText(/access token required/i)).toBeVisible();
+    await expect(page.getByText(/dashboard token or management-enabled API key required/i)).toBeVisible();
     await page.evaluate(() => document.fonts.ready.then(() => undefined));
     await expect(page).toHaveScreenshot('login.png');
     expect(consoleErrors, 'console errors on login shell').toEqual([]);
@@ -31,7 +31,7 @@ test.describe('Argus dashboard', () => {
     expect(dimensions.document).toBeLessThanOrEqual(dimensions.viewport);
     expect(dimensions.navScroll).toBeLessThanOrEqual(dimensions.navClient);
     expect(dimensions.statsScroll).toBeLessThanOrEqual(dimensions.statsClient);
-    await expect(page.getByRole('navigation').getByRole('button', { name: 'Access', exact: true })).toBeVisible();
+    await expect(page.getByRole('navigation').getByRole('button', { name: 'Admin', exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: 'Logout', exact: true })).toBeVisible();
     await expect(page.getByTestId('window-selector')).toBeVisible();
     expect(consoleErrors, 'console errors at half-screen width').toEqual([]);
@@ -437,7 +437,7 @@ test.describe('Argus dashboard', () => {
     await page.goto('/dashboard/?mock=1&longclient=1', { waitUntil: 'networkidle' });
     await page.locator('input').first().fill('dev-token');
     await page.getByRole('button', { name: /sign in/i }).click();
-    await expect(page.getByRole('button', { name: 'Flows', exact: true })).toBeVisible();
+    await expect(page.getByRole('navigation', { name: 'Dashboard' }).getByRole('button', { name: 'Chat', exact: true })).toBeVisible();
     await openView(page, VIEWS[0]!); // Flows
     await page.waitForTimeout(400);
 

@@ -18,18 +18,18 @@ export type ViewName =
   | 'access';
 
 /** Each view: the nav-tab label to click + a route-specific "ready" marker (text/regex). */
-export const VIEWS: { name: ViewName; tab: string; ready: string | RegExp }[] = [
-  { name: 'flows', tab: 'Flows', ready: '/v1/responses' },
-  { name: 'topology', tab: 'Topology', ready: /click a node to filter flows/i },
-  { name: 'sankey', tab: 'Sankey', ready: /Token Sankey/i },
-  { name: 'theater', tab: 'Theater', ready: /No active streams/i },
+export const VIEWS: { name: ViewName; section: string; tab: string; ready: string | RegExp }[] = [
+  { name: 'flows', section: 'Observe', tab: 'Flows', ready: '/v1/responses' },
+  { name: 'topology', section: 'Infrastructure', tab: 'Topology', ready: /click a node to filter flows/i },
+  { name: 'sankey', section: 'Infrastructure', tab: 'Sankey', ready: /Token Sankey/i },
+  { name: 'theater', section: 'Infrastructure', tab: 'Theater', ready: /No active streams/i },
   // Gap 16 — the control-room overview (the 5th route). Its masthead text is the ready marker.
-  { name: 'overview', tab: 'Overview', ready: /control room/i },
+  { name: 'overview', section: 'Observe', tab: 'Overview', ready: /control room/i },
   // The live active-sessions board (the dashboard's primary view). Masthead subtitle is the ready marker.
-  { name: 'sessions', tab: 'Sessions', ready: /active in the last 15 minutes/i },
-  { name: 'chat', tab: 'Chat', ready: /^chat$/i },
-  { name: 'providers', tab: 'Providers', ready: /provider inventory/i },
-  { name: 'access', tab: 'Access', ready: /Access control/i },
+  { name: 'sessions', section: 'Observe', tab: 'Sessions', ready: /active in the last 15 minutes/i },
+  { name: 'chat', section: 'Chat', tab: 'Chat', ready: /^chat$/i },
+  { name: 'providers', section: 'Infrastructure', tab: 'Providers', ready: /provider inventory/i },
+  { name: 'access', section: 'Admin', tab: 'Access', ready: /Access control/i },
 ];
 
 /**
@@ -68,13 +68,17 @@ export async function login(page: Page): Promise<void> {
   await page.goto('/dashboard/?mock=1', { waitUntil: 'networkidle' });
   await page.locator('input').first().fill('dev-token');
   await page.getByRole('button', { name: /sign in/i }).click();
-  // Auth flips -> the nav tabs render.
-  await expect(page.getByRole('button', { name: 'Flows', exact: true })).toBeVisible();
+  // Auth flips -> the default Chat section renders.
+  await expect(page.getByRole('navigation', { name: 'Dashboard' }).getByRole('button', { name: 'Chat', exact: true })).toBeVisible();
 }
 
-/** Click a nav tab and wait for that view's route-specific ready marker. */
-export async function openView(page: Page, view: { tab: string; ready: string | RegExp }): Promise<void> {
-  await page.getByRole('navigation').getByRole('button', { name: view.tab, exact: true }).click();
+/** Open a dashboard section and view, then wait for its route-specific ready marker. */
+export async function openView(page: Page, view: { section: string; tab: string; ready: string | RegExp }): Promise<void> {
+  const navigation = page.getByRole('navigation', { name: 'Dashboard' });
+  await navigation.getByRole('button', { name: view.section, exact: true }).click();
+  if (view.tab !== view.section) {
+    await navigation.getByRole('button', { name: view.tab, exact: true }).click();
+  }
   await expect(page.getByText(view.ready).first()).toBeVisible();
   await page.waitForLoadState('networkidle');
   // Self-hosted webfonts must paint before the pixel baseline, else metrics differ run-to-run.
