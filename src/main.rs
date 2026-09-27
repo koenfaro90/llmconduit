@@ -379,6 +379,7 @@ async fn prepare_control_plane_runtime(
     let retention_days = NonZeroU64::new(loaded.storage.retention_days)
         .ok_or("control_plane.storage.retention_days must be greater than zero")?;
     let mut persistence_store: Option<Arc<dyn PersistenceStore>> = None;
+    let mut display_numbers = llmconduit::control_plane_store::DisplayNumbers::default();
     let persistence_queue = match loaded.storage.backend {
         StorageBackend::None => None,
         StorageBackend::Jsonl => {
@@ -412,6 +413,9 @@ async fn prepare_control_plane_runtime(
                 StorageBackend::Postgres => SqlStore::connect_postgres(url).await?,
                 StorageBackend::None | StorageBackend::Jsonl => unreachable!(),
             });
+            let (requests, sessions) = sql.display_number_watermarks().await?;
+            display_numbers =
+                llmconduit::control_plane_store::DisplayNumbers::new(requests, sessions);
             if let Some(legacy) = sql.load_legacy_operational().await? {
                 let operational = match legacy {
                     LegacyOperationalRead::SettingsDocument(document) => {
@@ -477,10 +481,12 @@ async fn prepare_control_plane_runtime(
         infer_sub_sessions = harness_detector.infer_sub_sessions(),
         "harness detection profiles compiled"
     );
-    let session_linker = Arc::new(llmconduit::sessions::SessionLinker::new(
+    let session_linker = Arc::new(llmconduit::sessions::SessionLinker::with_display_numbers(
         harness_detector.infer_sub_sessions(),
+        display_numbers.clone(),
     ));
     let runtime = ControlPlaneRuntime {
+        display_numbers,
         persistence_store,
         persistence_queue: persistence_queue.clone(),
         persistence_keep_media: loaded.storage.keep_media,

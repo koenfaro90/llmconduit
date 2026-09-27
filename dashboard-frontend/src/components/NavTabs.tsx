@@ -4,6 +4,7 @@ import { cn } from '../lib/cn';
 
 const LABELS: Record<RouteName, string> = {
   flows: 'Flows',
+  requests: 'Requests',
   sessions: 'Sessions',
   throughput: 'Throughput',
   activity: 'Activity',
@@ -19,7 +20,7 @@ const LABELS: Record<RouteName, string> = {
 
 const SECTIONS: Array<{ label: string; landing: RouteName; routes: RouteName[] }> = [
   { label: 'Chat', landing: 'chat', routes: ['chat'] },
-  { label: 'Observe', landing: 'overview', routes: ['overview', 'flows', 'sessions', 'throughput', 'activity'] },
+  { label: 'Observe', landing: 'overview', routes: ['overview', 'flows', 'requests', 'sessions', 'throughput', 'activity'] },
   { label: 'Infrastructure', landing: 'providers', routes: ['providers', 'topology', 'sankey', 'theater'] },
   { label: 'Admin', landing: 'access', routes: ['access', 'account'] },
 ];

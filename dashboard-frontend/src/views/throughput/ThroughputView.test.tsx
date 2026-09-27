@@ -17,9 +17,6 @@ describe('ThroughputView (mock history API)', () => {
     const requests = getByTestId('chart-requests');
     expect(requests.querySelectorAll('path[data-series]').length).toBe(2);
     expect(within(requests).getByRole('img').getAttribute('data-available')).toBe('true');
-    // Selecting one model narrows the charts to that series.
-    fireEvent.click(within(getByTestId('throughput-models')).getByText('gpt-4o'));
-    await waitFor(() => expect(getByTestId('chart-requests').querySelectorAll('path[data-series]').length).toBe(1));
     // Engine tile from the scraped vLLM samples, with rates from consecutive scrapes.
     await waitFor(() => expect(getAllByTestId('engine-tile').length).toBe(1));
     const tile = getAllByTestId('engine-tile')[0]!;
@@ -28,5 +25,10 @@ describe('ThroughputView (mock history API)', () => {
     expect(within(tile).getByTestId('engine-hit').textContent).toContain('75%');
     expect(within(tile).getByTestId('engine-prompt').getAttribute('data-quality')).toBe('derived');
     expect(within(tile).getByTestId('engine-prompt').textContent).toContain('2.0k');
+    // Selecting one model narrows the charts to that series.
+    fireEvent.click(within(getByTestId('throughput-models')).getByRole('button', { name: 'Model' }));
+    fireEvent.click(within(getByTestId('throughput-models')).getByRole('checkbox', { name: 'Include Model: gpt-4o' }));
+    await waitFor(() => expect(getByTestId('chart-requests').querySelectorAll('path[data-series]').length).toBe(1));
+    expect(getByTestId('engines-empty')).toBeTruthy();
   });
 });

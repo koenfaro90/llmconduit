@@ -7156,6 +7156,7 @@ async fn persistent_history_session_routes_list_tree_and_requests() {
             .expect("history store"),
     );
     let node = |id: &str, parent: Option<&str>, seen: i64| SessionRow {
+        display_number: None,
         id: id.to_string(),
         parent_id: parent.map(str::to_string),
         kind: "declared".to_string(),
@@ -7317,6 +7318,126 @@ async fn persistent_history_route_reads_sql_without_exposing_key_material() {
     let encoded = body.to_string();
     assert!(!encoded.contains("sk-never-return-this"));
     assert!(!encoded.contains("sha256:"));
+}
+
+#[tokio::test]
+async fn history_clear_requires_admin_csrf_and_exact_confirmation() {
+    use llmconduit::control_plane_store::{
+        PersistenceQueue, PersistenceStore, PersistenceWriter, RequestRow, SqlStore,
+    };
+
+    let store = Arc::new(SqlStore::connect_sqlite("sqlite::memory:").await.unwrap());
+    store
+        .begin_request(RequestRow {
+            id: "history-to-clear".to_string(),
+            client_protocol: "responses".to_string(),
+            client_model: "model".to_string(),
+            status: "completed".to_string(),
+            created_at_ms: 1,
+            ..RequestRow::default()
+        })
+        .await
+        .unwrap();
+    let queue = PersistenceQueue::spawn(
+        Arc::clone(&store) as Arc<dyn PersistenceWriter>,
+        std::num::NonZeroUsize::new(16).unwrap(),
+    );
+    let auth = llmconduit::dashboard_auth::DashboardAuth::from_env(
+        "0.0.0.0:4000".parse().unwrap(),
+        &d13_env(false),
+    )
+    .unwrap()
+    .auth;
+    let gateway = d13_gateway(Arc::new(MockUpstream::default()), Arc::clone(&auth));
+    let gateway = Arc::try_unwrap(gateway)
+        .ok()
+        .unwrap()
+        .with_persistence_store(Arc::clone(&store) as Arc<dyn PersistenceStore>)
+        .with_persistence_queue(queue);
+    let app = d13_router(Arc::new(gateway));
+    let (admin_cookie, _) = auth.issue_session();
+    let csrf = auth.issue_csrf_token();
+    let path = "/dashboard/api/history/clear";
+    let correct = serde_json::json!({ "confirm": "DELETE ALL REQUESTS AND SESSIONS" });
+
+    let unauthenticated = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(path)
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(correct.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthenticated.status().as_u16(), 401);
+    let missing_csrf = accounts_request(
+        &app,
+        "POST",
+        path,
+        &admin_cookie,
+        None,
+        Some(correct.clone()),
+    )
+    .await;
+    assert_eq!(missing_csrf.status().as_u16(), 403);
+    let non_admin = llmconduit::accounts::SessionUser {
+        id: "non-admin".to_string(),
+        username: "viewer".to_string(),
+        is_admin: false,
+    };
+    let (non_admin_cookie, _) = auth.issue_session_for(&non_admin);
+    let forbidden = accounts_request(
+        &app,
+        "POST",
+        path,
+        &non_admin_cookie,
+        Some(&csrf),
+        Some(correct.clone()),
+    )
+    .await;
+    assert_eq!(forbidden.status().as_u16(), 403);
+    let wrong_phrase = accounts_request(
+        &app,
+        "POST",
+        path,
+        &admin_cookie,
+        Some(&csrf),
+        Some(serde_json::json!({ "confirm": "NO" })),
+    )
+    .await;
+    assert_eq!(wrong_phrase.status().as_u16(), 400);
+    assert!(
+        store
+            .get_request("history-to-clear")
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    let cleared = accounts_request(
+        &app,
+        "POST",
+        path,
+        &admin_cookie,
+        Some(&csrf),
+        Some(correct),
+    )
+    .await;
+    assert_eq!(cleared.status().as_u16(), 200);
+    d13_assert_no_store(&cleared);
+    let counts = d13_json(cleared).await;
+    assert_eq!(counts["requests"], 1);
+    assert_eq!(counts["sessions"], 0);
+    assert!(
+        store
+            .get_request("history-to-clear")
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]

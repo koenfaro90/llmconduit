@@ -17,7 +17,7 @@
  * shows a distinct state on 403.
  */
 import { useMemo, useState } from 'react';
-import type { CostConfidence, FlowDetail as FlowDetailDto, FlowSummary, Usage } from '../../api/types';
+import type { CostConfidence, FlowDetail as FlowDetailDto, FlowSummary, HistoryRequest, Usage } from '../../api/types';
 import { useDashboard } from '../../store/hooks';
 import { Button } from '../ui/Button';
 import { StatusChip } from '../FlowTable/StatusChip';
@@ -42,14 +42,14 @@ import { Timeline } from './Timeline';
 import { useScrollSync } from './useScrollSync';
 import { useFlowDetail, type KillState } from './useFlowDetail';
 import { useChainDiff } from './useChainDiff';
-import { divergenceLabel } from '../../views/sessions/sessionsModel';
+import { divergenceLabel } from '../RequestTable/lineageModel';
 import { cn } from '../../lib/cn';
 
 type Tab = 'headers' | 'timeline' | 'error' | 'chain';
 
-export function FlowDetail({ apiCallId, onClose }: { apiCallId: string; onClose: () => void }) {
-  const { detail, frozenDetail, liveFlow, status, seeking, seekMonitorSeq, seekAtMs, mutationsEnabled, kill, killState } =
-    useFlowDetail(apiCallId);
+export function FlowDetail({ apiCallId, onClose, historyRequest }: { apiCallId: string; onClose: () => void; historyRequest?: HistoryRequest }) {
+  const { detail, frozenDetail, liveFlow, status, seeking, historical, seekMonitorSeq, seekAtMs, mutationsEnabled, kill, killState } =
+    useFlowDetail(apiCallId, historyRequest);
   const monitor = useDashboard((s) => s.monitor);
   const monitorSeqs = useDashboard((s) => s.monitorSeqs);
   const priceTable = useDashboard((s) => s.priceTable);
@@ -230,6 +230,7 @@ export function FlowDetail({ apiCallId, onClose }: { apiCallId: string; onClose:
     <section className="flex min-h-0 w-[46%] min-w-[420px] flex-col border-l border-line bg-panel" data-testid="flow-detail" aria-label="flow detail">
       <DetailHeader
         apiCallId={apiCallId}
+        displayNumber={historyRequest?.display_number ?? liveFlow?.display_number ?? frozenDetail?.display_number}
         flow={liveFlow}
         detail={frozenDetail}
         cost={cost}
@@ -248,6 +249,7 @@ export function FlowDetail({ apiCallId, onClose }: { apiCallId: string; onClose:
         onClose={onClose}
       />
 
+      {historical && <div className="border-b border-line px-3 py-1 text-[10px] text-text-muted">Durable history · live capture and normalized body may no longer be available</div>}
       <SearchBar value={query} onChange={setQuery} />
 
       {/* Chain tab: the two-pane chain diff REPLACES the transformation panes (same footprint). */}
@@ -282,7 +284,7 @@ export function FlowDetail({ apiCallId, onClose }: { apiCallId: string; onClose:
           diff={diffAB}
           side="left"
           query={query}
-          emptyLabel={emptyBodyLabel(seeking)}
+          emptyLabel={emptyBodyLabel(seeking, historical)}
           scrollRef={sync.refFor(0)}
           onScroll={sync.bind(0)}
         />
@@ -292,7 +294,7 @@ export function FlowDetail({ apiCallId, onClose }: { apiCallId: string; onClose:
           diff={diffBMiddle}
           side="both"
           query={query}
-          emptyLabel={emptyBodyLabel(seeking)}
+          emptyLabel={emptyBodyLabel(seeking, historical)}
           scrollRef={sync.refFor(1)}
           onScroll={sync.bind(1)}
         />
@@ -302,7 +304,7 @@ export function FlowDetail({ apiCallId, onClose }: { apiCallId: string; onClose:
           diff={diffBC}
           side="right"
           query={query}
-          emptyLabel={emptyBodyLabel(seeking)}
+          emptyLabel={emptyBodyLabel(seeking, historical)}
           scrollRef={sync.refFor(2)}
           onScroll={sync.bind(2)}
         />
@@ -321,7 +323,7 @@ export function FlowDetail({ apiCallId, onClose }: { apiCallId: string; onClose:
             leaks; Timeline reads the cut-bounded monitor join (finding 1). */}
         {tab === 'headers' && <HeadersTab headers={frozenDetail?.inbound_headers} />}
         {tab === 'timeline' && <Timeline events={join.events} />}
-        {tab === 'error' && <ErrorTab detail={frozenDetail} liveFlow={liveFlow} joinError={join.error} seeking={seeking} />}
+        {tab === 'error' && <ErrorTab detail={frozenDetail} liveFlow={liveFlow} joinError={join.error} seeking={seeking} historical={historical} />}
         {tab === 'chain' && <ChainTab flow={liveFlow} predecessorId={chain.predecessorId} error={chain.error} />}
       </div>
 
@@ -337,7 +339,8 @@ export function FlowDetail({ apiCallId, onClose }: { apiCallId: string; onClose:
 }
 
 /** When seeking a historical cut, a missing body is explicitly evicted (D5 tradeoff). */
-function emptyBodyLabel(seeking: boolean): string {
+function emptyBodyLabel(seeking: boolean, historical = false): string {
+  if (historical) return 'body not stored in durable history';
   return seeking ? 'body evicted (snapshot)' : 'body evicted';
 }
 
@@ -389,6 +392,7 @@ function SearchBar({ value, onChange }: { value: string; onChange: (v: string) =
 
 function DetailHeader({
   apiCallId,
+  displayNumber,
   flow,
   detail,
   cost,
@@ -407,6 +411,7 @@ function DetailHeader({
   onClose,
 }: {
   apiCallId: string;
+  displayNumber?: number | null;
   flow: FlowSummary | null;
   detail: FlowDetailDto | null;
   cost: number | null;
@@ -446,7 +451,8 @@ function DetailHeader({
     <header className="flex shrink-0 flex-col gap-2 border-b border-line bg-panel-raised px-3 py-2">
       <div className="flex items-center gap-2">
         <StatusChip status={status} terminalReason={flow?.terminal_reason ?? detail?.terminal_reason} />
-        <span className="font-mono text-sm text-text" title={apiCallId}>{apiCallId}</span>
+        <span className="font-mono text-sm text-text" title={apiCallId}>{displayNumber == null ? apiCallId : `R-${displayNumber}`}</span>
+        {displayNumber != null && <span className="truncate font-mono text-[10px] text-text-muted" title={apiCallId}>{apiCallId}</span>}
         {seeking && (
           <span className="rounded-sm bg-status-cooling/15 px-1.5 py-0.5 text-[10px] uppercase text-status-cooling" data-testid="seek-badge">
             snapshot
@@ -686,7 +692,7 @@ function HeadersTab({ headers }: { headers?: Record<string, string> }) {
  * and labelled as the HISTORICAL state ("capture unavailable on historical view"), DISTINCT from the
  * live capture-disabled state — never "No error.".
  */
-function ErrorTab({ detail, liveFlow, joinError, seeking }: { detail: FlowDetailDto | null; liveFlow: FlowSummary | null; joinError: string | null; seeking: boolean }) {
+function ErrorTab({ detail, liveFlow, joinError, seeking, historical = false }: { detail: FlowDetailDto | null; liveFlow: FlowSummary | null; joinError: string | null; seeking: boolean; historical?: boolean }) {
   const reason = liveFlow?.terminal_reason ?? detail?.terminal_reason ?? null;
   const status = liveFlow?.status ?? detail?.status ?? null;
   // A GENUINE error/failure — the flow FAILED, or a monitor error was reported. This (NOT a benign
@@ -707,7 +713,7 @@ function ErrorTab({ detail, liveFlow, joinError, seeking }: { detail: FlowDetail
   // The captured body is LIVE-detail only. While SEEKING a historical flow there is no live body, so
   // the unavailable reason is the HISTORICAL view (not "capture disabled") — labelled honestly so the
   // operator knows the body may exist live but is unavailable for this frozen cut.
-  const captureUnavailableHistorical = seeking;
+  const captureUnavailableHistorical = seeking || historical;
   return (
     <div className="px-3 py-2 text-xs" data-testid="error-tab">
       {reason && (
@@ -745,8 +751,10 @@ function ErrorTab({ detail, liveFlow, joinError, seeking }: { detail: FlowDetail
           ) : captureUnavailableHistorical ? (
             // SEEKING a historical flow: the body is LIVE-only, so it is UNAVAILABLE for this frozen cut
             // (NOT "capture disabled" — it may exist live). Explicit, never a blank implying "no error".
-            <div className="rounded-sm border border-dashed border-line/70 px-1.5 py-1 text-[10px] italic text-text-muted" data-testid="error-capture-historical" title="the captured upstream error body is live-detail only and is unavailable on a historical (seeked) view — not a claim that no error occurred">
-              capture unavailable on historical view — the upstream error body is live-only. Not "no error".
+            <div className="rounded-sm border border-dashed border-line/70 px-1.5 py-1 text-[10px] italic text-text-muted" data-testid="error-capture-historical" title={historical ? 'the upstream error body was not stored in durable history' : 'the captured upstream error body is live-detail only and is unavailable on a historical (seeked) view — not a claim that no error occurred'}>
+              {historical
+                ? 'capture unavailable on historical view — the upstream error body was not stored durably. Not "no error".'
+                : 'capture unavailable on historical view — the upstream error body is live-only. Not "no error".'}
             </div>
           ) : (
             // LIVE error flow, capture DISABLED / no body / evicted — explicit (NOT a blank).

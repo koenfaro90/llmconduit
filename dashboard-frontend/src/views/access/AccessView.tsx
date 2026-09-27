@@ -14,6 +14,8 @@ import type {
 } from '../../api/types';
 import { Button } from '../../components/ui/Button';
 import { Panel } from '../../components/ui/Panel';
+import { DataTable } from '../../components/ui/DataTable';
+import type { DataTableColumn } from '../../components/ui/dataTableModel';
 import { cn } from '../../lib/cn';
 import {
   buildAccessOverview,
@@ -493,9 +495,19 @@ function AccessSummaryCards({ overview, deniedToday }: { overview: ReturnType<ty
 function AccessOverview({ overview, onNavigate }: { overview: ReturnType<typeof buildAccessOverview>; onNavigate: (tab: AccessTab) => void }) {
   const [search, setSearch] = useState('');
   const filteredRows = overview.principalRows.filter((row) => [row.name, row.id, ...row.allowedModels, ...row.providers].join(' ').toLowerCase().includes(search.trim().toLowerCase()));
+  const columns: DataTableColumn<AccessPrincipalRow>[] = [
+    { id: 'name', label: 'Name', width: '20%', required: true, render: (row) => <div className="flex items-center gap-2"><span className="grid h-7 w-7 shrink-0 place-items-center rounded border border-accent/30 bg-accent/10 text-accent">{row.kind === 'service_account' ? '◇' : '♙'}</span><div><div className="font-medium">{row.name}</div><div className="font-mono text-[10px] text-text-muted">{row.kind.replace('_', ' ')} · {row.id}</div></div></div> },
+    { id: 'access', label: 'Access', width: '16%', render: (row) => <><span className="rounded bg-accent/15 px-2 py-1 text-[10px] font-medium text-accent">{row.policyCount > 0 ? `${row.policyCount} direct ${row.policyCount === 1 ? 'policy' : 'policies'}` : 'Inherited / default'}</span><div className="mt-1 text-[10px] text-text-muted">{formatAccessList(row.endpoints, 'No direct API rule')}</div></> },
+    { id: 'models', label: 'Models', width: '17%', render: (row) => <><div className="flex flex-wrap gap-1">{(row.allowedModels.length ? row.allowedModels : ['Unspecified']).slice(0, 2).map((model) => <span key={model} className="rounded bg-line/60 px-1.5 py-0.5">{model}</span>)}</div>{row.deniedModels.length > 0 && <div className="text-[10px] text-status-down">denies {formatAccessList(row.deniedModels)}</div>}</> },
+    { id: 'schedule', label: 'Schedule', width: '13%', render: (row) => <><div>{row.schedule}</div><div className="text-[10px] text-text-muted">{row.sessionLimit} concurrent</div></> },
+    { id: 'keys', label: 'Key health', width: '13%', render: (row) => <><Status enabled={row.enabled && row.activeKeyCount > 0} /><div className="mt-1 text-[10px] text-text-muted">{row.activeKeyCount} active · {row.revokedKeyCount} disabled</div></> },
+    { id: 'used', label: 'Last used', width: '16%', render: (row) => <><div>{row.usageTokens === null ? '—' : `${row.usageTokens.toLocaleString()} tokens`}</div><div className="text-[10px] text-text-muted">{row.usageCost === null ? 'Usage unavailable' : `$${row.usageCost.toFixed(4)} · ${row.usageConfidence}`}</div></> },
+    { id: 'actions', label: '', width: '5%', required: true, render: (row) => <button aria-label={`Actions for ${row.name}`} className="rounded px-2 py-1 text-text-muted hover:bg-line/50 hover:text-text">•••</button> },
+  ];
   return <div className="space-y-4">
     <Panel className="p-4"><h2 className="text-sm font-semibold">How access works</h2><div className="mt-3 grid md:grid-cols-3"><StepCard index="1" title="Identity" detail="Add a person or service that needs access." /><StepCard index="2" title="Policy" detail="Choose which models they can use and set any limits." /><StepCard index="3" title="API key" detail="Create a secure key with the right permissions." /></div></Panel>
-    <Panel className="overflow-hidden"><div className="flex flex-wrap items-center justify-between gap-3 border-b border-line px-4 py-3"><div><h2 className="text-sm font-semibold">Direct access</h2><p className="mt-0.5 text-[10px] text-text-muted">Policies assigned directly to each identity; group and role access is managed separately.</p></div><div className="flex items-center gap-2"><label className="relative"><span className="absolute left-2.5 top-1.5 text-text-muted">⌕</span><input aria-label="Search access" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search people, services, or models…" className="w-64 rounded border border-line bg-bg py-1.5 pl-7 pr-2 text-xs outline-none focus:border-accent" /></label><button className="rounded border border-line px-3 py-1.5 text-xs text-text-muted hover:text-text" onClick={() => setSearch('')}>⌁ Filter</button></div></div><div className="overflow-auto"><table className="w-full min-w-[860px] text-left text-xs"><thead className="text-text-muted"><tr><th className="px-4 py-2">Name</th><th className="px-3 py-2">Access</th><th className="px-3 py-2">Models</th><th className="px-3 py-2">Schedule</th><th className="px-3 py-2">Key health</th><th className="px-3 py-2">Last used</th><th className="px-2 py-2" /></tr></thead><tbody>{filteredRows.map((row) => <PrincipalAccessRow key={row.id} row={row} />)}</tbody></table>{filteredRows.length === 0 && <div className="p-6 text-center text-xs text-text-muted">No identities match this search.</div>}</div></Panel>
+    <Panel className="overflow-hidden"><div className="flex flex-wrap items-center justify-between gap-3 border-b border-line px-4 py-3"><div><h2 className="text-sm font-semibold">Direct access</h2><p className="mt-0.5 text-[10px] text-text-muted">Policies assigned directly to each identity; group and role access is managed separately.</p></div><div className="flex items-center gap-2"><label className="relative"><span className="absolute left-2.5 top-1.5 text-text-muted">⌕</span><input aria-label="Search access" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search people, services, or models…" className="w-64 rounded border border-line bg-bg py-1.5 pl-7 pr-2 text-xs outline-none focus:border-accent" /></label><button className="rounded border border-line px-3 py-1.5 text-xs text-text-muted hover:text-text" onClick={() => setSearch('')}>⌁ Filter</button></div></div><DataTable id="direct-access" rows={filteredRows} rowKey={(row) => row.id} columns={columns}
+      clientPageSize={25} minWidth={860} emptyMessage="No identities match this search." /></Panel>
     <Panel className="overflow-hidden"><div className="flex items-center justify-between border-b border-line px-4 py-3"><h2 className="text-sm font-semibold">Needs attention</h2><span className="rounded-full bg-status-cooling/15 px-2 py-0.5 text-[10px] font-semibold text-status-cooling">{overview.attentionItems.length} items</span></div><div className="divide-y divide-line">{overview.attentionItems.length === 0 ? <div className="p-4 text-xs text-text-muted">No access-control issues detected.</div> : overview.attentionItems.map((item) => <AttentionItem key={item.id} item={item} onReview={() => onNavigate(item.id.startsWith('key:') || item.id.startsWith('nokey:') ? 'keys' : 'policies')} />)}</div></Panel>
   </div>;
 }
@@ -519,7 +531,12 @@ function ApiKeysSection({ users, apiKeys, principal, keyName, busy, setKeyPrinci
         <input aria-label="Key name" value={keyName} onChange={(event) => setKeyName(event.target.value)} placeholder="Key name" className="rounded border border-line bg-bg px-2 py-1.5 text-sm" />
         <Button disabled={busy || !principal || !keyName.trim()} type="submit">Create key</Button>
       </form>
-      <Table headers={['Key', 'Last used', 'Status', '']}>{apiKeys.map((key) => <KeyRow key={key.id} apiKey={key} busy={busy} onRevoke={() => onRevoke(key)} onRotate={() => onRotate(key)} />)}</Table>
+      <DataTable id="access-keys" rows={apiKeys} rowKey={(key) => key.id} clientPageSize={25} columns={[
+        { id: 'key', label: 'Key', width: '45%', required: true, render: (key) => <><div>{key.name}</div><div className="font-mono text-[10px] text-text-muted">{key.prefix}... · {key.id}</div></> },
+        { id: 'used', label: 'Last used', width: '20%', render: (key) => timestamp(key.last_used_at) },
+        { id: 'status', label: 'Status', width: '15%', render: (key) => <Status enabled={key.enabled} /> },
+        { id: 'actions', label: '', width: '20%', required: true, render: (key) => <div className="flex justify-end gap-1"><Button variant="ghost" disabled={busy || !key.enabled} onClick={() => onRotate(key)}>Rotate</Button><Button variant="danger" disabled={busy || !key.enabled} onClick={() => onRevoke(key)}>Revoke</Button></div> },
+      ]} />
     </Section>
   );
 }
@@ -550,7 +567,11 @@ function PeopleSection(props: {
           <input aria-label="User display name" value={props.userName} onChange={(event) => props.setUserName(event.target.value)} placeholder="Display name" className="min-w-0 flex-1 rounded border border-line bg-bg px-2 py-1.5 text-sm outline-none focus:border-accent" />
           <Button disabled={props.busy || !props.userName.trim()} type="submit">Create user</Button>
         </form>
-        <Table headers={['Name', 'Kind', 'Status']}>{props.users.map((user) => <tr key={user.id}><Cell><div>{user.display_name}</div><div className="font-mono text-[10px] text-text-muted">{user.id}</div></Cell><Cell muted>{user.kind}</Cell><Cell><Status enabled={user.enabled} /></Cell></tr>)}</Table>
+        <DataTable id="access-people" rows={props.users} rowKey={(user) => user.id} clientPageSize={25} columns={[
+          { id: 'name', label: 'Name', width: '50%', required: true, render: (user) => <><div>{user.display_name}</div><div className="font-mono text-[10px] text-text-muted">{user.id}</div></> },
+          { id: 'kind', label: 'Kind', width: '25%', render: (user) => user.kind },
+          { id: 'status', label: 'Status', width: '25%', render: (user) => <Status enabled={user.enabled} /> },
+        ]} />
       </Section>
       <Section title="Groups and roles" count={props.groups.length + props.roles.length}>
         <div className="grid gap-3 border-b border-line p-3 sm:grid-cols-2">
@@ -697,17 +718,33 @@ function toggleValue<T extends string>(values: T[], value: T): T[] {
 }
 
 function SessionsSection({ sessions, busy, onRevoke }: { sessions: AuthSession[]; busy: boolean; onRevoke: (session: AuthSession) => void }) {
-  return <Section title="Active sessions" count={sessions.length}><Table headers={['Session', 'Target', 'Started', '']}>{sessions.map((session) => <SessionRow key={session.id} session={session} busy={busy} onRevoke={() => onRevoke(session)} />)}</Table></Section>;
+  return <Section title="Active sessions" count={sessions.length}><DataTable id="access-sessions" rows={sessions} rowKey={(session) => session.id} clientPageSize={25} columns={[
+    { id: 'session', label: 'Session', width: '35%', required: true, render: (session) => <><div>{session.kind}</div><div className="font-mono text-[10px] text-text-muted">{session.id}</div></> },
+    { id: 'target', label: 'Target', width: '30%', render: (session) => <>{session.endpoint ?? 'dashboard'}<div className="font-mono text-[10px] text-text-muted">{session.requested_model ?? session.principal_id}</div></> },
+    { id: 'started', label: 'Started', width: '20%', render: (session) => timestamp(session.started_at) },
+    { id: 'actions', label: '', width: '15%', required: true, render: (session) => <Button variant="danger" disabled={busy} onClick={() => onRevoke(session)}>Terminate</Button> },
+  ]} /></Section>;
 }
 
 function AuditCostSection({ usage, audit, pricing }: { usage: AuthUsageRow[]; audit: Array<{ id: string; timestamp: string; actor: string; action: string; target: string; outcome: 'ok' | 'denied' | 'error' }>; pricing: Array<{ provider: string; model: string; input_per_1k: string; output_per_1k: string; confidence: string; source: string }> }) {
-  return (
-    <div className="grid gap-4 xl:grid-cols-3">
-      <Section title="Usage and cost" count={usage.length}><Table headers={['Attribution', 'Requests', 'Tokens', 'Cost']}>{usage.map((row) => <tr key={`${row.dimension}:${row.value}`}><Cell>{row.dimension}<div className="font-mono text-[10px] text-text-muted">{row.value}</div></Cell><Cell>{row.requests}</Cell><Cell>{row.prompt_tokens === null || row.completion_tokens === null ? '-' : (row.prompt_tokens + row.completion_tokens).toLocaleString()}</Cell><Cell><div>{cost(row)}</div><div className="text-[10px] uppercase text-text-muted">{row.cost_confidence}</div></Cell></tr>)}</Table></Section>
-      <Section title="Audit log" count={audit.length}><Table headers={['Time', 'Action', 'Outcome']}>{audit.map((event) => <tr key={event.id}><Cell muted>{timestamp(event.timestamp)}</Cell><Cell><div>{event.action}</div><div className="font-mono text-[10px] text-text-muted">{event.actor} -&gt; {event.target}</div></Cell><Cell><span className={event.outcome === 'denied' ? 'text-status-down' : 'text-status-healthy'}>{event.outcome}</span></Cell></tr>)}</Table></Section>
-      <Section title="Pricing provenance" count={pricing.length}><Table headers={['Model', 'Price', 'Quality']}>{pricing.map((row) => <tr key={`${row.provider}:${row.model}`}><Cell>{row.model}<div className="font-mono text-[10px] text-text-muted">{row.provider}</div></Cell><Cell>${row.input_per_1k} in / ${row.output_per_1k} out</Cell><Cell><div className="uppercase">{row.confidence}</div><div className="text-[10px] text-text-muted">{row.source}</div></Cell></tr>)}</Table></Section>
-    </div>
-  );
+  return <div className="grid gap-4 xl:grid-cols-3">
+    <Section title="Usage and cost" count={usage.length}><DataTable id="access-usage" rows={usage} rowKey={(row) => `${row.dimension}:${row.value}`} clientPageSize={25} columns={[
+      { id: 'attribution', label: 'Attribution', width: '35%', required: true, render: (row) => <>{row.dimension}<div className="font-mono text-[10px] text-text-muted">{row.value}</div></> },
+      { id: 'requests', label: 'Requests', width: '20%', render: (row) => row.requests },
+      { id: 'tokens', label: 'Tokens', width: '20%', render: (row) => row.prompt_tokens === null || row.completion_tokens === null ? '-' : (row.prompt_tokens + row.completion_tokens).toLocaleString() },
+      { id: 'cost', label: 'Cost', width: '25%', render: (row) => <><div>{cost(row)}</div><div className="text-[10px] uppercase text-text-muted">{row.cost_confidence}</div></> },
+    ]} /></Section>
+    <Section title="Audit log" count={audit.length}><DataTable id="access-audit" rows={audit} rowKey={(event) => event.id} clientPageSize={25} columns={[
+      { id: 'time', label: 'Time', width: '30%', required: true, render: (event) => timestamp(event.timestamp) },
+      { id: 'action', label: 'Action', width: '50%', render: (event) => <><div>{event.action}</div><div className="font-mono text-[10px] text-text-muted">{event.actor} -&gt; {event.target}</div></> },
+      { id: 'outcome', label: 'Outcome', width: '20%', render: (event) => <span className={event.outcome === 'denied' ? 'text-status-down' : 'text-status-healthy'}>{event.outcome}</span> },
+    ]} /></Section>
+    <Section title="Pricing provenance" count={pricing.length}><DataTable id="access-pricing" rows={pricing} rowKey={(row) => `${row.provider}:${row.model}`} clientPageSize={25} columns={[
+      { id: 'model', label: 'Model', width: '40%', required: true, render: (row) => <>{row.model}<div className="font-mono text-[10px] text-text-muted">{row.provider}</div></> },
+      { id: 'price', label: 'Price', width: '35%', render: (row) => `$${row.input_per_1k} in / $${row.output_per_1k} out` },
+      { id: 'quality', label: 'Quality', width: '25%', render: (row) => <><div className="uppercase">{row.confidence}</div><div className="text-[10px] text-text-muted">{row.source}</div></> },
+    ]} /></Section>
+  </div>;
 }
 
 function CreateAccessDrawer(props: {
@@ -829,20 +866,6 @@ function CreateAccessDrawer(props: {
   );
 }
 
-function PrincipalAccessRow({ row }: { row: AccessPrincipalRow }) {
-  return (
-    <tr>
-      <Cell><div className="flex items-center gap-2"><span className="grid h-7 w-7 shrink-0 place-items-center rounded border border-accent/30 bg-accent/10 text-accent">{row.kind === 'service_account' ? '◇' : '♙'}</span><div><div className="font-medium">{row.name}</div><div className="font-mono text-[10px] text-text-muted">{row.kind.replace('_', ' ')} · {row.id}</div></div></div></Cell>
-      <Cell><span className="rounded bg-accent/15 px-2 py-1 text-[10px] font-medium text-accent">{row.policyCount > 0 ? `${row.policyCount} direct ${row.policyCount === 1 ? 'policy' : 'policies'}` : 'Inherited / default'}</span><div className="mt-1 text-[10px] text-text-muted">{formatAccessList(row.endpoints, 'No direct API rule')}</div></Cell>
-      <Cell><div className="flex flex-wrap gap-1">{(row.allowedModels.length ? row.allowedModels : ['Unspecified']).slice(0, 2).map((model) => <span key={model} className="rounded bg-line/60 px-1.5 py-0.5">{model}</span>)}</div>{row.deniedModels.length > 0 && <div className="text-[10px] text-status-down">denies {formatAccessList(row.deniedModels)}</div>}</Cell>
-      <Cell><div>{row.schedule}</div><div className="text-[10px] text-text-muted">{row.sessionLimit} concurrent</div></Cell>
-      <Cell><Status enabled={row.enabled && row.activeKeyCount > 0} /><div className="mt-1 text-[10px] text-text-muted">{row.activeKeyCount} active · {row.revokedKeyCount} disabled</div></Cell>
-      <Cell><div>{row.usageTokens === null ? '—' : `${row.usageTokens.toLocaleString()} tokens`}</div><div className="text-[10px] text-text-muted">{row.usageCost === null ? 'Usage unavailable' : `$${row.usageCost.toFixed(4)} · ${row.usageConfidence}`}</div></Cell>
-      <Cell><button aria-label={`Actions for ${row.name}`} className="rounded px-2 py-1 text-text-muted hover:bg-line/50 hover:text-text">•••</button></Cell>
-    </tr>
-  );
-}
-
 function StepCard({ index, title, detail }: { index: string; title: string; detail: string }) {
   return <div className={cn('relative flex items-center gap-3 px-3 py-2', index !== '3' && "md:after:absolute md:after:right-0 md:after:top-1/2 md:after:text-lg md:after:text-accent md:after:content-['→']")}><div className="grid h-10 w-10 shrink-0 place-items-center rounded-full border border-accent/40 bg-accent/15 font-mono text-sm font-bold text-accent">{index}</div><div><div className="font-medium">{title}</div><div className="mt-0.5 text-xs leading-relaxed text-text-muted">{detail}</div></div></div>;
 }
@@ -859,10 +882,6 @@ function ReviewLine({ label, value }: { label: string; value: string }) {
   return <div className="rounded border border-line bg-bg p-3"><div className="text-[10px] font-bold uppercase tracking-[0.14em] text-text-muted">{label}</div><div className="mt-1 break-words">{value}</div></div>;
 }
 
-function Cell({ children, muted }: { children: ReactNode; muted?: boolean }) {
-  return <td className={cn('border-t border-line px-3 py-2 align-top', muted && 'text-text-muted')}>{children}</td>;
-}
-
 function Section({ title, count, children }: { title: string; count?: number; children: ReactNode }) {
   return (
     <Panel className="min-w-0 overflow-hidden">
@@ -873,10 +892,6 @@ function Section({ title, count, children }: { title: string; count?: number; ch
       {children}
     </Panel>
   );
-}
-
-function Table({ headers, children }: { headers: string[]; children: ReactNode }) {
-  return <table className="w-full text-left text-xs"><thead className="text-text-muted"><tr>{headers.map((header) => <th key={header} className="px-3 py-1">{header}</th>)}</tr></thead><tbody>{children}</tbody></table>;
 }
 
 function Status({ enabled }: { enabled: boolean }) {
@@ -901,14 +916,6 @@ function tabLabel(tab: AccessTab): string {
     case 'sessions': return 'Sessions';
     case 'audit': return 'Audit & cost';
   }
-}
-
-function KeyRow({ apiKey, busy, onRevoke, onRotate }: { apiKey: AuthApiKey; busy: boolean; onRevoke: () => void; onRotate: () => void }) {
-  return <tr><Cell><div>{apiKey.name}</div><div className="font-mono text-[10px] text-text-muted">{apiKey.prefix}... · {apiKey.id}</div></Cell><Cell muted>{timestamp(apiKey.last_used_at)}</Cell><Cell><Status enabled={apiKey.enabled} /></Cell><Cell><div className="flex justify-end gap-1"><Button variant="ghost" disabled={busy || !apiKey.enabled} onClick={onRotate}>Rotate</Button><Button variant="danger" disabled={busy || !apiKey.enabled} onClick={onRevoke}>Revoke</Button></div></Cell></tr>;
-}
-
-function SessionRow({ session, busy, onRevoke }: { session: AuthSession; busy: boolean; onRevoke: () => void }) {
-  return <tr><Cell><div>{session.kind}</div><div className="font-mono text-[10px] text-text-muted">{session.id}</div></Cell><Cell>{session.endpoint ?? 'dashboard'}<div className="font-mono text-[10px] text-text-muted">{session.requested_model ?? session.principal_id}</div></Cell><Cell muted>{timestamp(session.started_at)}</Cell><Cell><Button variant="danger" disabled={busy} onClick={onRevoke}>Terminate</Button></Cell></tr>;
 }
 
 function CopyOnceDialog({ created, onClose }: { created: CreatedAuthApiKey; onClose: () => void }) {

@@ -21,11 +21,12 @@
  *  - token totals come from `aggregate` (SQL, reported-classes-only) or the
  *    live ring; `null` ⇒ `—`, never a fabricated `0`.
  */
-import type { ActiveSessionsResponse, SessionAggregate, SessionRequestStub, SessionRow } from '../../api/types';
+import type { ActiveSessionsResponse, HistoryRequest, SessionAggregate, SessionRequestStub, SessionRow } from '../../api/types';
 
 /** One row of the board: the hub cut + resolved attribution labels. */
 export interface ActiveSessionRow {
   session: SessionRow;
+  child_count: number | null;
   requests: SessionRequestStub[];
   requests_1m: number;
   requests_5m: number;
@@ -46,11 +47,48 @@ export interface ActiveRequestRow {
   error: string | null;
 }
 
+/** Feed live hub stubs into the shared request table; unknown history fields stay unknown. */
+export function activeStubHistoryRow(stub: SessionRequestStub, session: SessionRow): HistoryRequest {
+  return {
+    id: stub.api_call_id,
+    display_number: stub.display_number,
+    session_display_number: session.display_number,
+    response_id: null,
+    user_id: session.user_id,
+    virtual_key_id: session.virtual_key_id,
+    client_protocol: '',
+    client_model: stub.client_model,
+    backend: null,
+    resolved_model: null,
+    status: stub.status,
+    created_at_ms: stub.created_at_ms,
+    completed_at_ms: null,
+    first_token_at_ms: null,
+    input_tokens: stub.input_tokens ?? null,
+    output_tokens: stub.output_tokens ?? null,
+    cached_tokens: stub.cached_tokens ?? null,
+    error: stub.error ?? null,
+    terminal_reason: stub.terminal_reason ?? null,
+    client_label: session.client_label,
+    harness: session.harness,
+    harness_version: session.harness_version,
+    harness_session_id: session.external_id,
+    session_id: session.id,
+    chain_parent_request_id: null,
+    item_count: null,
+    shared_prefix_items: null,
+    divergence_kind: null,
+    divergence_index: null,
+    cache_bust: null,
+  };
+}
+
 /** Project the REST body onto board rows (identity + a stable order). */
 export function activeSessionRows(body: ActiveSessionsResponse | undefined): ActiveSessionRow[] {
   if (!body) return [];
   return body.sessions.map((entry) => ({
     session: entry as SessionRow,
+    child_count: entry.child_count ?? null,
     requests: entry.requests,
     requests_1m: entry.requests_1m,
     requests_5m: entry.requests_5m,

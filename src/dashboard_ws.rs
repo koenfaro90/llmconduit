@@ -308,6 +308,8 @@ pub enum DashboardPayload {
     FlowStatus {
         api_call_id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
+        display_number: Option<i64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
         response_id: Option<String>,
         status: FlowStatus,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -866,6 +868,7 @@ fn flow_status_payload(record: &FlowRecord, terminal: MonitorTerminal) -> Dashbo
     let finished_ms = record.finished_ms.or(completed_at_ms);
     DashboardPayload::FlowStatus {
         api_call_id: record.api_call_id.clone(),
+        display_number: record.display_number,
         response_id: record.response_id.clone(),
         status,
         model_requested: record.model_requested.clone(),
@@ -1799,6 +1802,7 @@ mod tests {
         );
         match &flow.batch[1] {
             DashboardPayload::FlowStatus {
+                display_number: None,
                 api_call_id,
                 status,
                 finished_ms,
@@ -2444,6 +2448,7 @@ mod tests {
             domain: Domain::Flow,
             seq: 5,
             batch: vec![DashboardPayload::FlowStatus {
+                display_number: None,
                 session: Default::default(),
                 api_call_id: "api_001".to_string(),
                 response_id: Some("resp_001".to_string()),
@@ -2526,6 +2531,7 @@ mod tests {
 
         // PRESENT: a live flow that has reached first content + recorded its serving attempt.
         let present = DashboardPayload::FlowStatus {
+            display_number: None,
             session: Default::default(),
             api_call_id: "api_001".to_string(),
             response_id: Some("resp_001".to_string()),
@@ -2566,6 +2572,7 @@ mod tests {
 
         // ABSENT: a freshly-opened flow with no spine measured yet omits every spine key.
         let absent = DashboardPayload::FlowStatus {
+            display_number: None,
             session: Default::default(),
             api_call_id: "api_002".to_string(),
             response_id: None,

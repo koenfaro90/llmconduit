@@ -1,15 +1,19 @@
-//! Auth-gated, read-only access to durable inference history.
+//! Auth-gated durable inference history and its explicit administrative clear.
 //!
 //! Route registration lives inside the existing dashboard API router, so the
 //! same `require_session`, `no-store`, CSP, and clickjacking protections apply.
 //! This module never exposes users, settings, API-key rows, or secret digests.
 
 use crate::control_plane_store::{
-    EventRow, MetricSample, RequestSummary, UsageBucket, UsageFilter,
+    EventRow, HistoryClearCounts, MetricSample, RequestListFilter, RequestSummary, SessionFacets,
+    SessionTableFilter, SessionTablePage, UsageBucket, UsageFilter,
 };
+use crate::dashboard_auth::{AuthSession, DashboardAuth};
 use crate::engine::Gateway;
+use axum::Extension;
 use axum::Json;
 use axum::extract::{Path, Query, State};
+use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
@@ -28,6 +32,7 @@ const HISTORY_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_EVENTS: usize = 64;
 const MAX_ID_BYTES: usize = 256;
 const MAX_KEY_ID_BYTES: usize = 256;
+const CLEAR_HISTORY_CONFIRMATION: &str = "DELETE ALL REQUESTS AND SESSIONS";
 
 const _: () = {
     assert!(DEFAULT_REQUEST_LIMIT >= 1 && DEFAULT_REQUEST_LIMIT <= MAX_REQUEST_LIMIT);
@@ -45,6 +50,83 @@ const _: () = {
 pub struct HistoryRequestsQuery {
     /// Maximum rows to return; clamped to 1..=500, default 100.
     pub limit: Option<i64>,
+    /// Case-insensitive literal substring across request, model, backend, client and session identifiers.
+    pub q: Option<String>,
+    pub status: Option<String>,
+    pub model: Option<String>,
+    pub backend: Option<String>,
+    /// JSON arrays of exact model/provider names selected by the dashboard facet controls.
+    pub model_values: Option<String>,
+    pub model_exclude: Option<bool>,
+    pub backend_values: Option<String>,
+    pub backend_exclude: Option<bool>,
+    pub protocol: Option<String>,
+    /// Exact stable user id, typically selected by display name in the UI.
+    pub user_id: Option<String>,
+    /// Exact stable key id, typically selected by display name in the UI.
+    pub virtual_key_id: Option<String>,
+    /// JSON object of named `{include:[],exclude:[]}` categorical facets.
+    pub facets: Option<String>,
+    /// Optional inclusive start of the request creation range (epoch ms).
+    pub since_ms: Option<i64>,
+    /// Optional exclusive end of the request creation range (epoch ms).
+    pub until_ms: Option<i64>,
+    /// Both cursor fields must be supplied together; no time window is applied by default.
+    pub before_ms: Option<i64>,
+    pub before_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct FacetValues {
+    include: Vec<String>,
+    exclude: Vec<String>,
+}
+
+fn parse_facets(raw: Option<String>, allowed: &[&str]) -> Result<Option<String>, ()> {
+    let Some(raw) = raw else { return Ok(None) };
+    if raw.len() > 32_768 {
+        return Err(());
+    }
+    let facets: std::collections::BTreeMap<String, FacetValues> =
+        serde_json::from_str(&raw).map_err(|_| ())?;
+    if facets.len() > allowed.len()
+        || facets.iter().any(|(name, values)| {
+            !allowed.contains(&name.as_str())
+                || values.include.len() > 64
+                || values.exclude.len() > 64
+                || values
+                    .include
+                    .iter()
+                    .chain(&values.exclude)
+                    .any(|value| value.is_empty() || value.len() > MAX_ID_BYTES)
+                || values
+                    .include
+                    .iter()
+                    .any(|value| values.exclude.contains(value))
+        })
+    {
+        return Err(());
+    }
+    serde_json::to_string(&facets).map(Some).map_err(|_| ())
+}
+
+#[utoipa::path(
+    get,
+    path = "/dashboard/api/history/requests/facets",
+    tag = "history",
+    operation_id = "history_request_facets",
+    responses((status = 200, body = crate::control_plane_store::RequestFacets))
+)]
+pub async fn history_request_facets(State(gateway): State<Arc<Gateway>>) -> Response {
+    let Some(store) = gateway.persistence_store() else {
+        return unavailable();
+    };
+    match tokio::time::timeout(HISTORY_QUERY_TIMEOUT, store.request_facets()).await {
+        Ok(Ok(facets)) => json_response(StatusCode::OK, &facets),
+        Ok(Err(error)) => internal_error("list request facets", &error),
+        Err(_) => query_timeout(),
+    }
 }
 
 #[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
@@ -77,6 +159,88 @@ pub(crate) struct RequestsBody {
     requests: Vec<RequestSummary>,
     /// The effective (clamped) limit that bounded the query.
     limit: i64,
+    /// More rows match the current filters after this page.
+    has_more: bool,
+    /// Pass these two fields back to fetch the next page.
+    next_before_ms: Option<i64>,
+    next_before_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ClearHistoryRequest {
+    /// Must exactly match `DELETE ALL REQUESTS AND SESSIONS`.
+    confirm: String,
+}
+
+/// `POST /dashboard/api/history/clear` removes the durable inference-history
+/// tables in one transaction. The dashboard session and CSRF token are both
+/// checked here; the typed phrase is independently enforced server-side.
+#[utoipa::path(
+    post,
+    path = "/dashboard/api/history/clear",
+    tag = "history",
+    operation_id = "clear_inference_history",
+    request_body = ClearHistoryRequest,
+    responses(
+        (status = 200, description = "Deleted request and session counts.", body = HistoryClearCounts),
+        (status = 400, description = "Confirmation phrase did not match."),
+        (status = 401, description = "No valid dashboard session."),
+        (status = 403, description = "Administrator role or CSRF token required."),
+        (status = 503, description = "Persistent history is disabled.")
+    )
+)]
+pub async fn clear_inference_history(
+    State(gateway): State<Arc<Gateway>>,
+    Extension(auth): Extension<Arc<DashboardAuth>>,
+    session: AuthSession,
+    headers: HeaderMap,
+    Json(body): Json<ClearHistoryRequest>,
+) -> Response {
+    let admin = session
+        .user
+        .as_ref()
+        .map_or_else(|| session.bootstrap_admin(), |user| user.is_admin);
+    if !admin {
+        return json_response(
+            StatusCode::FORBIDDEN,
+            &error_body("administrator role required"),
+        );
+    }
+    if !auth.verify_csrf(&headers) {
+        return json_response(
+            StatusCode::FORBIDDEN,
+            &error_body("missing or invalid CSRF token"),
+        );
+    }
+    if body.confirm != CLEAR_HISTORY_CONFIRMATION {
+        return bad_request("confirmation phrase did not match");
+    }
+    if gateway.persistence_store().is_none() {
+        return unavailable();
+    }
+    let Some(queue) = gateway.persistence_queue() else {
+        return unavailable();
+    };
+    match queue.clear_history().await {
+        Ok(counts) => {
+            gateway.session_linker().clear();
+            gateway.session_hub().clear();
+            tracing::warn!(
+                requests = counts.requests,
+                sessions = counts.sessions,
+                "inference history cleared by dashboard administrator"
+            );
+            json_response(StatusCode::OK, &counts)
+        }
+        Err(error) => {
+            tracing::error!(error, "durable inference history clear failed");
+            json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &error_body("durable inference history clear failed"),
+            )
+        }
+    }
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -124,8 +288,8 @@ pub(crate) struct HistoryReadFailed {
     operation: String,
 }
 
-/// `GET /dashboard/api/history/requests?limit=`. Newest first; the SQL query is
-/// bounded before execution, rather than loading an unbounded result and slicing.
+/// `GET /dashboard/api/history/requests`. Newest first, with server-side
+/// filters and a stable (timestamp, id) cursor. No default time window.
 #[utoipa::path(
     get,
     path = "/dashboard/api/history/requests",
@@ -133,7 +297,7 @@ pub(crate) struct HistoryReadFailed {
     operation_id = "history_requests",
     params(HistoryRequestsQuery),
     responses(
-        (status = 200, description = "The newest requests, bounded by the clamped `limit`.", body = RequestsBody),
+        (status = 200, description = "A filtered page of durable requests, with a next-page cursor.", body = RequestsBody),
         (status = 400, description = "Malformed query string (e.g. a non-integer `limit`), rejected by the query extractor; plain-text body.", body = String, content_type = "text/plain"),
         (status = 401, description = "No valid dashboard session; plain-text body `unauthorized`.", body = String, content_type = "text/plain"),
         (status = 500, description = "Store read failed; `operation` is `list durable requests`.", body = HistoryReadFailed),
@@ -159,8 +323,120 @@ async fn history_requests_from(
         .limit
         .unwrap_or(DEFAULT_REQUEST_LIMIT)
         .clamp(1, MAX_REQUEST_LIMIT);
-    match tokio::time::timeout(HISTORY_QUERY_TIMEOUT, store.list_requests(limit)).await {
-        Ok(Ok(requests)) => json_response(StatusCode::OK, &RequestsBody { requests, limit }),
+    if query.before_ms.is_some() != query.before_id.is_some()
+        || query.before_ms.is_some_and(|value| value < 0)
+    {
+        return bad_request("before_ms and before_id must be supplied together");
+    }
+    if query.since_ms.is_some_and(|value| value < 0)
+        || query.until_ms.is_some_and(|value| value < 0)
+        || query
+            .since_ms
+            .zip(query.until_ms)
+            .is_some_and(|(since, until)| since >= until)
+    {
+        return bad_request("invalid request time range");
+    }
+    let valid = |value: &Option<String>| value.as_ref().is_none_or(|v| v.len() <= MAX_ID_BYTES);
+    if !valid(&query.q)
+        || !valid(&query.model)
+        || !valid(&query.backend)
+        || !valid(&query.protocol)
+        || !valid(&query.before_id)
+        || !valid(&query.status)
+        || !valid(&query.user_id)
+        || !valid(&query.virtual_key_id)
+    {
+        return bad_request("request filter exceeds 256 bytes");
+    }
+    let parse_values = |raw: Option<String>| -> Result<Option<String>, ()> {
+        let Some(raw) = raw else {
+            return Ok(None);
+        };
+        let values: Vec<String> = serde_json::from_str(&raw).map_err(|_| ())?;
+        if values.len() > 64
+            || values
+                .iter()
+                .any(|value| value.is_empty() || value.len() > MAX_ID_BYTES)
+        {
+            return Err(());
+        }
+        if values.is_empty() {
+            Ok(None)
+        } else {
+            serde_json::to_string(&values).map(Some).map_err(|_| ())
+        }
+    };
+    let model_values_json = match parse_values(query.model_values) {
+        Ok(v) => v,
+        Err(()) => return bad_request("invalid request facet values"),
+    };
+    let backend_values_json = match parse_values(query.backend_values) {
+        Ok(v) => v,
+        Err(()) => return bad_request("invalid request facet values"),
+    };
+    let facets_json = match parse_facets(
+        query.facets,
+        &[
+            "status", "model", "provider", "protocol", "user", "key", "harness", "kind", "session",
+        ],
+    ) {
+        Ok(value) => value,
+        Err(()) => return bad_request("invalid request facets"),
+    };
+    let normalize = |value: Option<String>| {
+        value
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    let filter = RequestListFilter {
+        search: normalize(query.q),
+        status: normalize(query.status),
+        model: normalize(query.model),
+        backend: normalize(query.backend),
+        model_values_json,
+        model_exclude: query.model_exclude.unwrap_or(false),
+        backend_values_json,
+        backend_exclude: query.backend_exclude.unwrap_or(false),
+        protocol: normalize(query.protocol),
+        user_id: normalize(query.user_id),
+        virtual_key_id: normalize(query.virtual_key_id),
+        facets_json,
+        since_ms: query.since_ms,
+        until_ms: query.until_ms,
+        before_ms: query.before_ms,
+        before_id: query.before_id,
+    };
+    if filter.before_id.as_ref().is_some_and(|v| v.is_empty()) {
+        return bad_request("before_id must not be empty");
+    }
+    match tokio::time::timeout(
+        HISTORY_QUERY_TIMEOUT,
+        store.list_requests_filtered(&filter, limit + 1),
+    )
+    .await
+    {
+        Ok(Ok(mut requests)) => {
+            let has_more = requests.len() > limit as usize;
+            requests.truncate(limit as usize);
+            let (next_before_ms, next_before_id) = if has_more {
+                requests.last().map_or((None, None), |row| {
+                    (Some(row.created_at_ms), Some(row.id.clone()))
+                })
+            } else {
+                (None, None)
+            };
+            json_response(
+                StatusCode::OK,
+                &RequestsBody {
+                    requests,
+                    limit,
+                    has_more,
+                    next_before_ms,
+                    next_before_id,
+                },
+            )
+        }
         Ok(Err(error)) => internal_error("list durable requests", &error),
         Err(_) => query_timeout(),
     }
@@ -437,6 +713,159 @@ pub struct HistorySessionsQuery {
     pub limit: Option<usize>,
     /// `true` (default) lists only top-level nodes.
     pub roots: Option<bool>,
+    /// Keyset cursor from the previous page's `next_before_ms`.
+    pub before_ms: Option<i64>,
+    /// Keyset cursor from the previous page's `next_before_id`.
+    pub before_id: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+#[serde(deny_unknown_fields)]
+pub struct HistorySessionTableQuery {
+    pub q: Option<String>,
+    pub user_id: Option<String>,
+    pub virtual_key_id: Option<String>,
+    pub harness: Option<String>,
+    pub kind: Option<String>,
+    /// JSON object of named `{include:[],exclude:[]}` categorical facets.
+    pub facets: Option<String>,
+    pub first_since_ms: Option<i64>,
+    pub first_until_ms: Option<i64>,
+    pub last_since_ms: Option<i64>,
+    pub last_until_ms: Option<i64>,
+    pub min_requests: Option<i64>,
+    pub max_requests: Option<i64>,
+    pub min_children: Option<i64>,
+    pub max_children: Option<i64>,
+    pub min_input_tokens: Option<i64>,
+    pub max_input_tokens: Option<i64>,
+    pub min_output_tokens: Option<i64>,
+    pub max_output_tokens: Option<i64>,
+    pub min_in_flight: Option<i64>,
+    pub max_in_flight: Option<i64>,
+    pub sort_by: Option<String>,
+    pub descending: Option<bool>,
+    pub offset: Option<i64>,
+    pub limit: Option<i64>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/dashboard/api/history/sessions/table",
+    tag = "history",
+    operation_id = "history_session_table",
+    params(HistorySessionTableQuery),
+    responses((status = 200, body = SessionTablePage))
+)]
+pub async fn history_session_table(
+    State(gateway): State<Arc<Gateway>>,
+    Query(query): Query<HistorySessionTableQuery>,
+) -> Response {
+    let Some(store) = gateway.persistence_store() else {
+        return unavailable();
+    };
+    let valid = |value: &Option<String>| value.as_ref().is_none_or(|v| v.len() <= MAX_ID_BYTES);
+    if ![
+        &query.q,
+        &query.user_id,
+        &query.virtual_key_id,
+        &query.harness,
+        &query.kind,
+    ]
+    .into_iter()
+    .all(valid)
+        || query
+            .facets
+            .as_ref()
+            .is_some_and(|value| value.len() > 32_768)
+        || query.offset.is_some_and(|v| v < 0)
+        || [
+            query.first_since_ms,
+            query.first_until_ms,
+            query.last_since_ms,
+            query.last_until_ms,
+            query.min_requests,
+            query.max_requests,
+            query.min_children,
+            query.max_children,
+            query.min_input_tokens,
+            query.max_input_tokens,
+            query.min_output_tokens,
+            query.max_output_tokens,
+            query.min_in_flight,
+            query.max_in_flight,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|v| v < 0)
+        || [
+            (query.min_requests, query.max_requests),
+            (query.min_children, query.max_children),
+            (query.min_input_tokens, query.max_input_tokens),
+            (query.min_output_tokens, query.max_output_tokens),
+            (query.min_in_flight, query.max_in_flight),
+        ]
+        .into_iter()
+        .any(|(min, max)| min.zip(max).is_some_and(|(min, max)| min > max))
+    {
+        return bad_request("invalid session table filter");
+    }
+    let normalize =
+        |value: Option<String>| value.map(|v| v.trim().to_owned()).filter(|v| !v.is_empty());
+    let facets_json = match parse_facets(query.facets, &["user", "key", "harness", "kind"]) {
+        Ok(value) => value,
+        Err(()) => return bad_request("invalid session facets"),
+    };
+    let filter = SessionTableFilter {
+        search: normalize(query.q),
+        user_id: normalize(query.user_id),
+        virtual_key_id: normalize(query.virtual_key_id),
+        harness: normalize(query.harness),
+        kind: normalize(query.kind),
+        facets_json,
+        first_since_ms: query.first_since_ms,
+        first_until_ms: query.first_until_ms,
+        last_since_ms: query.last_since_ms,
+        last_until_ms: query.last_until_ms,
+        min_requests: query.min_requests,
+        max_requests: query.max_requests,
+        min_children: query.min_children,
+        max_children: query.max_children,
+        min_input_tokens: query.min_input_tokens,
+        max_input_tokens: query.max_input_tokens,
+        min_output_tokens: query.min_output_tokens,
+        max_output_tokens: query.max_output_tokens,
+        min_in_flight: query.min_in_flight,
+        max_in_flight: query.max_in_flight,
+        sort_by: query.sort_by.unwrap_or_else(|| "last".to_owned()),
+        descending: query.descending.unwrap_or(true),
+        offset: query.offset.unwrap_or(0),
+        limit: query.limit.unwrap_or(100).clamp(1, 500),
+    };
+    match tokio::time::timeout(HISTORY_QUERY_TIMEOUT, store.list_session_table(&filter)).await {
+        Ok(Ok(page)) => json_response(StatusCode::OK, &page),
+        Ok(Err(error)) => internal_error("list session table", &error),
+        Err(_) => query_timeout(),
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/dashboard/api/history/sessions/facets",
+    tag = "history",
+    operation_id = "history_session_facets",
+    responses((status = 200, body = SessionFacets))
+)]
+pub async fn history_session_facets(State(gateway): State<Arc<Gateway>>) -> Response {
+    let Some(store) = gateway.persistence_store() else {
+        return unavailable();
+    };
+    match tokio::time::timeout(HISTORY_QUERY_TIMEOUT, store.session_facets()).await {
+        Ok(Ok(facets)) => json_response(StatusCode::OK, &facets),
+        Ok(Err(error)) => internal_error("session facets", &error),
+        Err(_) => query_timeout(),
+    }
 }
 
 #[derive(Debug, Default, Deserialize, utoipa::IntoParams)]
@@ -445,31 +874,47 @@ pub struct HistorySessionsQuery {
 pub struct HistorySessionQuery {
     /// Maximum requests to include; clamped to 1..=1000, default 200.
     pub limit: Option<usize>,
+    /// Keyset cursor from the previous page's `next_before_ms`.
+    pub before_ms: Option<i64>,
+    /// Keyset cursor from the previous page's `next_before_id`.
+    pub before_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub(crate) struct SessionNode {
+    #[serde(flatten)]
+    session: crate::sessions::SessionRow,
+    /// Number of direct child sessions; grandchildren are counted on their own node.
+    child_count: i64,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub(crate) struct SessionsBody {
     /// Most recently active first.
-    sessions: Vec<crate::sessions::SessionRow>,
+    sessions: Vec<SessionNode>,
     /// Effective window start (epoch ms).
     since_ms: i64,
     /// The effective (clamped) limit.
     limit: usize,
     /// `true` when more sessions matched than `limit`.
     truncated: bool,
+    next_before_ms: Option<i64>,
+    next_before_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub(crate) struct SessionDetailBody {
-    session: crate::sessions::SessionRow,
+    session: SessionNode,
     /// Parent chain, nearest first; at most 32 entries.
     ancestors: Vec<crate::sessions::SessionRow>,
     /// Direct child nodes.
-    children: Vec<crate::sessions::SessionRow>,
-    /// The newest requests of this node, at most `limit`.
+    children: Vec<SessionNode>,
+    /// A page of this node's requests, oldest first within the page.
     requests: Vec<RequestSummary>,
-    /// `true` when more than `limit` requests exist and older ones were dropped.
+    /// `true` when older requests remain available on another page.
     requests_truncated: bool,
+    next_before_ms: Option<i64>,
+    next_before_id: Option<String>,
 }
 
 /// Default lookback for the sessions list.
@@ -521,32 +966,64 @@ async fn history_sessions_from(
         .unwrap_or(DEFAULT_SESSIONS_LIMIT)
         .clamp(1, MAX_SESSIONS_LIMIT);
     let roots_only = query.roots.unwrap_or(true);
-    match tokio::time::timeout(
-        HISTORY_QUERY_TIMEOUT,
-        store.list_sessions(since_ms, roots_only, limit.saturating_add(1)),
-    )
-    .await
+    if query.before_ms.is_some() != query.before_id.is_some()
+        || query.before_ms.is_some_and(|value| value < 0)
+        || query
+            .before_id
+            .as_ref()
+            .is_some_and(|value| value.is_empty() || value.len() > MAX_ID_BYTES)
     {
-        Ok(Ok(mut sessions)) => {
-            let truncated = sessions.len() > limit;
-            sessions.truncate(limit);
-            json_response(
-                StatusCode::OK,
-                &SessionsBody {
-                    sessions,
-                    since_ms,
-                    limit,
-                    truncated,
-                },
+        return bad_request("before_ms and before_id must be supplied together and valid");
+    }
+    let read = async {
+        let mut sessions = store
+            .list_sessions(
+                since_ms,
+                roots_only,
+                query.before_ms,
+                query.before_id.as_deref(),
+                limit.saturating_add(1),
             )
-        }
+            .await?;
+        let truncated = sessions.len() > limit;
+        sessions.truncate(limit);
+        let (next_before_ms, next_before_id) = if truncated {
+            sessions.last().map_or((None, None), |last| {
+                (Some(last.last_seen_ms), Some(last.id.clone()))
+            })
+        } else {
+            (None, None)
+        };
+        let ids = sessions
+            .iter()
+            .map(|session| session.id.clone())
+            .collect::<Vec<_>>();
+        let child_counts = store.session_child_counts(&ids).await?;
+        let sessions = sessions
+            .into_iter()
+            .map(|session| SessionNode {
+                child_count: *child_counts.get(&session.id).unwrap_or(&0),
+                session,
+            })
+            .collect();
+        Ok::<_, String>(SessionsBody {
+            sessions,
+            since_ms,
+            limit,
+            truncated,
+            next_before_ms,
+            next_before_id,
+        })
+    };
+    match tokio::time::timeout(HISTORY_QUERY_TIMEOUT, read).await {
+        Ok(Ok(body)) => json_response(StatusCode::OK, &body),
         Ok(Err(error)) => internal_error("read durable sessions", &error),
         Err(_) => query_timeout(),
     }
 }
 
-/// `GET /dashboard/api/history/sessions/:id?limit=`. One node with its
-/// ancestors (nearest first), direct children, and newest requests.
+/// `GET /dashboard/api/history/sessions/:id?limit=&before_ms=&before_id=`.
+/// One node with its ancestors (nearest first), direct children, and a page of requests.
 #[utoipa::path(
     get,
     path = "/dashboard/api/history/sessions/{id}",
@@ -557,8 +1034,8 @@ async fn history_sessions_from(
         HistorySessionQuery,
     ),
     responses(
-        (status = 200, description = "The node with its ancestors (nearest first, at most 32), direct children, and newest requests.", body = SessionDetailBody),
-        (status = 400, description = "`invalid session id` (empty or longer than 256 bytes) (JSON); or a malformed query string rejected by the query extractor (plain text).", body = crate::openapi::DashboardError),
+        (status = 200, description = "The node with its ancestors (nearest first, at most 32), direct children, and a page of requests.", body = SessionDetailBody),
+        (status = 400, description = "Invalid session id or cursor (JSON); or a malformed query string rejected by the query extractor (plain text).", body = crate::openapi::DashboardError),
         (status = 401, description = "No valid dashboard session; plain-text body `unauthorized`.", body = String, content_type = "text/plain"),
         (status = 404, description = "`session not found`.", body = crate::openapi::DashboardError),
         (status = 500, description = "Store read failed; `operation` is `read durable session`.", body = HistoryReadFailed),
@@ -585,6 +1062,15 @@ async fn history_session_detail_from(
     if id.is_empty() || id.len() > MAX_ID_BYTES {
         return bad_request("invalid session id");
     }
+    if query.before_ms.is_some() != query.before_id.is_some()
+        || query.before_ms.is_some_and(|value| value < 0)
+        || query
+            .before_id
+            .as_ref()
+            .is_some_and(|value| value.is_empty() || value.len() > MAX_ID_BYTES)
+    {
+        return bad_request("before_ms and before_id must be supplied together and valid");
+    }
     let limit = query
         .limit
         .unwrap_or(DEFAULT_SESSION_REQUESTS)
@@ -606,17 +1092,49 @@ async fn history_session_detail_from(
             ancestors.push(parent);
         }
         let children = store.session_children(&id).await?;
-        let mut requests = store.session_requests(&id, limit.saturating_add(1)).await?;
+        let child_ids = children
+            .iter()
+            .map(|child| child.id.clone())
+            .collect::<Vec<_>>();
+        let child_counts = store.session_child_counts(&child_ids).await?;
+        let child_count = i64::try_from(children.len()).unwrap_or(i64::MAX);
+        let children = children
+            .into_iter()
+            .map(|child| SessionNode {
+                child_count: *child_counts.get(&child.id).unwrap_or(&0),
+                session: child,
+            })
+            .collect();
+        let mut requests = store
+            .session_requests(
+                &id,
+                query.before_ms,
+                query.before_id.as_deref(),
+                limit.saturating_add(1),
+            )
+            .await?;
         let requests_truncated = requests.len() > limit;
         if requests_truncated {
             requests.drain(..requests.len() - limit);
         }
+        let (next_before_ms, next_before_id) = if requests_truncated {
+            requests.first().map_or((None, None), |first| {
+                (Some(first.created_at_ms), Some(first.id.clone()))
+            })
+        } else {
+            (None, None)
+        };
         Ok(Some(SessionDetailBody {
-            session,
+            session: SessionNode {
+                session,
+                child_count,
+            },
             ancestors,
             children,
             requests,
             requests_truncated,
+            next_before_ms,
+            next_before_id,
         }))
     };
     match tokio::time::timeout(HISTORY_QUERY_TIMEOUT, detail).await {
@@ -1006,6 +1524,159 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn historic_sessions_page_without_an_age_cutoff() {
+        let store = sqlite_store().await;
+        for (id, last_seen_ms) in [("old", 1), ("tie-a", 2), ("tie-b", 2)] {
+            store
+                .upsert_session(crate::sessions::SessionRow {
+                    display_number: None,
+                    id: id.to_string(),
+                    parent_id: None,
+                    kind: "inferred".to_string(),
+                    harness: "oh-my-pi".to_string(),
+                    harness_version: None,
+                    external_id: None,
+                    session_kind: None,
+                    client_label: None,
+                    virtual_key_id: None,
+                    user_id: None,
+                    depth: 0,
+                    root_request_id: None,
+                    spawned_by_request_id: None,
+                    first_seen_ms: last_seen_ms,
+                    last_seen_ms,
+                    request_count: 1,
+                })
+                .await
+                .unwrap();
+        }
+        store
+            .upsert_session(crate::sessions::SessionRow {
+                display_number: None,
+                id: "old-child".to_string(),
+                parent_id: Some("old".to_string()),
+                kind: "inferred".to_string(),
+                harness: "oh-my-pi".to_string(),
+                harness_version: None,
+                external_id: None,
+                session_kind: None,
+                client_label: None,
+                virtual_key_id: None,
+                user_id: None,
+                depth: 1,
+                root_request_id: None,
+                spawned_by_request_id: None,
+                first_seen_ms: 1,
+                last_seen_ms: 1,
+                request_count: 1,
+            })
+            .await
+            .unwrap();
+        let first = response_json(
+            history_sessions_from(
+                Some(Arc::clone(&store)),
+                HistorySessionsQuery {
+                    since_ms: Some(0),
+                    limit: Some(1),
+                    ..Default::default()
+                },
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(first["sessions"][0]["id"], "tie-b");
+        assert_eq!(first["truncated"], true);
+        let second = response_json(
+            history_sessions_from(
+                Some(Arc::clone(&store)),
+                HistorySessionsQuery {
+                    since_ms: Some(0),
+                    limit: Some(1),
+                    before_ms: first["next_before_ms"].as_i64(),
+                    before_id: first["next_before_id"].as_str().map(str::to_owned),
+                    ..Default::default()
+                },
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(second["sessions"][0]["id"], "tie-a");
+        let third = response_json(
+            history_sessions_from(
+                Some(store),
+                HistorySessionsQuery {
+                    since_ms: Some(0),
+                    limit: Some(1),
+                    before_ms: second["next_before_ms"].as_i64(),
+                    before_id: second["next_before_id"].as_str().map(str::to_owned),
+                    ..Default::default()
+                },
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(third["sessions"][0]["id"], "old");
+        assert_eq!(third["truncated"], false);
+        assert_eq!(third["sessions"][0]["child_count"], 1);
+    }
+
+    #[tokio::test]
+    async fn session_detail_pages_all_requests_with_tied_timestamps() {
+        let store = sqlite_store().await;
+        store
+            .upsert_session(crate::sessions::SessionRow {
+                display_number: None,
+                id: "root".to_string(),
+                parent_id: None,
+                kind: "inferred".to_string(),
+                harness: "oh-my-pi".to_string(),
+                harness_version: None,
+                external_id: None,
+                session_kind: None,
+                client_label: None,
+                virtual_key_id: None,
+                user_id: None,
+                depth: 0,
+                root_request_id: None,
+                spawned_by_request_id: None,
+                first_seen_ms: 1,
+                last_seen_ms: 2,
+                request_count: 3,
+            })
+            .await
+            .unwrap();
+        for (id, timestamp) in [("old", 1), ("tie-a", 2), ("tie-b", 2)] {
+            let mut row = request(id, timestamp);
+            row.session_id = Some("root".to_string());
+            store.begin_request(row).await.unwrap();
+        }
+        let mut before_ms = None;
+        let mut before_id = None;
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            let page = response_json(
+                history_session_detail_from(
+                    Some(Arc::clone(&store)),
+                    "root".to_string(),
+                    HistorySessionQuery {
+                        limit: Some(1),
+                        before_ms,
+                        before_id,
+                    },
+                )
+                .await,
+            )
+            .await;
+            seen.push(page["requests"][0]["id"].as_str().unwrap().to_string());
+            before_ms = page["next_before_ms"].as_i64();
+            before_id = page["next_before_id"].as_str().map(str::to_owned);
+        }
+        assert_eq!(seen, ["tie-b", "tie-a", "old"]);
+        assert!(before_ms.is_none());
+        assert!(before_id.is_none());
+    }
+
+    #[tokio::test]
     async fn error_responses_never_echo_store_details() {
         let response = internal_error("unit test", "postgres://secret@host/table missing");
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
@@ -1064,7 +1735,10 @@ mod tests {
 
         let list = history_requests_from(
             Some(Arc::clone(&store)),
-            HistoryRequestsQuery { limit: Some(1) },
+            HistoryRequestsQuery {
+                limit: Some(1),
+                ..Default::default()
+            },
         )
         .await;
         assert_eq!(list.status(), StatusCode::OK);
@@ -1072,11 +1746,13 @@ mod tests {
         assert_eq!(list["limit"], 1);
         assert_eq!(list["requests"].as_array().unwrap().len(), 1);
         assert_eq!(list["requests"][0]["id"], "new");
+        assert_eq!(list["requests"][0]["status"], "running");
 
         let clamped = history_requests_from(
             Some(Arc::clone(&store)),
             HistoryRequestsQuery {
                 limit: Some(i64::MAX),
+                ..Default::default()
             },
         )
         .await;
@@ -1088,6 +1764,158 @@ mod tests {
         assert_eq!(detail["events"][0]["seq"], 1);
         assert_eq!(detail["events"][1]["seq"], 2);
         assert!(detail.get("secret").is_none());
+    }
+
+    #[tokio::test]
+    async fn request_list_filters_and_pages_without_a_time_window() {
+        let store = sqlite_store().await;
+        for (id, timestamp, model, status) in [
+            ("ancient", 1, "model-a", "completed"),
+            ("same-a", 2, "model-a", "failed"),
+            ("same-b", 2, "model-a", "failed"),
+            ("other", 3, "model-b", "completed"),
+        ] {
+            let mut row = request(id, timestamp);
+            row.client_model = model.to_string();
+            row.status = status.to_string();
+            row.user_id = Some(
+                if model == "model-a" {
+                    "user-a"
+                } else {
+                    "user-b"
+                }
+                .to_string(),
+            );
+            row.virtual_key_id =
+                Some(if status == "failed" { "key-f" } else { "key-c" }.to_string());
+            if id == "other" {
+                row.harness = Some("codex".to_string());
+                row.harness_session_id = Some("human-session".to_string());
+            }
+            store.begin_request(row).await.expect("begin");
+        }
+
+        let first = response_json(
+            history_requests_from(
+                Some(Arc::clone(&store)),
+                HistoryRequestsQuery {
+                    limit: Some(1),
+                    model: Some("model-a".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(first["requests"][0]["id"], "same-b");
+        assert_eq!(first["has_more"], true);
+        let second = response_json(
+            history_requests_from(
+                Some(Arc::clone(&store)),
+                HistoryRequestsQuery {
+                    limit: Some(1),
+                    model: Some("model-a".to_string()),
+                    before_ms: first["next_before_ms"].as_i64(),
+                    before_id: first["next_before_id"].as_str().map(str::to_owned),
+                    ..Default::default()
+                },
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(second["requests"][0]["id"], "same-a");
+        let third = response_json(
+            history_requests_from(
+                Some(Arc::clone(&store)),
+                HistoryRequestsQuery {
+                    limit: Some(1),
+                    model: Some("model-a".to_string()),
+                    before_ms: second["next_before_ms"].as_i64(),
+                    before_id: second["next_before_id"].as_str().map(str::to_owned),
+                    ..Default::default()
+                },
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(third["requests"][0]["id"], "ancient");
+        assert_eq!(third["has_more"], false);
+
+        let identities = response_json(
+            history_requests_from(
+                Some(Arc::clone(&store)),
+                HistoryRequestsQuery {
+                    user_id: Some("user-a".to_string()),
+                    virtual_key_id: Some("key-f".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(identities["requests"].as_array().unwrap().len(), 2);
+        let harness = response_json(
+            history_requests_from(
+                Some(Arc::clone(&store)),
+                HistoryRequestsQuery {
+                    q: Some("human-session".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(harness["requests"][0]["id"], "other");
+
+        let filtered = response_json(
+            history_requests_from(
+                Some(Arc::clone(&store)),
+                HistoryRequestsQuery {
+                    q: Some("same_".to_string()),
+                    status: Some("failed".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(filtered["requests"].as_array().unwrap().len(), 0); // '_' is literal, not a wildcard
+        let filtered = response_json(
+            history_requests_from(
+                Some(Arc::clone(&store)),
+                HistoryRequestsQuery {
+                    q: Some("same-".to_string()),
+                    status: Some("failed".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(filtered["requests"].as_array().unwrap().len(), 2);
+        let dated = response_json(
+            history_requests_from(
+                Some(Arc::clone(&store)),
+                HistoryRequestsQuery {
+                    since_ms: Some(1),
+                    until_ms: Some(2),
+                    ..Default::default()
+                },
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(dated["requests"][0]["id"], "ancient");
+        assert_eq!(dated["requests"].as_array().unwrap().len(), 1);
+        let invalid = history_requests_from(
+            Some(store),
+            HistoryRequestsQuery {
+                before_ms: Some(2),
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

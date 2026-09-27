@@ -358,6 +358,7 @@ export const dashboardStore = createStore<DashboardState>((set, get) => ({
       const prev = flows.get(p.api_call_id);
       const next: FlowSummary = {
         api_call_id: p.api_call_id,
+        display_number: p.display_number ?? prev?.display_number,
         response_id: p.response_id ?? prev?.response_id ?? null,
         method: prev?.method ?? 'POST',
         uri: prev?.uri ?? '',

@@ -9,21 +9,23 @@
  * only the status dot animates — so scrolling never thrashes. The header is a sibling of the
  * scroll container (not virtualized) so it stays put.
  */
-import { useRef } from 'react';
+import type { ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getConnection, queryKeys } from '../../api/connection';
 import { useAuth } from '../../store/hooks';
-import { useVirtualizer } from '@tanstack/react-virtual';
 import type { FlowSummary, ModelPrice } from '../../api/types';
 import { useDashboard, useFlowFilter } from '../../store/hooks';
 import { flowFilterStore } from '../../store/flowFilterStore';
 import { cn } from '../../lib/cn';
+import { DataTable } from '../ui/DataTable';
+import { mergeFacetOptions } from '../ui/facetModel';
+import type { DataTableColumn } from '../ui/dataTableModel';
 import { StatusChip } from './StatusChip';
 import { TokensCell } from './TokensCell';
 import { CacheEconomics } from './CacheEconomics';
 import { ContextPressure } from './ContextPressure';
 import { fmtClock, fmtElapsed, fmtModelPair } from './format';
-import { costDisplay, elapsedMs, flowCost, isFailover, shortId, statusClass } from './flowModel';
+import { costDisplay, elapsedMs, flowCost, isFailover, statusClass } from './flowModel';
 import { clientCell } from './clientAttribution';
 import { ClientRollup } from './ClientRollup';
 import { FilterBar } from './FilterBar';
@@ -31,7 +33,6 @@ import { useFlowRows } from './useFlowRows';
 import { useCatalog } from './useCatalog';
 
 const ROW_HEIGHT = 30;
-const OVERSCAN = 12;
 
 /**
  * The CLIENT cell (gap 15): renders the flow's NON-SECRET `client_label` (a key-hash `key-<hex>`, a
@@ -105,18 +106,26 @@ function ClientCellView({
   );
 }
 
-interface ColumnWidths {
-  grid: string;
-}
-// 10-column dense grid. tabular-nums on numeric cells keeps columns aligned. The CLIENT column (3rd)
-// is a responsive `minmax(120px,0.9fr)` — NOT a fixed 56px (which truncated `key-9f3a1c0b2d4e` /
-// `python-httpx/0.27` to a non-distinguishing prefix, defeating gap 15's purpose) — so seeded clients
-// are visually distinguishable; the endpoint flex is trimmed to keep the grid balanced.
-// 11 columns: the HARNESS column (4th) shows the detected client program; the id cell carries the
-// cache-bust marker so a prefix-cache miss is visible on the main surface without a new column.
-const COLS: ColumnWidths = {
-  grid: 'grid grid-cols-[88px_104px_minmax(120px,0.9fr)_88px_minmax(100px,0.8fr)_minmax(150px,1.4fr)_96px_84px_120px_72px_72px] gap-2 px-3',
-};
+// Keep the client column wide enough to distinguish common labels such as key hashes and user agents.
+// The id cell also carries the cache-bust marker without adding another column.
+const FLOW_COLUMNS: DataTableColumn<FlowSummary>[] = [
+  { id: 'time', label: 'time', width: '88px' },
+  { id: 'number', label: '#', width: '72px', required: true },
+  { id: 'id', label: 'UUID', width: '300px', defaultHidden: true },
+  { id: 'client', label: 'client', width: 'minmax(120px,0.9fr)' },
+  { id: 'user', label: 'user', width: '110px', defaultHidden: true },
+  { id: 'key', label: 'key', width: '110px', defaultHidden: true },
+  { id: 'harness', label: 'harness', width: '88px' },
+  { id: 'session', label: 'session', width: '110px', defaultHidden: true },
+  { id: 'cacheBust', label: 'cache bust', width: '82px', defaultHidden: true },
+  { id: 'endpoint', label: 'endpoint', width: 'minmax(100px,0.8fr)' },
+  { id: 'model', label: 'model', width: 'minmax(150px,1.4fr)' },
+  { id: 'upstream', label: 'upstream', width: '96px' },
+  { id: 'status', label: 'status', width: '84px' },
+  { id: 'tokens', label: 'tokens', width: '120px', align: 'right' },
+  { id: 'cost', label: 'cost', width: '72px', align: 'right' },
+  { id: 'elapsed', label: 'elapsed', width: '72px', align: 'right' },
+];
 
 /** The cache-bust marker's copy per divergence kind (only kinds that bust render a marker). */
 function bustTitle(kind: string | null | undefined): string {
@@ -153,7 +162,7 @@ export function FlowTable({
   const { client } = getConnection();
   const filters = useFlowFilter((s) => s.filters);
   const setFilters = flowFilterStore.getState().setFilters;
-  const { rows, total, models, upstreams, clients, harnesses } = useFlowRows(filters);
+  const { rows, total, models, upstreams, clients, harnesses, sessions, userIds, keyIds } = useFlowRows(filters);
   // Gap 04+: resolve the flow's `user_id`/`virtual_key_id` to display names via
   // the users/keys queries (admin-gated; falls back to id prefixes / the
   // key-hash label) so the CLIENT column answers "which user, which key".
@@ -172,65 +181,30 @@ export function FlowTable({
   const seekAtMs = useDashboard((s) => s.seekAtMs);
   const priceTable = useDashboard((s) => s.priceTable);
 
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const virtualizer = useVirtualizer({
-    count: rows.length,
-    getScrollElement: () => scrollRef.current,
-    estimateSize: () => ROW_HEIGHT,
-    overscan: OVERSCAN,
-  });
-
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <FilterBar
+      <DataTable id="flows" columnStateKey="flows-numeric" rows={rows} rowKey={(flow) => flow.api_call_id} columns={FLOW_COLUMNS}
+        virtualize={{ rowHeight: ROW_HEIGHT, scrollTestId: 'flow-table-scroll' }} rowTestId="flow-row"
+        emptyMessage="No flows match the current filters."
+        controlsClassName="!border-0 !p-0"
+        filterBar={(visibleIds) => <FilterBar
         filters={filters}
         models={models}
         upstreams={upstreams}
         clients={clients}
         harnesses={harnesses}
+        sessions={sessions}
+        userOptions={mergeFacetOptions((users.data?.users ?? []).map((user) => ({ value: user.id, label: user.username })), userIds)}
+        keyOptions={mergeFacetOptions((keys.data?.keys ?? []).map((key) => ({ value: key.id, label: key.label ?? key.id })), keyIds)}
         total={total}
         shown={rows.length}
+        visibleIds={visibleIds}
         onChange={setFilters}
-      />
-      <HeaderRow />
-      <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto" data-testid="flow-table-scroll">
-        <div style={{ height: `${virtualizer.getTotalSize()}px`, position: 'relative', width: '100%' }}>
-          {virtualizer.getVirtualItems().map((vi) => {
-            const flow = rows[vi.index];
-            if (!flow) return null;
-            return (
-              <div
-                key={flow.api_call_id}
-                data-index={vi.index}
-                data-testid="flow-row"
-                style={{
-                  position: 'absolute',
-                  top: 0,
-                  left: 0,
-                  width: '100%',
-                  height: `${ROW_HEIGHT}px`,
-                  transform: `translateY(${vi.start}px)`,
-                }}
-              >
-                <FlowRow
-                  flow={flow}
-                  priceTable={priceTable}
-                  nowMs={seekAtMs ?? Date.now()}
-                  selected={flow.api_call_id === selectedId}
-                  onSelect={onSelect}
-                  userName={userByName}
-                  keyLabel={keyByLabel}
-                />
-              </div>
-            );
-          })}
-        </div>
-        {rows.length === 0 && (
-          <div className="px-3 py-6 text-center text-xs text-text-muted" data-testid="flow-table-empty">
-            No flows match the current filters.
-          </div>
-        )}
-      </div>
+      />}
+        renderRow={(flow, visible) => <FlowRow flow={flow} columns={visible}
+          priceTable={priceTable} nowMs={seekAtMs ?? Date.now()}
+          selected={flow.api_call_id === selectedId} onSelect={onSelect}
+          userName={userByName} keyLabel={keyByLabel} />} />
       {/* Gap 09: the AGGREGATE context-pressure stat — peak context-window utilization + near/over
           counts across the SAME filtered rows. An always-visible stat under the table (outside the
           virtualized scroll container, so it does not affect row layout). */}
@@ -247,31 +221,9 @@ export function FlowTable({
   );
 }
 
-function HeaderRow() {
-  return (
-    <div
-      className={cn(
-        COLS.grid,
-        'border-b border-line bg-panel-raised py-1.5 text-[10px] uppercase tracking-[0.14em] text-text-muted',
-      )}
-    >
-      <span>time</span>
-      <span>id</span>
-      <span>client</span>
-      <span>harness</span>
-      <span>endpoint</span>
-      <span>model</span>
-      <span>upstream</span>
-      <span>status</span>
-      <span className="text-right">tokens</span>
-      <span className="text-right">cost</span>
-      <span className="text-right">elapsed</span>
-    </div>
-  );
-}
-
 function FlowRow({
   flow,
+  columns,
   priceTable,
   nowMs,
   selected,
@@ -280,6 +232,7 @@ function FlowRow({
   keyLabel,
 }: {
   flow: FlowSummary;
+  columns: readonly DataTableColumn<FlowSummary>[];
   priceTable: Record<string, ModelPrice>;
   /** Reference instant for an OPEN row's elapsed: the frozen cut `at_ms` while seeking, else now. */
   nowMs: number;
@@ -296,14 +249,43 @@ function FlowRow({
   // `—` (never a fabricated `$0.00`) — the same contract the StatsStrip $/min chip + FlowDetail use.
   const cost = costDisplay(flowCost(flow, priceTable), flow.cost_confidence);
 
+  const cells: Record<string, ReactNode> = {
+    time: <span className="tabular-nums text-text-muted">{fmtClock(flow.started_ms)}</span>,
+    number: <span className="flex min-w-0 items-center gap-1" title={flow.api_call_id}>
+      <span className="truncate font-mono text-text-muted">{flow.display_number == null ? '—' : `R-${flow.display_number}`}</span>
+      {flow.cache_bust === true && <span className="shrink-0 rounded-sm bg-status-cooling/15 px-1 text-[9px] uppercase tracking-wide text-status-cooling" data-testid="flow-cache-bust" data-kind={flow.divergence_kind ?? undefined} title={bustTitle(flow.divergence_kind)}>bust</span>}
+    </span>,
+    id: <span className="truncate font-mono text-text-muted" title={flow.api_call_id}>{flow.api_call_id}</span>,
+    client: <ClientCellView flow={flow} userName={userName} keyLabel={keyLabel} />,
+    user: <span className="truncate text-text-muted" title={flow.user_id ?? undefined}>{userName(flow.user_id ?? null) ?? '—'}</span>,
+    key: <span className="truncate text-text-muted" title={flow.virtual_key_id ?? undefined}>{keyLabel(flow.virtual_key_id ?? null) ?? '—'}</span>,
+    harness: <HarnessCellView flow={flow} />,
+    session: <span className="truncate font-mono text-text-muted" title={flow.session_id ?? undefined}>{flow.session_id?.slice(0, 12) ?? '—'}</span>,
+    cacheBust: <span className="text-text-muted">{flow.cache_bust == null ? '—' : flow.cache_bust ? 'Yes' : 'No'}</span>,
+    endpoint: <span className="truncate font-mono">{flow.uri || '—'}</span>,
+    model: <span className="flex min-w-0 items-center gap-1.5">
+      <span className="truncate">{fmtModelPair(flow.model_requested, flow.model_served)}</span>
+      {failover && <span className="shrink-0 rounded-sm bg-status-cooling/15 px-1 text-[9px] uppercase text-status-cooling" data-testid="failover-tag" title="failover / re-routed">failover</span>}
+    </span>,
+    upstream: <span className="truncate text-text-muted">{flow.upstream_target ?? '—'}</span>,
+    status: <StatusChip status={flow.status} terminalReason={flow.terminal_reason} />,
+    tokens: <TokensCell flow={flow} priceTable={priceTable} />,
+    cost: <span className="flex items-center justify-end gap-1 text-right tabular-nums text-meta">
+      <span data-testid="flow-cost" data-confidence={cost.confidence}>{cost.value}</span>
+      {cost.estimated && <span className="shrink-0 rounded-sm bg-status-cooling/15 px-1 text-[9px] uppercase tracking-wide text-status-cooling" data-testid="flow-cost-est" title="cost is an estimate — a billed token class has no configured rate">est</span>}
+    </span>,
+    elapsed: <span className="text-right tabular-nums text-text-muted">{fmtElapsed(elapsedMs(flow, nowMs))}</span>,
+  };
+
   return (
     <button
       type="button"
       onClick={() => onSelect(flow.api_call_id)}
+      data-api-call-id={flow.api_call_id}
       data-selected={selected || undefined}
       title={flow.api_call_id}
+      style={{ display: 'grid', gridTemplateColumns: columns.map((column) => column.width ?? 'minmax(0,1fr)').join(' '), gap: '0.5rem', padding: '0 0.75rem' }}
       className={cn(
-        COLS.grid,
         'h-full w-full items-center border-b border-line/50 text-left text-xs',
         // No transition on layout properties — only background color, so virtualized rows
         // recycling positions never trigger a FLIP.
@@ -312,58 +294,7 @@ function FlowRow({
         selected ? 'bg-accent/12' : 'hover:bg-accent/[0.06]',
       )}
     >
-      <span className="tabular-nums text-text-muted">{fmtClock(flow.started_ms)}</span>
-      <span className="flex min-w-0 items-center gap-1">
-        <span className="truncate font-mono text-text-muted">{shortId(flow.api_call_id)}</span>
-        {/* Sessions: a prefix-cache miss is flagged on the main surface (amber, like the other
-            "something is off" markers); `divergence_kind` explains which part diverged. */}
-        {flow.cache_bust === true && (
-          <span
-            className="shrink-0 rounded-sm bg-status-cooling/15 px-1 text-[9px] uppercase tracking-wide text-status-cooling"
-            data-testid="flow-cache-bust"
-            data-kind={flow.divergence_kind ?? undefined}
-            title={bustTitle(flow.divergence_kind)}
-          >
-            bust
-          </span>
-        )}
-      </span>
-      <ClientCellView flow={flow} userName={userName} keyLabel={keyLabel} />
-      <HarnessCellView flow={flow} />
-      <span className="truncate font-mono">{flow.uri || '—'}</span>
-      <span className="flex min-w-0 items-center gap-1.5">
-        <span className="truncate">{fmtModelPair(flow.model_requested, flow.model_served)}</span>
-        {failover && (
-          <span
-            className="shrink-0 rounded-sm bg-status-cooling/15 px-1 text-[9px] uppercase text-status-cooling"
-            data-testid="failover-tag"
-            title="failover / re-routed"
-          >
-            failover
-          </span>
-        )}
-      </span>
-      <span className="truncate text-text-muted">{flow.upstream_target ?? '—'}</span>
-      <span>
-        <StatusChip status={flow.status} terminalReason={flow.terminal_reason} />
-      </span>
-      <TokensCell flow={flow} priceTable={priceTable} />
-      <span className="flex items-center justify-end gap-1 text-right tabular-nums text-meta">
-        <span data-testid="flow-cost" data-confidence={cost.confidence}>{cost.value}</span>
-        {/* Gap 07: an `estimated` per-flow cost MUST be labelled (the cross-cutting rule) — a
-            compact marker so an operator never mistakes a best-effort row for a confident one on
-            the main flow surface. `unavailable` already reads as `—`; `confident` needs no badge. */}
-        {cost.estimated && (
-          <span
-            className="shrink-0 rounded-sm bg-status-cooling/15 px-1 text-[9px] uppercase tracking-wide text-status-cooling"
-            data-testid="flow-cost-est"
-            title="cost is an estimate — a billed token class has no configured rate"
-          >
-            est
-          </span>
-        )}
-      </span>
-      <span className="text-right tabular-nums text-text-muted">{fmtElapsed(elapsedMs(flow, nowMs))}</span>
+      {columns.map((column) => <span key={column.id} className="min-w-0 overflow-hidden">{cells[column.id]}</span>)}
     </button>
   );
 }

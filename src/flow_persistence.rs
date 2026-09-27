@@ -381,6 +381,7 @@ impl Drop for PersistenceTerminalGuard {
 #[derive(Debug, Clone, Copy)]
 pub struct BeginPersistenceInput<'a> {
     pub api_call_id: &'a str,
+    pub display_number: Option<i64>,
     pub conversation_id: Option<&'a str>,
     pub virtual_key_id: Option<&'a str>,
     pub client_protocol: &'a str,
@@ -400,6 +401,7 @@ pub struct BeginPersistenceInput<'a> {
 pub fn begin_request(input: BeginPersistenceInput<'_>) -> RequestRow {
     RequestRow {
         id: input.api_call_id.to_owned(),
+        display_number: input.display_number,
         response_id: None,
         conversation_id: input.conversation_id.map(bounded_scalar),
         virtual_key_id: input.virtual_key_id.map(bounded_scalar),
@@ -1503,6 +1505,7 @@ mod tests {
     fn begin_never_preselects_a_backend() {
         let row = begin_request(BeginPersistenceInput {
             api_call_id: "api_1",
+            display_number: None,
             conversation_id: Some("conversation-1"),
             virtual_key_id: Some("key-1"),
             client_protocol: "responses",

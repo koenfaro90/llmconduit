@@ -8,6 +8,7 @@ export const FIXED_NOW = Date.UTC(2026, 5, 21, 14, 20, 0); // 2026-06-21T14:20:0
 
 export type ViewName =
   | 'flows'
+  | 'requests'
   | 'sessions'
   | 'topology'
   | 'sankey'
@@ -20,13 +21,13 @@ export type ViewName =
 /** Each view: the nav-tab label to click + a route-specific "ready" marker (text/regex). */
 export const VIEWS: { name: ViewName; section: string; tab: string; ready: string | RegExp }[] = [
   { name: 'flows', section: 'Observe', tab: 'Flows', ready: '/v1/responses' },
+  { name: 'requests', section: 'Observe', tab: 'Requests', ready: /all retained requests/i },
   { name: 'topology', section: 'Infrastructure', tab: 'Topology', ready: /click a node to filter flows/i },
   { name: 'sankey', section: 'Infrastructure', tab: 'Sankey', ready: /Token Sankey/i },
   { name: 'theater', section: 'Infrastructure', tab: 'Theater', ready: /No active streams/i },
   // Gap 16 — the control-room overview (the 5th route). Its masthead text is the ready marker.
   { name: 'overview', section: 'Observe', tab: 'Overview', ready: /control room/i },
-  // The live active-sessions board (the dashboard's primary view). Masthead subtitle is the ready marker.
-  { name: 'sessions', section: 'Observe', tab: 'Sessions', ready: /active in the last 15 minutes/i },
+  { name: 'sessions', section: 'Observe', tab: 'Sessions', ready: /all retained sessions/i },
   { name: 'chat', section: 'Chat', tab: 'Chat', ready: /^chat$/i },
   { name: 'providers', section: 'Infrastructure', tab: 'Providers', ready: /provider inventory/i },
   { name: 'access', section: 'Admin', tab: 'Access', ready: /Access control/i },

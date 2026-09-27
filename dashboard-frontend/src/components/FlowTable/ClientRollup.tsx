@@ -29,11 +29,28 @@ import { clientRollup, fmtLatency, type ClientRollupRow } from './clientAttribut
 import { flowFilterStore } from '../../store/flowFilterStore';
 import { fmtCost } from './format';
 import { cn } from '../../lib/cn';
+import { DataTable } from '../ui/DataTable';
+import type { DataTableColumn } from '../ui/dataTableModel';
 
 export function ClientRollup({ rows }: { rows: FlowSummary[] }) {
   const [open, setOpen] = useState(false);
   const model = useMemo(() => clientRollup(rows), [rows]);
   const setClient = flowFilterStore.getState().setClient;
+  const columns: DataTableColumn<ClientRollupRow>[] = [
+    { id: 'client', label: 'client', width: '40%', required: true, render: (row) => {
+      const tag = rowSourceTag(row.source, row.label);
+      return <button type="button" onClick={() => setClient(row.key)} className="flex min-w-0 items-center gap-1 text-left hover:text-accent"
+        data-testid="client-rollup-pick" title={tag.title}>
+        <span className={cn('truncate font-mono', row.weak ? 'italic text-text-muted' : 'text-text')}>{row.label}</span>
+        <span className={cn('shrink-0 rounded-sm px-1 text-[9px] uppercase tracking-wide', row.weak ? 'bg-status-cooling/15 text-status-cooling' : 'bg-line/40 text-text-muted')}
+          data-testid="client-rollup-source" data-quality={row.attributionQuality} data-source={row.source ?? undefined}>{tag.badge}</span>
+      </button>;
+    } },
+    { id: 'flows', label: 'flows', width: '12%', align: 'right', render: (row) => <span data-testid="client-rollup-flows" className="text-text-muted">{row.total}</span> },
+    { id: 'error', label: 'err', width: '12%', align: 'right', render: (row) => <span data-testid="client-rollup-err" data-quality="derived" className={row.errorRatePct > 5 ? 'text-status-down' : 'text-text-muted'}>{row.errorRateText}</span> },
+    { id: 'cost', label: 'cost', width: '18%', align: 'right', render: (row) => <span data-testid="client-rollup-cost" data-quality={row.costQuality} className={row.costQuality === 'unavailable' ? 'text-text-muted' : 'text-meta'}>{row.cost === null ? '—' : fmtCost(row.cost)}</span> },
+    { id: 'latency', label: 'avg latency', width: '18%', align: 'right', render: (row) => <span data-testid="client-rollup-latency" data-quality={row.latencyQuality} className={row.latencyQuality === 'unavailable' ? 'text-text-muted' : 'text-text'}>{fmtLatency(row.avgLatencyMs)}</span> },
+  ];
 
   return (
     <section
@@ -74,22 +91,9 @@ export function ClientRollup({ rows }: { rows: FlowSummary[] }) {
               {model.unattributedFlows > 0 && ` (${model.unattributedFlows}/${model.totalFlows} flows unattributed)`}
             </div>
           ) : (
-            <table className="w-full text-xs" data-testid="client-rollup-table">
-              <thead>
-                <tr className="text-[10px] uppercase tracking-[0.12em] text-text-muted">
-                  <th className="py-1 text-left font-normal">client</th>
-                  <th className="py-1 text-right font-normal">flows</th>
-                  <th className="py-1 text-right font-normal">err</th>
-                  <th className="py-1 text-right font-normal">cost</th>
-                  <th className="py-1 text-right font-normal">avg latency</th>
-                </tr>
-              </thead>
-              <tbody>
-                {model.rows.map((row) => (
-                  <ClientRow key={row.key} row={row} onPick={() => setClient(row.key)} />
-                ))}
-              </tbody>
-            </table>
+            <DataTable id="client-rollup" rows={model.rows} rowKey={(row) => row.key} columns={columns}
+              tableTestId="client-rollup-table" rowTestId="client-rollup-row" clientPageSize={20}
+              rowAttributes={(row) => ({ 'data-client': row.key, 'data-strength': row.strength })} />
           )}
         </div>
       )}
@@ -113,57 +117,4 @@ function rowSourceTag(source: ClientRollupRow['source'], label: string): { badge
       // A labelled row with NO source provenance — source-UNAVAILABLE (NOT a strong identity, NOT a UA).
       return { badge: '?', title: `client source unavailable (a label with no recorded provenance). Click to filter to ${label}.` };
   }
-}
-
-/** One client's roll-up row — its (strength-tagged) identity + flows / err / cost / latency. Clicking it
- *  cross-links into the per-client filter. */
-function ClientRow({ row, onPick }: { row: ClientRollupRow; onPick: () => void }) {
-  const errOver = row.errorRatePct > 5;
-  const tag = rowSourceTag(row.source, row.label);
-  return (
-    <tr className="border-t border-line/40" data-testid="client-rollup-row" data-client={row.key} data-strength={row.strength}>
-      <td className="py-1 pr-2">
-        <button
-          type="button"
-          onClick={onPick}
-          className="flex min-w-0 items-center gap-1 text-left hover:text-accent"
-          data-testid="client-rollup-pick"
-          title={tag.title}
-        >
-          <span className={cn('truncate font-mono', row.weak ? 'italic text-text-muted' : 'text-text')}>{row.label}</span>
-          {/* The source tag — the WEAK UA fallback is visibly distinct (amber) from a strong identity
-              (neutral); a source-UNAVAILABLE row (null source) is neutral-dim with a `?` badge, NEVER
-              amber/`ua`. `data-quality` is the model's classification (measured/derived/unavailable). */}
-          <span
-            className={cn(
-              'shrink-0 rounded-sm px-1 text-[9px] uppercase tracking-wide',
-              row.weak ? 'bg-status-cooling/15 text-status-cooling' : 'bg-line/40 text-text-muted',
-            )}
-            data-testid="client-rollup-source"
-            data-quality={row.attributionQuality}
-            data-source={row.source ?? undefined}
-          >
-            {tag.badge}
-          </span>
-        </button>
-      </td>
-      <td className="py-1 text-right tabular-nums text-text-muted" data-testid="client-rollup-flows">
-        {row.total}
-      </td>
-      <td className="py-1 text-right tabular-nums" data-testid="client-rollup-err" data-quality="derived">
-        <span className={errOver ? 'text-status-down' : 'text-text-muted'}>{row.errorRateText}</span>
-      </td>
-      <td className="py-1 text-right tabular-nums" data-testid="client-rollup-cost" data-quality={row.costQuality}>
-        {/* Don't-lie-with-zeros: an unpriced client reads `—`, never a fabricated `$0.00`. */}
-        <span className={row.costQuality === 'unavailable' ? 'text-text-muted' : 'text-meta'}>
-          {row.cost === null ? '—' : fmtCost(row.cost)}
-        </span>
-      </td>
-      <td className="py-1 text-right tabular-nums" data-testid="client-rollup-latency" data-quality={row.latencyQuality}>
-        <span className={row.latencyQuality === 'unavailable' ? 'text-text-muted' : 'text-text'}>
-          {fmtLatency(row.avgLatencyMs)}
-        </span>
-      </td>
-    </tr>
-  );
 }

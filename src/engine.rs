@@ -208,6 +208,7 @@ pub struct Gateway {
     native_vision_cache: crate::vision_probe::NativeVisionCache,
     /// Session tree + lineage index (see `crate::sessions`).
     session_linker: Arc<crate::sessions::SessionLinker>,
+    display_numbers: crate::control_plane_store::DisplayNumbers,
     /// Live active-session hub for the dashboard (see `crate::session_hub`).
     /// `SessionHub::disabled()` when `--with-debug-ui` is off — every op a
     /// no-op, mirroring the FlowStore/monitor gating.
@@ -815,6 +816,7 @@ impl Gateway {
             harness_detector: Arc::new(crate::harness::HarnessDetector::builtin()),
             native_vision_cache: crate::vision_probe::NativeVisionCache::default(),
             session_linker: Arc::new(crate::sessions::SessionLinker::new(true)),
+            display_numbers: crate::control_plane_store::DisplayNumbers::default(),
             session_hub: crate::session_hub::SessionHub::disabled(),
             yaml_key_specs: Vec::new(),
             client_auth_required: false,
@@ -1045,6 +1047,18 @@ impl Gateway {
     pub fn with_session_linker(mut self, linker: Arc<crate::sessions::SessionLinker>) -> Self {
         self.session_linker = linker;
         self
+    }
+
+    pub fn with_display_numbers(
+        mut self,
+        numbers: crate::control_plane_store::DisplayNumbers,
+    ) -> Self {
+        self.display_numbers = numbers;
+        self
+    }
+
+    pub fn display_numbers(&self) -> &crate::control_plane_store::DisplayNumbers {
+        &self.display_numbers
     }
 
     pub fn session_linker(&self) -> &Arc<crate::sessions::SessionLinker> {

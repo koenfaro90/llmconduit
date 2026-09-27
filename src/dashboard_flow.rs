@@ -719,6 +719,7 @@ pub struct FlowRecord {
     /// `u64`, not a heap scalar).
     pub record_seq: u64,
     pub api_call_id: String,
+    pub display_number: Option<i64>,
     pub response_id: Option<String>,
     pub method: String,
     pub uri: String,
@@ -1070,6 +1071,7 @@ impl FlowRecord {
 #[derive(Debug, Clone, Serialize)]
 pub struct SnapshotFlowSummary {
     pub api_call_id: String,
+    pub display_number: Option<i64>,
     pub response_id: Option<String>,
     pub method: String,
     pub uri: String,
@@ -1127,6 +1129,7 @@ impl SnapshotFlowSummary {
     fn from_record(record: &FlowRecord) -> Self {
         Self {
             api_call_id: record.api_call_id.clone(),
+            display_number: record.display_number,
             response_id: record.response_id.clone(),
             method: record.method.clone(),
             uri: record.uri.clone(),
@@ -1323,6 +1326,30 @@ impl DashboardFlowStore {
         client: ClientAttribution,
         session: FlowSessionFacts,
     ) {
+        self.open_with_session_and_number(
+            api_call_id,
+            method,
+            uri,
+            headers,
+            inbound_body,
+            client,
+            session,
+            None,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_with_session_and_number(
+        &self,
+        api_call_id: String,
+        method: String,
+        uri: String,
+        headers: CapturedHeaders,
+        inbound_body: Option<CapturedBody>,
+        client: ClientAttribution,
+        session: FlowSessionFacts,
+        display_number: Option<i64>,
+    ) {
         if !self.enabled {
             return;
         }
@@ -1333,6 +1360,7 @@ impl DashboardFlowStore {
             // watermark reflects THIS insert (D7b R2 finding 1).
             record_seq: 0,
             api_call_id: cap_scalar(api_call_id.clone()),
+            display_number,
             response_id: None,
             method: cap_scalar(method),
             uri: cap_scalar(uri),

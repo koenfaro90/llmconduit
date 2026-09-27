@@ -86,6 +86,7 @@ const WINDOW_1H_SECS: f64 = 3600.0;
 pub struct FlowRow {
     /// The gateway's per-request id (the flow's primary key).
     pub api_call_id: String,
+    pub display_number: Option<i64>,
     /// The engine response id the flow is linked to, when known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_id: Option<String>,
@@ -177,6 +178,7 @@ impl FlowRow {
             flow_cost_and_confidence(record.model_served.as_deref(), record.usage, gateway);
         Self {
             api_call_id: record.api_call_id.clone(),
+            display_number: record.display_number,
             response_id: record.response_id.clone(),
             method: record.method.clone(),
             uri: record.uri.clone(),
@@ -217,6 +219,7 @@ impl FlowRow {
             flow_cost_and_confidence(summary.model_served.as_deref(), summary.usage, gateway);
         Self {
             api_call_id: summary.api_call_id.clone(),
+            display_number: summary.display_number,
             response_id: summary.response_id.clone(),
             method: summary.method.clone(),
             uri: summary.uri.clone(),
@@ -335,6 +338,7 @@ pub struct FlowDetailBody {
     pub flow_seq: u64,
     /// The gateway's per-request id (the flow's primary key).
     pub api_call_id: String,
+    pub display_number: Option<i64>,
     /// The engine response id the flow is linked to, when known.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_id: Option<String>,
@@ -1228,6 +1232,7 @@ pub async fn dashboard_flow_detail(
     let body = FlowDetailBody {
         flow_seq,
         api_call_id: record.api_call_id.clone(),
+        display_number: record.display_number,
         response_id: record.response_id.clone(),
         inbound_body: record.inbound_body.as_ref().map(parse_captured_body),
         inbound_headers,
@@ -1753,6 +1758,8 @@ pub(crate) struct ActiveSessionBody {
     /// Lifetime totals over the node's durable requests; `None` per class
     /// when no row reported it. Absent (null) when history is disabled.
     aggregate: Option<crate::control_plane_store::SessionAggregate>,
+    /// Exact direct-child count from durable history when configured.
+    child_count: Option<i64>,
 }
 
 #[utoipa::path(
@@ -1780,6 +1787,18 @@ pub async fn dashboard_sessions_active(State(gateway): State<Arc<Gateway>>) -> R
     // `None` rather than failing the whole read (don't-lie-with-zeros: absent
     // renders `—`, not a fabricated 0).
     let store = gateway.persistence_store();
+    let child_counts = if let Some(store) = &store {
+        let ids: Vec<String> = cut.iter().map(|entry| entry.row.id.clone()).collect();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            store.session_child_counts(&ids),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+    } else {
+        None
+    };
     let mut sessions = Vec::with_capacity(cut.len());
     for entry in cut {
         let aggregate = match &store {
@@ -1805,6 +1824,9 @@ pub async fn dashboard_sessions_active(State(gateway): State<Arc<Gateway>>) -> R
             None => None,
         };
         sessions.push(ActiveSessionBody {
+            child_count: child_counts
+                .as_ref()
+                .and_then(|counts| counts.get(&entry.row.id).copied()),
             session: entry,
             aggregate,
         });
@@ -2119,6 +2141,7 @@ mod tests {
         let rows = |n: usize| -> Vec<FlowRow> {
             (0..n)
                 .map(|i| FlowRow {
+                    display_number: None,
                     session: Default::default(),
                     api_call_id: format!("api_{i}"),
                     response_id: None,
@@ -2177,6 +2200,7 @@ mod tests {
         assert_eq!(decoded, facts);
 
         let base = || FlowRow {
+            display_number: None,
             session: Default::default(),
             api_call_id: "api_x".to_string(),
             response_id: None,
@@ -2228,6 +2252,7 @@ mod tests {
     #[test]
     fn flow_row_serializes_optional_client_attribution_present_and_absent() {
         let base = || FlowRow {
+            display_number: None,
             session: Default::default(),
             api_call_id: "api_x".to_string(),
             response_id: None,
@@ -2254,6 +2279,7 @@ mod tests {
         // PRESENT: a key-hash attribution emits both snake_case keys with the expected
         // values (the label is a `key-<hex>` id — a one-way prefix, never a raw key).
         let present = FlowRow {
+            display_number: None,
             client_label: Some("key-deadbeef0123".to_string()),
             client_source: Some(ClientSource::KeyHash),
             ..base()
@@ -2288,6 +2314,7 @@ mod tests {
     #[test]
     fn flow_detail_body_upstream_response_round_trips_present_and_absent() {
         let base = || FlowDetailBody {
+            display_number: None,
             session: Default::default(),
             flow_seq: 7,
             api_call_id: "api_d".to_string(),
@@ -2318,6 +2345,7 @@ mod tests {
         // with `truncated: false`. Serialize the whole detail body, then deserialize the
         // sub-object back into the typed DTO.
         let present = FlowDetailBody {
+            display_number: None,
             upstream_response: Some(FlowUpstreamResponse {
                 body: serde_json::json!({"error": {"message": "backend on fire"}}),
                 truncated: false,
@@ -2345,6 +2373,7 @@ mod tests {
         // PRESENT (truncated): a cap-truncated body keeps `truncated: true` across the
         // round-trip so the dashboard can flag a PARTIAL body.
         let truncated = FlowDetailBody {
+            display_number: None,
             upstream_response: Some(FlowUpstreamResponse {
                 body: serde_json::Value::String("partial prefix…".to_string()),
                 truncated: true,
@@ -2415,6 +2444,7 @@ mod tests {
     #[test]
     fn flow_row_projects_spine_fields_present_and_absent() {
         let base = || FlowRow {
+            display_number: None,
             session: Default::default(),
             api_call_id: "api_s".to_string(),
             response_id: None,
@@ -2440,6 +2470,7 @@ mod tests {
 
         // PRESENT: a measured flow projects the flattened phases + attempts + wire TTFB.
         let present = FlowRow {
+            display_number: None,
             phases: measured_phases(),
             attempts: vec![served_attempt()],
             first_upstream_byte_ms: Some(1_220),
@@ -2493,6 +2524,7 @@ mod tests {
     #[test]
     fn flow_detail_body_projects_spine_fields_present_and_absent() {
         let base = || FlowDetailBody {
+            display_number: None,
             session: Default::default(),
             flow_seq: 3,
             api_call_id: "api_sd".to_string(),
@@ -2521,6 +2553,7 @@ mod tests {
 
         // PRESENT: the inspector carries the measured waterfall + attempt trace.
         let present = FlowDetailBody {
+            display_number: None,
             phases: measured_phases(),
             attempts: vec![served_attempt()],
             first_upstream_byte_ms: Some(1_220),
@@ -2573,6 +2606,7 @@ mod tests {
     #[test]
     fn flow_usage_unreported_class_is_absent_measured_zero_is_present() {
         let row = |cached: Option<i64>, reasoning: Option<i64>| FlowRow {
+            display_number: None,
             session: Default::default(),
             api_call_id: "api_u".to_string(),
             response_id: None,

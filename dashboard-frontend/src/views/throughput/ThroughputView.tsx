@@ -13,8 +13,9 @@ import { Panel } from '../../components/ui/Panel';
 import { ChartLegend, LineChart, type ChartSeries } from '../../viz/LineChart';
 import { cn } from '../../lib/cn';
 import { fmtTokens } from '../../components/FlowTable/format';
+import { FacetSelect, type FacetSelection } from '../../components/ui/FacetSelect';
+import { emptyFacet, matchesFacet } from '../../components/ui/facetModel';
 import {
-  ALL_MODELS,
   engineRateSeries,
   engineStates,
   modelsByVolume,
@@ -36,7 +37,7 @@ function fmtRate(v: number | null, digits = 0): string {
 export function ThroughputView() {
   const { client } = getConnection();
   const [windowIdx, setWindowIdx] = useState(0);
-  const [model, setModel] = useState<string>(ALL_MODELS);
+  const [model, setModel] = useState<FacetSelection>(emptyFacet);
   const win = WINDOWS[windowIdx]!;
   const sinceMs = Date.now() - win.ms;
   const throughput = useQuery({
@@ -52,16 +53,18 @@ export function ThroughputView() {
   const buckets = useMemo(() => throughput.data?.buckets ?? [], [throughput.data]);
   const bucketMs = throughput.data?.bucket_ms ?? win.bucketSecs * 1000;
   const models = useMemo(() => modelsByVolume(buckets), [buckets]);
-  const points = useMemo(() => throughputSeries(buckets, model, bucketMs), [buckets, model, bucketMs]);
+  const selectedBuckets = useMemo(() => buckets.filter((bucket) => matchesFacet(model, [bucket.model])), [buckets, model]);
+  const selectedModels = useMemo(() => models.filter((name) => matchesFacet(model, [name])), [models, model]);
+  const points = useMemo(() => throughputSeries(selectedBuckets, '*', bucketMs), [selectedBuckets, bucketMs]);
   const totals = useMemo(() => throughputTotals(points), [points]);
   const perModelSeries = useMemo(
-    () => (model === ALL_MODELS ? models : [model]).slice(0, 6).map((m) => ({ m, points: throughputSeries(buckets, m, bucketMs) })),
-    [buckets, models, model, bucketMs],
+    () => selectedModels.slice(0, 6).map((m) => ({ m, points: throughputSeries(selectedBuckets, m, bucketMs) })),
+    [selectedBuckets, selectedModels, bucketMs],
   );
   const chart = (pick: (p: (typeof points)[number]) => number | null, label: string): ChartSeries[] =>
     perModelSeries.map(({ m, points: ps }) => ({ key: `${label}-${m}`, label: m, points: ps.map((p) => [p.bucket_ms, pick(p)] as [number, number | null]) }));
   const samples = useMemo(() => metrics.data?.samples ?? [], [metrics.data]);
-  const engines = useMemo(() => engineStates(samples), [samples]);
+  const engines = useMemo(() => engineStates(samples).filter((engine) => matchesFacet(model, [engine.model])), [samples, model]);
 
   return (
     <div className="min-h-0 min-w-0 flex-1 overflow-auto p-4" data-testid="throughput-view">
@@ -83,15 +86,7 @@ export function ThroughputView() {
       </div>
 
       <div className="mb-3 flex flex-wrap items-center gap-1.5" data-testid="throughput-models">
-        <span className="text-[10px] uppercase tracking-wide text-text-muted">model</span>
-        <button type="button" onClick={() => setModel(ALL_MODELS)} className={cn('rounded-full border px-2.5 py-0.5 text-xs', model === ALL_MODELS ? 'border-accent/40 bg-accent/15 text-accent' : 'border-line bg-panel text-text-muted')}>
-          all
-        </button>
-        {models.map((m) => (
-          <button key={m} type="button" onClick={() => setModel(m)} className={cn('rounded-full border px-2.5 py-0.5 text-xs', model === m ? 'border-accent/40 bg-accent/15 text-accent' : 'border-line bg-panel text-text-muted')}>
-            {m}
-          </button>
-        ))}
+        <FacetSelect label="Model" options={models} value={model} onChange={setModel} />
       </div>
 
       {throughput.isError && (

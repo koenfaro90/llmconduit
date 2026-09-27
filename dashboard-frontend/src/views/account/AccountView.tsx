@@ -10,6 +10,8 @@ import { useAuth } from '../../store/hooks';
 import type { ApiKeyRecord, UserRecord } from '../../api/types';
 import { Panel } from '../../components/ui/Panel';
 import { Button } from '../../components/ui/Button';
+import { DataTable } from '../../components/ui/DataTable';
+import type { DataTableColumn } from '../../components/ui/dataTableModel';
 import { cn } from '../../lib/cn';
 
 const DASH = '—';
@@ -141,22 +143,15 @@ function KeyForm({ busy, error, admin, users, onCreate }: { busy: boolean; error
 
 function KeyTable({ keys, showOwner, ownerName, onRevoke, busy }: { keys: ApiKeyRecord[]; showOwner: boolean; ownerName: (id: string | null) => string; onRevoke: (id: string) => void; busy: boolean }) {
   if (keys.length === 0) return <div className="rounded-md border border-line px-3 py-3 text-xs italic text-text-muted" data-testid="keys-empty">No keys yet.</div>;
-  return (
-    <div className="rounded-md border border-line">
-      <div className="grid grid-cols-[minmax(120px,1fr)_minmax(100px,1fr)_minmax(120px,1fr)_130px_80px] gap-2 border-b border-line bg-panel-raised px-3 py-1.5 text-[10px] uppercase tracking-[0.14em] text-text-muted">
-        <span>label</span><span>owner</span><span>allowed models</span><span>created</span><span />
-      </div>
-      {keys.map((k) => (
-        <div key={k.id} className="grid grid-cols-[minmax(120px,1fr)_minmax(100px,1fr)_minmax(120px,1fr)_130px_80px] items-center gap-2 border-b border-line/50 px-3 py-1 text-xs" data-testid="key-row" title={k.id}>
-          <span className="truncate">{k.label ?? <span className="italic text-text-muted">unlabelled</span>}</span>
-          <span className="truncate text-text-muted">{showOwner ? ownerName(k.user_id) : ownerName(k.user_id)}</span>
-          <span className="truncate font-mono text-text-muted">{k.allowed_models.length ? k.allowed_models.join(', ') : 'any'}</span>
-          <span className="tabular-nums text-text-muted">{fmtWhen(k.created_at_ms)}</span>
-          <Button variant="danger" className="px-2 py-0.5 text-[11px]" disabled={busy} onClick={() => onRevoke(k.id)} data-testid="key-revoke">revoke</Button>
-        </div>
-      ))}
-    </div>
-  );
+  const columns: DataTableColumn<ApiKeyRecord>[] = [
+    { id: 'label', label: 'label', width: '24%', required: true, render: (k) => k.label ?? <span className="italic text-text-muted">unlabelled</span> },
+    { id: 'owner', label: 'owner', width: '20%', render: (k) => <span className="text-text-muted">{showOwner ? ownerName(k.user_id) : ownerName(k.user_id)}</span> },
+    { id: 'models', label: 'allowed models', width: '28%', render: (k) => <span className="font-mono text-text-muted">{k.allowed_models.length ? k.allowed_models.join(', ') : 'any'}</span> },
+    { id: 'created', label: 'created', width: '18%', render: (k) => <span className="tabular-nums text-text-muted">{fmtWhen(k.created_at_ms)}</span> },
+    { id: 'actions', label: '', width: '10%', required: true, render: (k) => <Button variant="danger" className="px-2 py-0.5 text-[11px]" disabled={busy} onClick={() => onRevoke(k.id)} data-testid="key-revoke">revoke</Button> },
+  ];
+  return <div className="rounded-md border border-line"><DataTable id="account-keys" rows={keys} rowKey={(k) => k.id}
+    columns={columns} rowTestId="key-row" rowAttributes={(k) => ({ title: k.id })} clientPageSize={25} minWidth={650} /></div>;
 }
 
 function UserForm({ busy, error, onCreate }: { busy: boolean; error: string | null; onCreate: (body: { username: string; password: string; is_admin: boolean }) => void }) {
@@ -187,37 +182,24 @@ function UserTable({ users, selfId, keys, onResetPassword, onToggleAdmin, onDele
   const [resetFor, setResetFor] = useState<string | null>(null);
   const [newPassword, setNewPassword] = useState('');
   if (users.length === 0) return <div className="rounded-md border border-line px-3 py-3 text-xs italic text-text-muted" data-testid="users-empty">No users yet: create the first administrator above (or via the CLI).</div>;
-  return (
-    <div className="rounded-md border border-line">
-      <div className="grid grid-cols-[minmax(120px,1fr)_70px_60px_130px_minmax(200px,1fr)] gap-2 border-b border-line bg-panel-raised px-3 py-1.5 text-[10px] uppercase tracking-[0.14em] text-text-muted">
-        <span>username</span><span>role</span><span className="text-right">keys</span><span>created</span><span />
-      </div>
-      {users.map((u) => {
-        const self = u.id === selfId;
-        return (
-          <div key={u.id} className="grid grid-cols-[minmax(120px,1fr)_70px_60px_130px_minmax(200px,1fr)] items-center gap-2 border-b border-line/50 px-3 py-1 text-xs" data-testid="user-row" data-admin={u.is_admin ? 'true' : 'false'}>
-            <span className="truncate font-mono">{u.username}{self && <span className="ml-1 text-[9px] text-text-muted">(you)</span>}</span>
-            <span className={cn('w-fit rounded-sm px-1 text-[9px] uppercase tracking-wide', u.is_admin ? 'bg-accent/15 text-accent' : 'bg-line/40 text-text-muted')}>{u.is_admin ? 'admin' : 'user'}</span>
-            <span className="text-right tabular-nums text-text-muted">{keys.filter((k) => k.user_id === u.id).length}</span>
-            <span className="tabular-nums text-text-muted">{fmtWhen(u.created_at_ms)}</span>
-            <span className="flex flex-wrap items-center gap-1">
-              {resetFor === u.id ? (
-                <>
-                  <input className={INPUT} type="password" placeholder="new password" aria-label={`new password for ${u.username}`} value={newPassword} onChange={(e) => setNewPassword(e.target.value)} />
-                  <Button className="px-2 py-0.5 text-[11px]" disabled={newPassword.length < 8} onClick={() => { onResetPassword(u.id, newPassword); setResetFor(null); setNewPassword(''); }}>save</Button>
-                  <Button variant="ghost" className="px-2 py-0.5 text-[11px]" onClick={() => setResetFor(null)}>cancel</Button>
-                </>
-              ) : (
-                <>
-                  <Button variant="ghost" className="px-2 py-0.5 text-[11px]" onClick={() => setResetFor(u.id)} data-testid="user-reset">reset password</Button>
-                  <Button variant="ghost" className="px-2 py-0.5 text-[11px]" disabled={self} onClick={() => onToggleAdmin(u.id, !u.is_admin)} data-testid="user-toggle-admin">{u.is_admin ? 'make user' : 'make admin'}</Button>
-                  <Button variant="danger" className="px-2 py-0.5 text-[11px]" disabled={self} onClick={() => onDelete(u.id)} data-testid="user-delete">delete</Button>
-                </>
-              )}
-            </span>
-          </div>
-        );
-      })}
-    </div>
-  );
+  const columns: DataTableColumn<UserRecord>[] = [
+    { id: 'username', label: 'username', width: '20%', required: true, render: (u) => <span className="font-mono">{u.username}{u.id === selfId && <span className="ml-1 text-[9px] text-text-muted">(you)</span>}</span> },
+    { id: 'role', label: 'role', width: '10%', render: (u) => <span className={cn('w-fit rounded-sm px-1 text-[9px] uppercase tracking-wide', u.is_admin ? 'bg-accent/15 text-accent' : 'bg-line/40 text-text-muted')}>{u.is_admin ? 'admin' : 'user'}</span> },
+    { id: 'keys', label: 'keys', width: '8%', align: 'right', render: (u) => keys.filter((k) => k.user_id === u.id).length },
+    { id: 'created', label: 'created', width: '17%', render: (u) => <span className="tabular-nums text-text-muted">{fmtWhen(u.created_at_ms)}</span> },
+    { id: 'actions', label: '', width: '45%', required: true, render: (u) => <span className="flex flex-wrap items-center gap-1">
+      {resetFor === u.id ? <>
+        <input className={INPUT} type="password" placeholder="new password" aria-label={`new password for ${u.username}`} value={newPassword} onChange={(e) => setNewPassword(e.target.value)} />
+        <Button className="px-2 py-0.5 text-[11px]" disabled={newPassword.length < 8} onClick={() => { onResetPassword(u.id, newPassword); setResetFor(null); setNewPassword(''); }}>save</Button>
+        <Button variant="ghost" className="px-2 py-0.5 text-[11px]" onClick={() => setResetFor(null)}>cancel</Button>
+      </> : <>
+        <Button variant="ghost" className="px-2 py-0.5 text-[11px]" onClick={() => setResetFor(u.id)} data-testid="user-reset">reset password</Button>
+        <Button variant="ghost" className="px-2 py-0.5 text-[11px]" disabled={u.id === selfId} onClick={() => onToggleAdmin(u.id, !u.is_admin)} data-testid="user-toggle-admin">{u.is_admin ? 'make user' : 'make admin'}</Button>
+        <Button variant="danger" className="px-2 py-0.5 text-[11px]" disabled={u.id === selfId} onClick={() => onDelete(u.id)} data-testid="user-delete">delete</Button>
+      </>}
+    </span> },
+  ];
+  return <div className="rounded-md border border-line"><DataTable id="account-users" rows={users} rowKey={(u) => u.id}
+    columns={columns} rowTestId="user-row" rowAttributes={(u) => ({ 'data-admin': u.is_admin ? 'true' : 'false' })}
+    clientPageSize={25} minWidth={750} /></div>;
 }

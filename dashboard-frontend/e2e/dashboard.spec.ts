@@ -10,6 +10,220 @@ test.describe('Argus dashboard', () => {
     expect(consoleErrors, 'console errors on login shell').toEqual([]);
   });
 
+  test('requests show named identities, live usage, filters, and the normal inspector', async ({ page, consoleErrors }) => {
+    await login(page);
+    await openView(page, VIEWS.find((view) => view.name === 'requests')!);
+    await expect(page.getByTestId('request-row')).toHaveCount(5);
+    const running = page.getByRole('row', { name: 'Open request api_001' });
+    await expect(running).toContainText('Operations');
+    await expect(running).toContainText('operator laptop');
+    await expect(running).toContainText('claude-x → llama-3.1-70b');
+    await expect(running).toContainText('812'); // live usage overlays a durable running row with null tokens
+    await expect(running.locator('td').nth(8)).toHaveText(/4[45]0ms/);
+    await expect(running).toHaveAttribute('data-status', 'completed'); // live WS beats the lagging SQL row
+    await expect(running.locator('td').nth(2)).not.toHaveText('—');
+    await expect(running.getByTestId('request-new-input')).toHaveText('684 84%');
+    await expect(running.getByTestId('request-new-input')).toHaveAttribute('data-quality', 'derived');
+    await expect(running.locator('td').nth(12)).toHaveText('512');
+    await expect(running.getByTestId('request-decode-speed')).toHaveText('—');
+    await expect(running.getByTestId('request-decode-speed')).toHaveAttribute('data-quality', 'unavailable');
+    await page.getByLabel('Search requests').fill('codex');
+    await expect(page.getByTestId('request-row')).toHaveCount(2);
+    await expect(page.getByTestId('request-row').first()).toContainText('Batch inference');
+    await expect(page.getByTestId('request-row').first()).toContainText('batch worker');
+    await expect(page.getByRole('row', { name: 'Open request api_004' }).getByTestId('request-new-input'))
+      .toHaveAttribute('data-cache-bust', 'true');
+    await expect(page.getByRole('row', { name: 'Open request api_004' }).getByTestId('request-new-input'))
+      .toHaveText('300 25% · bust');
+    await page.getByRole('button', { name: 'Clear', exact: true }).click();
+    await page.getByRole('button', { name: 'User', exact: true }).click();
+    await page.getByRole('checkbox', { name: 'Include User: Batch inference' }).check();
+    await expect(page.getByTestId('request-row')).toHaveCount(2);
+    await page.keyboard.press('Escape');
+    await page.getByRole('button', { name: 'Clear', exact: true }).click();
+    await page.getByRole('row', { name: 'Open request api_agent_1' }).click();
+    await expect(page.getByTestId('flow-detail')).toBeVisible();
+    await expect(page.getByTestId('flow-detail')).toContainText('Durable history');
+    await expect(page.getByTestId('flow-detail')).toContainText('Subagent task');
+    await page.getByRole('button', { name: 'close detail' }).click();
+    await page.getByRole('row', { name: 'Open request api_001' }).click();
+    await expect(page.getByTestId('flow-detail')).toBeVisible();
+    await expect(page.getByTestId('flow-detail')).not.toContainText('Durable history');
+    expect(consoleErrors, 'console errors on requests').toEqual([]);
+  });
+
+  test('sessions expand child sessions and reuse the request table and inspector', async ({ page, consoleErrors }) => {
+    await login(page);
+    await openView(page, VIEWS.find((view) => view.name === 'sessions')!);
+    await expect(page.getByText('Select a session to see its sub-sessions and requests.')).toHaveCount(0);
+    await expect(page.getByTestId('sessions-tree').locator(':scope > div').first()).toHaveClass(/w-full/);
+    const root = page.getByTestId('all-sessions-section').getByTestId('session-row').filter({ hasText: 'claude-code' }).first();
+    await expect(root.getByTestId('session-child-count')).toHaveText('1');
+    await root.click();
+    await expect(page.getByTestId('sessions-tree').locator(':scope > div').first()).toHaveClass(/w-\[42%\]/);
+    await expect(page.getByTestId('all-sessions-section').getByTestId('session-roots-expanded-row')).toHaveCount(1);
+    await expect(page.getByTestId('session-stat-children')).toContainText('1');
+    const table = page.getByTestId('session-request-table').getByTestId('request-table');
+    await expect(table.getByRole('columnheader', { name: 'Status' })).toBeVisible();
+    await expect(table.getByRole('columnheader', { name: 'New IN' })).toBeVisible();
+    await table.getByTestId('session-request').first().click();
+    await expect(page.getByTestId('flow-detail')).toBeVisible();
+    expect(consoleErrors, 'console errors on session drill-down').toEqual([]);
+  });
+
+  test('request model and provider facets search, include, and exclude multiple values', async ({ page, consoleErrors }) => {
+    await login(page);
+    await openView(page, VIEWS.find((view) => view.name === 'requests')!);
+    await page.getByRole('button', { name: 'Model', exact: true }).click();
+    const model = page.getByTestId('model-facet');
+    await model.getByLabel('Search model').fill('claude');
+    await model.getByRole('checkbox', { name: 'Include Model: claude-x' }).check();
+    await expect(page.getByTestId('request-row')).toHaveCount(3);
+    await model.getByRole('checkbox', { name: 'Exclude Model: claude-x' }).check();
+    await expect(page.getByTestId('request-row')).toHaveCount(2);
+    await model.getByLabel('Search model').fill('codex');
+    await model.getByRole('checkbox', { name: 'Include Model: codex-large' }).check();
+    await expect(page.getByTestId('request-row')).toHaveCount(2);
+    await page.getByRole('button', { name: 'Provider', exact: true }).click();
+    const provider = page.getByTestId('provider-facet');
+    await provider.getByLabel('Search provider').fill('vllm');
+    await provider.getByRole('checkbox', { name: 'Include Provider: vllm-a' }).check();
+    await expect(page.getByTestId('request-row')).toHaveCount(2);
+    expect(consoleErrors, 'console errors on request facets').toEqual([]);
+  });
+
+  test('request harness and numbered session facets apply immediately', async ({ page }) => {
+    await login(page);
+    await openView(page, VIEWS.find((view) => view.name === 'requests')!);
+    await page.getByRole('button', { name: 'Harness', exact: true }).click();
+    await page.getByRole('checkbox', { name: 'Include Harness: codex' }).check();
+    await expect(page.getByTestId('request-row')).toHaveCount(2);
+    await page.getByRole('button', { name: 'Clear', exact: true }).click();
+    await page.getByRole('button', { name: 'Session', exact: true }).click();
+    await page.getByRole('checkbox', { name: 'Include Session: S-3' }).check();
+    await expect(page.getByTestId('request-row')).toHaveCount(2);
+  });
+
+  test('session count ranges apply lower and upper bounds immediately', async ({ page }) => {
+    await login(page);
+    await openView(page, VIEWS.find((view) => view.name === 'sessions')!);
+    const history = page.getByTestId('all-sessions-section');
+    await expect(history.getByTestId('session-row')).toHaveCount(3);
+    await page.getByLabel('Session filters').getByRole('button', { name: 'Requests', exact: true }).click();
+    await page.getByRole('spinbutton', { name: 'Requests at least' }).fill('2');
+    await expect(history.getByTestId('session-row')).toHaveCount(2);
+    await page.getByRole('spinbutton', { name: 'Requests at most' }).fill('2');
+    await expect(history.getByTestId('session-row')).toHaveCount(2);
+    await page.getByRole('spinbutton', { name: 'Requests at most' }).fill('1');
+    await expect(page.getByText('Lower bound exceeds upper bound.').first()).toBeVisible();
+    await page.getByRole('spinbutton', { name: 'Requests at least' }).fill('');
+    await expect(history.getByTestId('session-row')).toHaveCount(1);
+    await history.getByRole('button', { name: 'session-roots columns' }).click();
+    await history.getByTestId('session-roots-column-chooser').getByLabel('requests', { exact: true }).uncheck();
+    await expect(page.getByLabel('Session filters').getByRole('button', { name: 'Requests', exact: true })).toHaveCount(0);
+    await expect(page.getByTestId('session-hidden-filters')).toContainText('Requests');
+    await expect(history.getByTestId('session-row')).toHaveCount(1);
+  });
+
+  test('table column choices apply to rows and persist across views', async ({ page, consoleErrors }) => {
+    await login(page);
+    await openView(page, VIEWS.find((view) => view.name === 'requests')!);
+    const requests = page.getByTestId('request-table');
+    await page.getByRole('button', { name: 'User', exact: true }).click();
+    await page.getByRole('checkbox', { name: 'Include User: Batch inference' }).check();
+    await expect(requests.getByTestId('request-row')).toHaveCount(2);
+    await page.keyboard.press('Escape');
+    await page.getByRole('button', { name: 'requests columns' }).click();
+    await page.getByTestId('requests-column-chooser').getByLabel('User', { exact: true }).uncheck();
+    await expect(page.getByRole('button', { name: 'User', exact: true })).toHaveCount(0);
+    await expect(page.getByTestId('request-hidden-filters')).toContainText('user');
+    await expect(requests.getByTestId('request-row')).toHaveCount(2);
+    await page.getByTestId('requests-column-chooser').getByLabel('User', { exact: true }).check();
+    await expect(page.getByRole('button', { name: 'User', exact: true })).toBeVisible();
+    await page.getByRole('button', { name: 'Clear', exact: true }).click();
+    const before = await requests.getByTestId('request-row').first().locator('td').count();
+    await page.getByTestId('requests-column-chooser').getByLabel('TTFT').uncheck();
+    await expect(requests.getByRole('columnheader', { name: 'TTFT' })).toHaveCount(0);
+    await expect(requests.getByTestId('request-row').first().locator('td')).toHaveCount(before - 1);
+
+    await openView(page, VIEWS.find((view) => view.name === 'sessions')!);
+    await openView(page, VIEWS.find((view) => view.name === 'requests')!);
+    await expect(page.getByTestId('request-table').getByRole('columnheader', { name: 'TTFT' })).toHaveCount(0);
+    expect(consoleErrors, 'console errors on shared column controls').toEqual([]);
+  });
+
+  test('running request phases and reported decode rate update without a page refresh', async ({ page, consoleErrors }) => {
+    await login(page);
+    await openView(page, VIEWS.find((view) => view.name === 'requests')!);
+    await page.waitForTimeout(500); // let the finite mock terminal frame settle
+    const row = page.getByRole('row', { name: 'Open request api_001' });
+    await page.evaluate(async () => {
+      const { dashboardStore } = await import('/dashboard/src/store/dashboardStore.ts');
+      const flow = dashboardStore.getState().flows.get('api_001')!;
+      dashboardStore.getState().upsertFlow({ ...flow, response_id: 'resp_phase', status: 'open',
+        first_content_delta_ms: null, first_upstream_byte_ms: null,
+        usage: { prompt: 812, completion: 100, total: 912 } });
+    });
+    await expect(row).toHaveAttribute('data-status', 'queued');
+    await page.evaluate(async () => {
+      const { dashboardStore } = await import('/dashboard/src/store/dashboardStore.ts');
+      const flow = dashboardStore.getState().flows.get('api_001')!;
+      dashboardStore.getState().upsertFlow({ ...flow, first_upstream_byte_ms: flow.started_ms + 200 });
+    });
+    await expect(row).toHaveAttribute('data-status', 'prefilling');
+    await page.evaluate(async () => {
+      const { dashboardStore } = await import('/dashboard/src/store/dashboardStore.ts');
+      const flow = dashboardStore.getState().flows.get('api_001')!;
+      dashboardStore.getState().upsertFlow({ ...flow, first_content_delta_ms: flow.started_ms + 400 });
+    });
+    await expect(row).toHaveAttribute('data-status', 'decoding');
+    await expect(row.getByTestId('request-decode-speed')).toHaveText('—');
+    await page.waitForTimeout(300);
+    await page.evaluate(async () => {
+      const { dashboardStore } = await import('/dashboard/src/store/dashboardStore.ts');
+      dashboardStore.getState().patchUsage('api_001', { prompt: 812, completion: 160, total: 972 });
+    });
+    await expect(row.getByTestId('request-decode-speed')).toHaveAttribute('data-quality', 'measured');
+    await expect(row.getByTestId('request-decode-speed')).toContainText('tok/s');
+    expect(consoleErrors, 'console errors on live request phases').toEqual([]);
+  });
+
+  test('request history clear requires an exact typed confirmation', async ({ page, consoleErrors }) => {
+    await login(page);
+    await page.setViewportSize({ width: 800, height: 600 });
+    await openView(page, VIEWS.find((view) => view.name === 'requests')!);
+    await page.getByRole('button', { name: 'Clear history…' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Clear request and session history' });
+    await expect(dialog).toBeVisible();
+    const deleteButton = dialog.getByRole('button', { name: 'Delete all history' });
+    await expect(deleteButton).toHaveCount(0);
+    await dialog.getByLabel('Type confirmation phrase').fill('DELETE ALL REQUESTS');
+    await expect(deleteButton).toHaveCount(0);
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    await expect(page.getByTestId('request-row')).toHaveCount(5);
+
+    await page.getByRole('button', { name: 'Clear history…' }).click();
+    const input = page.getByLabel('Type confirmation phrase');
+    await input.fill('DELETE ALL REQUESTS AND SESSIONS');
+    await expect(deleteButton).toBeVisible();
+    const colors = await deleteButton.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return { background: style.backgroundColor, text: style.color };
+    });
+    expect(colors).toEqual({ background: 'rgb(255, 110, 110)', text: 'rgb(11, 13, 23)' });
+    const buttonBox = await deleteButton.boundingBox();
+    expect(buttonBox && buttonBox.y + buttonBox.height).toBeLessThanOrEqual(600);
+    await expect(dialog.getByRole('status')).toContainText('Nothing has been deleted');
+    await input.press('Enter');
+    await expect(dialog).toBeVisible();
+    await expect(page.getByTestId('request-row')).toHaveCount(5);
+    await deleteButton.click();
+    await expect(dialog).toHaveCount(0);
+    await expect(page.getByTestId('request-row')).toHaveCount(0);
+    await expect(page.getByRole('status')).toContainText('Deleted 5 requests and 3 sessions');
+    expect(consoleErrors, 'console errors on history clear').toEqual([]);
+  });
+
   test('navigation and status controls reflow at half-screen width', async ({ page, consoleErrors }) => {
     await page.setViewportSize({ width: 800, height: 900 });
     await login(page);
@@ -77,7 +291,7 @@ test.describe('Argus dashboard', () => {
   // popover must render the split AND an honest `—` for an UNREPORTED class (never a fabricated 0).
   test('tokens popover shows the cached/reasoning split + — on unreported (gap 08)', async ({ page, consoleErrors }) => {
     await login(page);
-    await openView(page, VIEWS[0]!); // Flows
+    await openView(page, VIEWS.find((view) => view.name === 'flows')!); // Flows
     await page.waitForTimeout(400);
 
     // api_002's seed flow reports prompt/completion but UNREPORTED cached/reasoning → the popover
@@ -108,7 +322,7 @@ test.describe('Argus dashboard', () => {
   // fabricated 0%/100%. Covers the acceptance criterion: gauge WITH and WITHOUT `context_limit`.
   test('context gauge: derived with a known limit, — without (gap 09)', async ({ page, consoleErrors }) => {
     await login(page);
-    await openView(page, VIEWS[0]!); // Flows
+    await openView(page, VIEWS.find((view) => view.name === 'flows')!); // Flows
     await page.waitForTimeout(400);
 
     // The aggregate context-pressure stat is present, with a measured-coverage readout.
@@ -146,7 +360,7 @@ test.describe('Argus dashboard', () => {
   // segments as `—` (unavailable), never a fabricated 0ms.
   test('latency breakdown: measured TTFT + waterfall, — on missing phases (gap 10)', async ({ page, consoleErrors }) => {
     await login(page);
-    await openView(page, VIEWS[0]!); // Flows
+    await openView(page, VIEWS.find((view) => view.name === 'flows')!); // Flows
     await page.waitForTimeout(400);
 
     // api_002 (completed) carries the FULL phase spine (incl. stream_end + finalize) + a served
@@ -177,7 +391,7 @@ test.describe('Argus dashboard', () => {
     // api_003 (failed before content): the prefill + generation segments are UNAVAILABLE — `—`, NOT
     // 0ms — and have no bar fill. Select by its id (the row renders the short api_call_id verbatim;
     // `openai` is no longer unique — the gap-11 `api_005` failover flow also serves it).
-    const failed = page.getByTestId('flow-row').filter({ hasText: 'api_003' }).first();
+    const failed = page.locator('[data-api-call-id="api_003"]');
     await failed.click();
     await expect(page.getByTestId('latency-legend-prefill')).toHaveAttribute('data-quality', 'unavailable');
     await expect(page.getByTestId('latency-dur-prefill')).toHaveText('—');
@@ -212,12 +426,12 @@ test.describe('Argus dashboard', () => {
   // fixtures render correctly" acceptance.
   test('failover trace: chain on a failover flow, single node + — on no first byte (gap 11)', async ({ page, consoleErrors }) => {
     await login(page);
-    await openView(page, VIEWS[0]!); // Flows
+    await openView(page, VIEWS.find((view) => view.name === 'flows')!); // Flows
     await page.waitForTimeout(400);
 
     // api_005 is a FAILOVER flow (vllm-b failed → openai served). Rows render the (short) api_call_id
     // verbatim (`api_005` is ≤10 chars), so select by it — unambiguous. The trace shows a 2-node chain.
-    await page.getByTestId('flow-row').filter({ hasText: 'api_005' }).first().click();
+    await page.locator('[data-api-call-id="api_005"]').click();
     await expect(page.getByTestId('flow-detail')).toBeVisible();
     const trace = page.getByTestId('attempt-trace');
     await expect(trace).toBeVisible();
@@ -236,7 +450,7 @@ test.describe('Argus dashboard', () => {
     await expect(failedByte).toHaveText('—');
 
     // api_003 is a SINGLE FAILED attempt (no failover): one node, the "no failover" label, no chain.
-    await page.getByTestId('flow-row').filter({ hasText: 'api_003' }).first().click();
+    await page.locator('[data-api-call-id="api_003"]').click();
     await expect(page.getByTestId('attempt-trace')).toHaveAttribute('data-failover', 'false');
     await expect(page.getByTestId('attempt-single-label')).toBeVisible();
     await expect(page.getByTestId('attempt-node-0')).toBeVisible();
@@ -253,7 +467,7 @@ test.describe('Argus dashboard', () => {
   // never a fabricated 0ms/0%, neutral node).
   test('topology per-provider tooltip + node states (gap 13)', async ({ page, consoleErrors }) => {
     await login(page);
-    await openView(page, VIEWS[1]!); // Topology
+    await openView(page, VIEWS.find((view) => view.name === 'topology')!); // Topology
     // Let d3-force settle so the nodes sit at stable, hoverable positions.
     await page.waitForTimeout(800);
 
@@ -306,7 +520,7 @@ test.describe('Argus dashboard', () => {
   // blank implying "no error"). Rows are selected by stable `api_call_id` (gap-11 selector hygiene).
   test('failure taxonomy panel + ErrorTab capture on/off (gap 14)', async ({ page, consoleErrors }) => {
     await login(page);
-    await openView(page, VIEWS[0]!); // Flows
+    await openView(page, VIEWS.find((view) => view.name === 'flows')!); // Flows
     await page.waitForTimeout(400);
 
     // The aggregate panel renders (flows ARE observed). The overall error-rate chip is derived (not —).
@@ -331,7 +545,7 @@ test.describe('Argus dashboard', () => {
     await expect(timeoutReason).toHaveAttribute('data-source', 'error_class');
 
     // ErrorTab — capture ON: api_003 (failed, 503) has a CAPTURED upstream error body. Select by id.
-    await page.getByTestId('flow-row').filter({ hasText: 'api_003' }).first().click();
+    await page.locator('[data-api-call-id="api_003"]').click();
     await expect(page.getByTestId('flow-detail')).toBeVisible();
     await page.getByRole('tab', { name: 'Error' }).click();
     const capture = page.getByTestId('error-capture');
@@ -341,7 +555,7 @@ test.describe('Argus dashboard', () => {
 
     // ErrorTab — capture OFF: api_006 (failed, timeout) has NO captured body ⇒ explicit "capture
     // disabled" state (unavailable), NOT a blank implying "no error".
-    await page.getByTestId('flow-row').filter({ hasText: 'api_006' }).first().click();
+    await page.locator('[data-api-call-id="api_006"]').click();
     await page.getByRole('tab', { name: 'Error' }).click();
     const capture2 = page.getByTestId('error-capture');
     await expect(capture2).toHaveAttribute('data-state', 'unavailable');
@@ -360,11 +574,11 @@ test.describe('Argus dashboard', () => {
   // surface: showing the key-HASH (not a raw key) to the operator is the INTENDED purpose.
   test('client attribution: source-tagged CLIENT column + per-client filter + roll-up (gap 15)', async ({ page, consoleErrors }) => {
     await login(page);
-    await openView(page, VIEWS[0]!); // Flows
+    await openView(page, VIEWS.find((view) => view.name === 'flows')!); // Flows
     await page.waitForTimeout(400);
 
     const rowClient = (id: string) =>
-      page.getByTestId('flow-row').filter({ hasText: id }).first().getByTestId('flow-client');
+      page.locator(`[data-api-call-id="${id}"]`).getByTestId('flow-client');
 
     // api_001: a STRONG key-hash identity → `measured`, the hash prefix shown (NEVER a raw key), `key` badge.
     const kh = rowClient('api_001');
@@ -427,42 +641,34 @@ test.describe('Argus dashboard', () => {
     expect(consoleErrors, 'console errors on the client attribution surface').toEqual([]);
   });
 
-  // Gap 15 review round 3 (CSS correctness): a high-cardinality `client_label` can be ~4 KiB; the filter
-  // chip must BOUND it in REAL layout. `max-w`+`truncate` is a no-op on an inline span — the label span
-  // is `inline-block min-w-0 max-w-[160px] truncate`, so it must actually CLIP (scrollWidth > clientWidth)
-  // while the chip button width stays bounded (does NOT expand to ~4 KiB / overflow the bar). `?longclient=1`
-  // injects the long-label flow (opt-in — every other test is untouched).
-  test('a ~4 KiB client_label chip is BOUNDED in real layout — clipped span, bounded button (gap 15 R3)', async ({ page, consoleErrors }) => {
+  test('a ~4 KiB client label stays bounded in the searchable facet', async ({ page, consoleErrors }) => {
     await installDeterminism(page);
     await page.goto('/dashboard/?mock=1&longclient=1', { waitUntil: 'networkidle' });
     await page.locator('input').first().fill('dev-token');
     await page.getByRole('button', { name: /sign in/i }).click();
     await expect(page.getByRole('navigation', { name: 'Dashboard' }).getByRole('button', { name: 'Chat', exact: true })).toBeVisible();
-    await openView(page, VIEWS[0]!); // Flows
+    await openView(page, VIEWS.find((view) => view.name === 'flows')!); // Flows
     await page.waitForTimeout(400);
 
-    // The long UA client renders a filter chip; its label is the bounded truncate span.
     const filterBar = page.getByTestId('flow-filter-bar');
-    const longChipLabel = filterBar.getByTestId('flow-filter-chip-label').filter({ hasText: 'python-httpx/x' }).first();
+    await filterBar.getByRole('button', { name: 'Client' }).click();
+    const longChipLabel = filterBar.locator('[title^="python-httpx/x"]').first();
     await expect(longChipLabel).toBeVisible();
 
     // REAL layout: the label CLIPS (content wider than its box) — the inline-block + max-width + overflow
     // actually take effect (the inline-span bug would NOT clip, leaving scrollWidth == clientWidth).
     const clipped = await longChipLabel.evaluate((el) => el.scrollWidth > el.clientWidth);
     expect(clipped, 'the ~4 KiB label span is clipped (overflow constrained)').toBe(true);
-    // The label box itself is capped near max-w-[160px] (not ~4 KiB wide).
+    // The label box is capped by the dropdown's central grid column.
     const labelWidth = await longChipLabel.evaluate((el) => el.clientWidth);
-    expect(labelWidth, 'label box is bounded near its max-width').toBeLessThanOrEqual(200);
+    expect(labelWidth, 'label box is bounded').toBeLessThanOrEqual(220);
 
-    // The CHIP BUTTON width stays bounded — it does NOT expand to the label's full ~4 KiB width nor
-    // overflow the filter bar (the whole point of the fix).
-    const longChipButton = filterBar.getByRole('button').filter({ hasText: 'python-httpx/x' }).first();
-    const chipWidth = await longChipButton.evaluate((el) => el.getBoundingClientRect().width);
-    expect(chipWidth, 'chip button width is bounded').toBeLessThanOrEqual(260);
+    const dropdown = filterBar.getByTestId('client-facet');
+    const chipWidth = await dropdown.evaluate((el) => el.getBoundingClientRect().width);
+    expect(chipWidth, 'dropdown width is bounded').toBeLessThanOrEqual(320);
     const barWidth = await filterBar.evaluate((el) => el.getBoundingClientRect().width);
-    expect(chipWidth, 'chip never exceeds the filter bar width').toBeLessThanOrEqual(barWidth);
-    // The full value is still available on hover (the chip title carries it intact).
-    await expect(longChipButton).toHaveAttribute('title', /^python-httpx\/x{4096}$/);
+    expect(chipWidth, 'dropdown never exceeds the filter bar width').toBeLessThanOrEqual(barWidth);
+    await expect(longChipLabel).toHaveAttribute('title', /^python-httpx\/x{4096}$/);
 
     expect(consoleErrors, 'console errors on the long-client chip').toEqual([]);
   });
@@ -475,7 +681,7 @@ test.describe('Argus dashboard', () => {
   // an unreported token class reads — (don't-lie-with-zeros). Rows selected by stable identity.
   test('control-room overview composes the surfaces with honest DQ tags (gap 16)', async ({ page, consoleErrors }) => {
     await login(page);
-    await openView(page, VIEWS[4]!); // Overview
+    await openView(page, VIEWS.find((view) => view.name === 'overview')!); // Overview
     await page.waitForTimeout(600);
 
     // The view + headline render (the unified gap-01 metrics tile, with measured active streams).
@@ -576,6 +782,10 @@ test.describe('Argus dashboard', () => {
     test(`${view.name}: renders + no console errors + matches baseline`, async ({ page, consoleErrors }) => {
       await login(page);
       await openView(page, view);
+      if (view.name === 'sessions') {
+        await page.getByTestId('all-sessions-section').getByTestId('session-row').filter({ hasText: 'claude-code' }).first().click();
+        await expect(page.getByTestId('all-sessions-section').getByTestId('session-roots-expanded-row')).toHaveCount(1);
+      }
       // Let d3-force / uPlot / sankey reach their settled frame before the pixel baseline.
       // (mock streams a finite snapshot + 5 frames, then is quiescent.)
       await page.waitForTimeout(800);

@@ -29,6 +29,48 @@ use utoipa::ToSchema;
 
 pub type StoreResult<T> = Result<T, String>;
 
+/// Nonblocking request-path numbers. SQL persists the high-water marks and
+/// supplies their starting values at boot; UUIDs remain the relational keys.
+#[derive(Debug, Clone)]
+pub struct DisplayNumbers {
+    request: Arc<AtomicI64>,
+    session: Arc<AtomicI64>,
+}
+
+impl DisplayNumbers {
+    pub fn new(request_last: i64, session_last: i64) -> Self {
+        Self {
+            request: Arc::new(AtomicI64::new(request_last)),
+            session: Arc::new(AtomicI64::new(session_last)),
+        }
+    }
+
+    pub fn next_request(&self) -> i64 {
+        self.request.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    pub fn next_session(&self) -> i64 {
+        self.session.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    pub fn observe_session(&self, number: i64) {
+        self.session.fetch_max(number, Ordering::Relaxed);
+    }
+}
+
+impl Default for DisplayNumbers {
+    fn default() -> Self {
+        Self::new(0, 0)
+    }
+}
+
+/// Rows removed by an operator-initiated inference-history clear.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, utoipa::ToSchema)]
+pub struct HistoryClearCounts {
+    pub requests: u64,
+    pub sessions: u64,
+}
+
 /// Shared wire/storage form used by `client_auth`: SHA-256 is appropriate for
 /// high-entropy generated API keys and lets authentication remain deterministic.
 const API_KEY_HASH_PREFIX: &str = "sha256:";
@@ -38,6 +80,7 @@ const API_KEY_HASH_PREFIX: &str = "sha256:";
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct RequestRow {
     pub id: String,
+    pub display_number: Option<i64>,
     pub response_id: Option<String>,
     pub conversation_id: Option<String>,
     pub virtual_key_id: Option<String>,
@@ -173,6 +216,8 @@ pub struct UsageBucket {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct RequestSummary {
     pub id: String,
+    pub display_number: Option<i64>,
+    pub session_display_number: Option<i64>,
     pub response_id: Option<String>,
     pub conversation_id: Option<String>,
     pub virtual_key_id: Option<String>,
@@ -213,6 +258,103 @@ pub struct RequestSummary {
     pub divergence_index: Option<i64>,
     pub cache_bust: Option<bool>,
     pub user_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RequestListFilter {
+    pub search: Option<String>,
+    pub status: Option<String>,
+    pub model: Option<String>,
+    pub backend: Option<String>,
+    pub model_values_json: Option<String>,
+    pub model_exclude: bool,
+    pub backend_values_json: Option<String>,
+    pub backend_exclude: bool,
+    pub protocol: Option<String>,
+    pub user_id: Option<String>,
+    pub virtual_key_id: Option<String>,
+    /// Validated include/exclude choices for all categorical request facets.
+    pub facets_json: Option<String>,
+    pub since_ms: Option<i64>,
+    pub until_ms: Option<i64>,
+    pub before_ms: Option<i64>,
+    pub before_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct RequestFacets {
+    pub models: Vec<String>,
+    pub providers: Vec<String>,
+    pub statuses: Vec<String>,
+    pub protocols: Vec<String>,
+    pub user_ids: Vec<String>,
+    pub key_ids: Vec<String>,
+    pub harnesses: Vec<String>,
+    pub kinds: Vec<String>,
+    pub sessions: Vec<RequestSessionFacet>,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct RequestSessionFacet {
+    pub id: String,
+    pub display_number: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SessionTableFilter {
+    pub search: Option<String>,
+    pub user_id: Option<String>,
+    pub virtual_key_id: Option<String>,
+    pub harness: Option<String>,
+    pub kind: Option<String>,
+    /// Validated include/exclude choices for all categorical session facets.
+    pub facets_json: Option<String>,
+    pub first_since_ms: Option<i64>,
+    pub first_until_ms: Option<i64>,
+    pub last_since_ms: Option<i64>,
+    pub last_until_ms: Option<i64>,
+    pub min_requests: Option<i64>,
+    pub max_requests: Option<i64>,
+    pub min_children: Option<i64>,
+    pub max_children: Option<i64>,
+    pub min_input_tokens: Option<i64>,
+    pub max_input_tokens: Option<i64>,
+    pub min_output_tokens: Option<i64>,
+    pub max_output_tokens: Option<i64>,
+    pub min_in_flight: Option<i64>,
+    pub max_in_flight: Option<i64>,
+    pub sort_by: String,
+    pub descending: bool,
+    pub offset: i64,
+    pub limit: i64,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct SessionTableRow {
+    #[serde(flatten)]
+    pub session: crate::sessions::SessionRow,
+    pub child_count: i64,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub in_flight: i64,
+    pub user_name: Option<String>,
+    pub key_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct SessionTablePage {
+    pub sessions: Vec<SessionTableRow>,
+    pub total: i64,
+    pub offset: i64,
+    pub limit: i64,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct SessionFacets {
+    pub harnesses: Vec<String>,
+    pub user_ids: Vec<String>,
+    pub key_ids: Vec<String>,
+    pub kinds: Vec<String>,
 }
 
 /// One (bucket, user, key) cell of the activity series.
@@ -388,6 +530,10 @@ pub trait PersistenceWriter: Send + Sync {
     async fn upsert_session(&self, _row: crate::sessions::SessionRow) -> StoreResult<()> {
         Ok(())
     }
+    /// Administrative operation, serialized behind earlier queued writes.
+    async fn clear_history(&self) -> StoreResult<HistoryClearCounts> {
+        Err("history clearing is not supported by this writer".to_string())
+    }
 }
 
 #[async_trait]
@@ -401,6 +547,12 @@ pub trait PersistenceStore: PersistenceWriter {
         limit: usize,
     ) -> StoreResult<Vec<EventRow>>;
     async fn list_requests(&self, limit: i64) -> StoreResult<Vec<RequestSummary>>;
+    async fn list_requests_filtered(
+        &self,
+        filter: &RequestListFilter,
+        limit: i64,
+    ) -> StoreResult<Vec<RequestSummary>>;
+    async fn request_facets(&self) -> StoreResult<RequestFacets>;
     async fn usage_summary(&self, filter: &UsageFilter) -> StoreResult<Vec<UsageBucket>>;
     async fn usage_summary_limited(
         &self,
@@ -432,13 +584,22 @@ pub trait PersistenceStore: PersistenceWriter {
         &self,
         since_ms: i64,
         roots_only: bool,
+        before_ms: Option<i64>,
+        before_id: Option<&str>,
         limit: usize,
     ) -> StoreResult<Vec<crate::sessions::SessionRow>>;
+    async fn list_session_table(
+        &self,
+        filter: &SessionTableFilter,
+    ) -> StoreResult<SessionTablePage>;
+    async fn session_facets(&self) -> StoreResult<SessionFacets>;
     /// Direct children of a node, oldest first.
     async fn session_children(
         &self,
         parent_id: &str,
     ) -> StoreResult<Vec<crate::sessions::SessionRow>>;
+    /// Direct child counts for the supplied nodes, including nodes with zero children.
+    async fn session_child_counts(&self, ids: &[String]) -> StoreResult<HashMap<String, i64>>;
     /// All descendants of a node, breadth-first, at most `limit`.
     async fn session_descendants(
         &self,
@@ -449,6 +610,8 @@ pub trait PersistenceStore: PersistenceWriter {
     async fn session_requests(
         &self,
         session_id: &str,
+        before_ms: Option<i64>,
+        before_id: Option<&str>,
         limit: usize,
     ) -> StoreResult<Vec<RequestSummary>>;
     /// Lifetime token totals of one session node's requests: the sums over the
@@ -782,6 +945,86 @@ macro_rules! execute {
 }
 
 impl SqlStore {
+    pub async fn display_number_watermarks(&self) -> StoreResult<(i64, i64)> {
+        let sql = "SELECT COALESCE(MAX(CASE WHEN kind = 'request' THEN last_value END), 0), \
+            COALESCE(MAX(CASE WHEN kind = 'session' THEN last_value END), 0) FROM display_counters";
+        match &self.pool {
+            SqlPool::Sqlite(pool) => {
+                let row = sqlx::query(sql)
+                    .fetch_one(pool)
+                    .await
+                    .map_err(store_error)?;
+                Ok((
+                    row.try_get(0).map_err(store_error)?,
+                    row.try_get(1).map_err(store_error)?,
+                ))
+            }
+            SqlPool::Postgres(pool) => {
+                let row = sqlx::query(sql)
+                    .fetch_one(pool)
+                    .await
+                    .map_err(store_error)?;
+                Ok((
+                    row.try_get(0).map_err(store_error)?,
+                    row.try_get(1).map_err(store_error)?,
+                ))
+            }
+        }
+    }
+
+    async fn number_for_insert(&self, kind: &str, provided: Option<i64>) -> StoreResult<i64> {
+        if let Some(number) = provided {
+            let sql = format!(
+                "INSERT INTO display_counters(kind, last_value) VALUES ({}) \
+                 ON CONFLICT(kind) DO UPDATE SET last_value = \
+                 CASE WHEN excluded.last_value > display_counters.last_value \
+                 THEN excluded.last_value ELSE display_counters.last_value END",
+                placeholders(self.postgres(), 2)
+            );
+            execute!(self, &sql, kind, number);
+            return Ok(number);
+        }
+        let sql = format!(
+            "INSERT INTO display_counters(kind, last_value) VALUES ({}, 1) \
+             ON CONFLICT(kind) DO UPDATE SET last_value = display_counters.last_value + 1 \
+             RETURNING last_value",
+            placeholder(self.postgres(), 1)
+        );
+        match &self.pool {
+            SqlPool::Sqlite(pool) => sqlx::query_scalar(&sql)
+                .bind(kind)
+                .fetch_one(pool)
+                .await
+                .map_err(store_error),
+            SqlPool::Postgres(pool) => sqlx::query_scalar(&sql)
+                .bind(kind)
+                .fetch_one(pool)
+                .await
+                .map_err(store_error),
+        }
+    }
+
+    async fn existing_number(&self, table: &str, id: &str) -> StoreResult<Option<i64>> {
+        let sql = format!(
+            "SELECT display_number FROM {table} WHERE id = {}",
+            placeholder(self.postgres(), 1)
+        );
+        match &self.pool {
+            SqlPool::Sqlite(pool) => sqlx::query_scalar(&sql)
+                .bind(id)
+                .fetch_optional(pool)
+                .await
+                .map_err(store_error)
+                .map(Option::flatten),
+            SqlPool::Postgres(pool) => sqlx::query_scalar(&sql)
+                .bind(id)
+                .fetch_optional(pool)
+                .await
+                .map_err(store_error)
+                .map(Option::flatten),
+        }
+    }
+
     /// Connect and migrate SQLite storage. On Unix a file-backed database is
     /// tightened to `0600`, including when it already exists. Its parent is not
     /// chmodded because it may be shared or operator-owned; deployments must
@@ -922,6 +1165,29 @@ fn placeholder(postgres: bool, index: usize) -> String {
     }
 }
 
+fn facet_predicate(postgres: bool, parameter: &str, facet: &str, columns: &[&str]) -> String {
+    let values = |side: &str| {
+        if postgres {
+            format!(
+                "jsonb_array_elements_text(COALESCE(CAST({parameter} AS JSONB)->'{facet}'->'{side}', '[]'::jsonb)) AS choice(value)"
+            )
+        } else {
+            format!("json_each(CAST({parameter} AS TEXT), '$.{facet}.{side}') AS choice")
+        }
+    };
+    let matches = columns
+        .iter()
+        .map(|column| format!("choice.value = {column}"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let includes = values("include");
+    let excludes = values("exclude");
+    format!(
+        "(NOT EXISTS (SELECT 1 FROM {includes}) OR EXISTS (SELECT 1 FROM {includes} WHERE {matches})) \
+         AND NOT EXISTS (SELECT 1 FROM {excludes} WHERE {matches})"
+    )
+}
+
 fn placeholders(postgres: bool, count: usize) -> String {
     (1..=count)
         .map(|index| placeholder(postgres, index))
@@ -981,7 +1247,8 @@ const REQUEST_COLUMNS: &str = "SELECT id, response_id, conversation_id, virtual_
     reasoning_tokens, error, terminal_reason, attempts_json, timings_json, client_label, \
     client_source, harness, harness_version, harness_session_id, harness_sub_session_id, \
     harness_parent_session_id, session_kind, session_id, chain_parent_request_id, item_count, \
-    shared_prefix_items, divergence_kind, divergence_index, cache_bust, user_id FROM requests";
+    shared_prefix_items, divergence_kind, divergence_index, cache_bust, user_id, display_number, \
+    (SELECT display_number FROM sessions WHERE sessions.id = requests.session_id) FROM requests";
 
 fn decode_request<R>(row: &R) -> StoreResult<RequestSummary>
 where
@@ -1033,12 +1300,14 @@ where
             .map_err(store_error)?
             .map(|flag| flag != 0),
         user_id: row.try_get(36).map_err(store_error)?,
+        display_number: row.try_get(37).map_err(store_error)?,
+        session_display_number: row.try_get(38).map_err(store_error)?,
     })
 }
 
 const SESSION_COLUMNS: &str = "SELECT id, parent_id, kind, harness, harness_version, external_id, \
     session_kind, client_label, virtual_key_id, user_id, depth, root_request_id, \
-    spawned_by_request_id, first_seen_ms, last_seen_ms, request_count FROM sessions";
+    spawned_by_request_id, first_seen_ms, last_seen_ms, request_count, display_number FROM sessions";
 
 fn decode_session<R>(row: &R) -> StoreResult<crate::sessions::SessionRow>
 where
@@ -1065,6 +1334,7 @@ where
         first_seen_ms: row.try_get(13).map_err(store_error)?,
         last_seen_ms: row.try_get(14).map_err(store_error)?,
         request_count: row.try_get(15).map_err(store_error)?,
+        display_number: row.try_get(16).map_err(store_error)?,
     })
 }
 
@@ -1639,14 +1909,17 @@ fn legacy_kwargs(raw: Option<&str>) -> StoreResult<serde_json::Map<String, serde
 #[async_trait]
 impl PersistenceWriter for SqlStore {
     async fn begin_request(&self, row: RequestRow) -> StoreResult<()> {
+        let display_number = self
+            .number_for_insert("request", row.display_number)
+            .await?;
         let sql = format!(
             "INSERT INTO requests (id, response_id, conversation_id, virtual_key_id, \
              client_protocol, client_model, alias, backend, resolved_model, status, created_at_ms, \
              harness, harness_version, harness_session_id, harness_sub_session_id, \
              harness_parent_session_id, session_kind, session_id, chain_parent_request_id, \
              item_count, shared_prefix_items, divergence_kind, divergence_index, cache_bust, \
-             client_label, client_source, user_id) VALUES ({})",
-            placeholders(self.postgres(), 27)
+             client_label, client_source, user_id, display_number) VALUES ({})",
+            placeholders(self.postgres(), 28)
         );
         execute!(
             self,
@@ -1678,6 +1951,7 @@ impl PersistenceWriter for SqlStore {
             row.client_label,
             row.client_source,
             row.user_id,
+            display_number,
         );
         Ok(())
     }
@@ -1783,12 +2057,19 @@ impl PersistenceWriter for SqlStore {
 
     async fn upsert_session(&self, row: crate::sessions::SessionRow) -> StoreResult<()> {
         let pg = self.postgres();
+        let display_number = match row.display_number {
+            Some(number) => self.number_for_insert("session", Some(number)).await?,
+            None => match self.existing_number("sessions", &row.id).await? {
+                Some(number) => number,
+                None => self.number_for_insert("session", None).await?,
+            },
+        };
         // SQLite's multi-argument MAX is Postgres' GREATEST.
         let greatest = if pg { "GREATEST" } else { "MAX" };
         let sql = format!(
             "INSERT INTO sessions (id, parent_id, kind, harness, harness_version, external_id, \
              session_kind, client_label, virtual_key_id, user_id, depth, root_request_id, \
-             spawned_by_request_id, first_seen_ms, last_seen_ms, request_count) VALUES ({}) \
+             spawned_by_request_id, first_seen_ms, last_seen_ms, request_count, display_number) VALUES ({}) \
              ON CONFLICT (id) DO UPDATE SET \
              parent_id = COALESCE(excluded.parent_id, sessions.parent_id), \
              harness_version = COALESCE(excluded.harness_version, sessions.harness_version), \
@@ -1802,7 +2083,7 @@ impl PersistenceWriter for SqlStore {
                  excluded.spawned_by_request_id), \
              last_seen_ms = {greatest}(sessions.last_seen_ms, excluded.last_seen_ms), \
              request_count = {greatest}(sessions.request_count, excluded.request_count)",
-            placeholders(pg, 16)
+            placeholders(pg, 17)
         );
         execute!(
             self,
@@ -1823,18 +2104,23 @@ impl PersistenceWriter for SqlStore {
             row.first_seen_ms,
             row.last_seen_ms,
             row.request_count,
+            display_number,
         );
         Ok(())
     }
 
     async fn finish_request(&self, id: &str, finish: RequestFinish) -> StoreResult<()> {
+        let display_number = match self.existing_number("requests", id).await? {
+            Some(number) => number,
+            None => self.number_for_insert("request", None).await?,
+        };
         let pg = self.postgres();
         let sql = format!(
             "INSERT INTO requests (id, client_protocol, client_model, status, created_at_ms, \
              response_id, completed_at_ms, first_token_at_ms, input_tokens, output_tokens, \
              cached_tokens, reasoning_tokens, error, terminal_reason, backend, resolved_model, \
-             attempts_json, timings_json, client_label, client_source) VALUES ({}, 'unknown', '', \
-             {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}) \
+             attempts_json, timings_json, client_label, client_source, display_number) VALUES ({}, 'unknown', '', \
+             {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}) \
              ON CONFLICT (id) DO UPDATE SET response_id = excluded.response_id, \
              status = excluded.status, completed_at_ms = excluded.completed_at_ms, \
              first_token_at_ms = excluded.first_token_at_ms, input_tokens = excluded.input_tokens, \
@@ -1844,7 +2130,8 @@ impl PersistenceWriter for SqlStore {
              resolved_model = excluded.resolved_model, attempts_json = excluded.attempts_json, \
              timings_json = excluded.timings_json, \
              client_label = COALESCE(excluded.client_label, requests.client_label), \
-             client_source = COALESCE(excluded.client_source, requests.client_source)",
+             client_source = COALESCE(excluded.client_source, requests.client_source), \
+             display_number = COALESCE(requests.display_number, excluded.display_number)",
             placeholder(pg, 1),
             placeholder(pg, 2),
             placeholder(pg, 3),
@@ -1863,6 +2150,7 @@ impl PersistenceWriter for SqlStore {
             placeholder(pg, 16),
             placeholder(pg, 17),
             placeholder(pg, 18),
+            placeholder(pg, 19),
         );
         execute!(
             self,
@@ -1885,8 +2173,47 @@ impl PersistenceWriter for SqlStore {
             finish.timings_json,
             finish.client_label,
             finish.client_source,
+            display_number,
         );
         Ok(())
+    }
+
+    async fn clear_history(&self) -> StoreResult<HistoryClearCounts> {
+        // These five tables form one inference-history unit. Keep operational
+        // config, users, keys, audit, and backend metrics outside the transaction.
+        macro_rules! clear_in_transaction {
+            ($pool:expr) => {{
+                let mut transaction = $pool.begin().await.map_err(store_error)?;
+                sqlx::query("DELETE FROM request_events")
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(store_error)?;
+                sqlx::query("DELETE FROM request_items")
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(store_error)?;
+                sqlx::query("DELETE FROM content_blobs")
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(store_error)?;
+                let requests = sqlx::query("DELETE FROM requests")
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(store_error)?
+                    .rows_affected();
+                let sessions = sqlx::query("DELETE FROM sessions")
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(store_error)?
+                    .rows_affected();
+                transaction.commit().await.map_err(store_error)?;
+                Ok(HistoryClearCounts { requests, sessions })
+            }};
+        }
+        match &self.pool {
+            SqlPool::Sqlite(pool) => clear_in_transaction!(pool),
+            SqlPool::Postgres(pool) => clear_in_transaction!(pool),
+        }
     }
 }
 
@@ -1952,11 +2279,293 @@ impl PersistenceStore for SqlStore {
     }
 
     async fn list_requests(&self, limit: i64) -> StoreResult<Vec<RequestSummary>> {
+        self.list_requests_filtered(&RequestListFilter::default(), limit)
+            .await
+    }
+
+    async fn list_requests_filtered(
+        &self,
+        filter: &RequestListFilter,
+        limit: i64,
+    ) -> StoreResult<Vec<RequestSummary>> {
+        // Numbered SQLite parameters let both engines reuse a bound cursor value.
+        let param = |index| {
+            if self.postgres() {
+                format!("${index}")
+            } else {
+                format!("?{index}")
+            }
+        };
+        let model_exists = if self.postgres() {
+            format!(
+                "EXISTS (SELECT 1 FROM jsonb_array_elements_text(CAST({} AS JSONB)) AS choice(value) \
+                WHERE choice.value = client_model OR choice.value = resolved_model OR choice.value = alias)",
+                param(13)
+            )
+        } else {
+            format!(
+                "EXISTS (SELECT 1 FROM json_each(CAST({} AS TEXT)) AS choice \
+                WHERE choice.value = client_model OR choice.value = resolved_model OR choice.value = alias)",
+                param(13)
+            )
+        };
+        let backend_exists = if self.postgres() {
+            format!(
+                "EXISTS (SELECT 1 FROM jsonb_array_elements_text(CAST({} AS JSONB)) AS choice(value) \
+                WHERE choice.value = backend)",
+                param(15)
+            )
+        } else {
+            format!(
+                "EXISTS (SELECT 1 FROM json_each(CAST({} AS TEXT)) AS choice WHERE choice.value = backend)",
+                param(15)
+            )
+        };
+        let facet_parameter = param(19);
+        let facet_clauses = [
+            facet_predicate(self.postgres(), &facet_parameter, "status", &["status"]),
+            facet_predicate(
+                self.postgres(),
+                &facet_parameter,
+                "model",
+                &["client_model", "alias", "resolved_model"],
+            ),
+            facet_predicate(self.postgres(), &facet_parameter, "provider", &["backend"]),
+            facet_predicate(
+                self.postgres(),
+                &facet_parameter,
+                "protocol",
+                &["client_protocol"],
+            ),
+            facet_predicate(self.postgres(), &facet_parameter, "user", &["user_id"]),
+            facet_predicate(
+                self.postgres(),
+                &facet_parameter,
+                "key",
+                &["virtual_key_id"],
+            ),
+            facet_predicate(self.postgres(), &facet_parameter, "harness", &["harness"]),
+            facet_predicate(self.postgres(), &facet_parameter, "kind", &["session_kind"]),
+            facet_predicate(
+                self.postgres(),
+                &facet_parameter,
+                "session",
+                &["session_id"],
+            ),
+        ]
+        .join(" AND ");
         let sql = format!(
-            "{REQUEST_COLUMNS} ORDER BY created_at_ms DESC LIMIT {}",
-            placeholder(self.postgres(), 1)
+            "{REQUEST_COLUMNS} WHERE (CAST({p1} AS TEXT) IS NULL OR \
+             LOWER(COALESCE(id, '') || ' ' || COALESCE(response_id, '') || ' ' || \
+             COALESCE(client_model, '') || ' ' || COALESCE(alias, '') || ' ' || \
+             COALESCE(resolved_model, '') || ' ' || COALESCE(harness, '') || ' ' || \
+             COALESCE(harness_session_id, '') || ' ' || \
+             COALESCE(backend, '') || ' ' || COALESCE(client_label, '') || ' ' || \
+             COALESCE(session_id, '') || ' ' || COALESCE(CAST(display_number AS TEXT), '')) LIKE {p1} ESCAPE '\\') \
+             AND (CAST({p2} AS TEXT) IS NULL OR status = {p2}) \
+             AND (CAST({p3} AS TEXT) IS NULL OR client_model = {p3} OR resolved_model = {p3}) \
+             AND (CAST({p4} AS TEXT) IS NULL OR backend = {p4}) \
+             AND (CAST({p13} AS TEXT) IS NULL OR CASE WHEN CAST({p14} AS BIGINT) = 1 \
+                  THEN NOT {model_exists} ELSE {model_exists} END) \
+             AND (CAST({p15} AS TEXT) IS NULL OR CASE WHEN CAST({p16} AS BIGINT) = 1 \
+                  THEN NOT {backend_exists} ELSE {backend_exists} END) \
+             AND (CAST({p17} AS BIGINT) IS NULL OR display_number = {p17}) \
+             AND (CAST({p18} AS BIGINT) IS NULL OR session_id IN \
+                  (SELECT id FROM sessions WHERE display_number = {p18})) \
+             AND (CAST({p5} AS TEXT) IS NULL OR client_protocol = {p5}) \
+             AND (CAST({p11} AS TEXT) IS NULL OR user_id = {p11}) \
+             AND (CAST({p12} AS TEXT) IS NULL OR virtual_key_id = {p12}) \
+             AND {facet_clauses} \
+             AND (CAST({p9} AS BIGINT) IS NULL OR created_at_ms >= {p9}) \
+             AND (CAST({p10} AS BIGINT) IS NULL OR created_at_ms < {p10}) \
+             AND (CAST({p6} AS BIGINT) IS NULL OR created_at_ms < {p6} \
+                  OR (created_at_ms = {p6} AND id < {p7})) \
+             ORDER BY created_at_ms DESC, id DESC LIMIT {p8}",
+            p1 = param(1),
+            p2 = param(2),
+            p3 = param(3),
+            p4 = param(4),
+            p5 = param(5),
+            p6 = param(6),
+            p7 = param(7),
+            p8 = param(8),
+            p9 = param(9),
+            p10 = param(10),
+            p11 = param(11),
+            p12 = param(12),
+            p13 = param(13),
+            p14 = param(14),
+            p15 = param(15),
+            p16 = param(16),
+            p17 = param(17),
+            p18 = param(18),
         );
-        Ok(fetch_all_decoded!(self, &sql, [limit], decode_request))
+        let request_number = filter
+            .search
+            .as_deref()
+            .and_then(|value| {
+                value
+                    .strip_prefix("R-")
+                    .or_else(|| value.strip_prefix("r-"))
+            })
+            .and_then(|value| value.parse::<i64>().ok());
+        let session_number = filter
+            .search
+            .as_deref()
+            .and_then(|value| {
+                value
+                    .strip_prefix("S-")
+                    .or_else(|| value.strip_prefix("s-"))
+            })
+            .and_then(|value| value.parse::<i64>().ok());
+        let search = filter
+            .search
+            .as_deref()
+            .filter(|_| request_number.is_none() && session_number.is_none())
+            .map(|value| {
+                let escaped = value
+                    .to_lowercase()
+                    .replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_");
+                format!("%{escaped}%")
+            });
+        Ok(fetch_all_decoded!(
+            self,
+            &sql,
+            [
+                search.as_deref(),
+                filter.status.as_deref(),
+                filter.model.as_deref(),
+                filter.backend.as_deref(),
+                filter.protocol.as_deref(),
+                filter.before_ms,
+                filter.before_id.as_deref(),
+                limit,
+                filter.since_ms,
+                filter.until_ms,
+                filter.user_id.as_deref(),
+                filter.virtual_key_id.as_deref(),
+                filter.model_values_json.as_deref(),
+                i64::from(filter.model_exclude),
+                filter.backend_values_json.as_deref(),
+                i64::from(filter.backend_exclude),
+                request_number,
+                session_number,
+                filter.facets_json.as_deref().unwrap_or("{}")
+            ],
+            decode_request
+        ))
+    }
+
+    async fn request_facets(&self) -> StoreResult<RequestFacets> {
+        let model_sql = "SELECT model FROM (SELECT client_model AS model FROM requests UNION \
+            SELECT resolved_model AS model FROM requests UNION SELECT alias AS model FROM requests) models \
+            WHERE model IS NOT NULL AND model <> '' ORDER BY model LIMIT 5000";
+        let provider_sql = "SELECT DISTINCT backend FROM requests WHERE backend IS NOT NULL \
+            AND backend <> '' ORDER BY backend LIMIT 5000";
+        let status_sql =
+            "SELECT DISTINCT status FROM requests WHERE status <> '' ORDER BY status LIMIT 5000";
+        let protocol_sql = "SELECT DISTINCT client_protocol FROM requests WHERE client_protocol <> '' ORDER BY client_protocol LIMIT 5000";
+        let user_sql = "SELECT DISTINCT user_id FROM requests WHERE user_id IS NOT NULL AND user_id <> '' ORDER BY user_id LIMIT 5000";
+        let key_sql = "SELECT DISTINCT virtual_key_id FROM requests WHERE virtual_key_id IS NOT NULL AND virtual_key_id <> '' ORDER BY virtual_key_id LIMIT 5000";
+        let harness_sql = "SELECT DISTINCT harness FROM requests WHERE harness IS NOT NULL AND harness <> '' ORDER BY harness LIMIT 5000";
+        let kind_sql = "SELECT DISTINCT session_kind FROM requests WHERE session_kind IS NOT NULL AND session_kind <> '' ORDER BY session_kind LIMIT 5000";
+        let session_sql = "SELECT DISTINCT r.session_id, s.display_number FROM requests r LEFT JOIN sessions s ON s.id = r.session_id WHERE r.session_id IS NOT NULL AND r.session_id <> '' ORDER BY s.display_number, r.session_id LIMIT 5000";
+        match &self.pool {
+            SqlPool::Sqlite(pool) => Ok(RequestFacets {
+                models: sqlx::query_scalar(model_sql)
+                    .fetch_all(pool)
+                    .await
+                    .map_err(store_error)?,
+                providers: sqlx::query_scalar(provider_sql)
+                    .fetch_all(pool)
+                    .await
+                    .map_err(store_error)?,
+                statuses: sqlx::query_scalar(status_sql)
+                    .fetch_all(pool)
+                    .await
+                    .map_err(store_error)?,
+                protocols: sqlx::query_scalar(protocol_sql)
+                    .fetch_all(pool)
+                    .await
+                    .map_err(store_error)?,
+                user_ids: sqlx::query_scalar(user_sql)
+                    .fetch_all(pool)
+                    .await
+                    .map_err(store_error)?,
+                key_ids: sqlx::query_scalar(key_sql)
+                    .fetch_all(pool)
+                    .await
+                    .map_err(store_error)?,
+                harnesses: sqlx::query_scalar(harness_sql)
+                    .fetch_all(pool)
+                    .await
+                    .map_err(store_error)?,
+                kinds: sqlx::query_scalar(kind_sql)
+                    .fetch_all(pool)
+                    .await
+                    .map_err(store_error)?,
+                sessions: sqlx::query(session_sql)
+                    .fetch_all(pool)
+                    .await
+                    .map_err(store_error)?
+                    .iter()
+                    .map(|row| {
+                        Ok(RequestSessionFacet {
+                            id: row.try_get(0).map_err(store_error)?,
+                            display_number: row.try_get(1).map_err(store_error)?,
+                        })
+                    })
+                    .collect::<StoreResult<Vec<_>>>()?,
+            }),
+            SqlPool::Postgres(pool) => Ok(RequestFacets {
+                models: sqlx::query_scalar(model_sql)
+                    .fetch_all(pool)
+                    .await
+                    .map_err(store_error)?,
+                providers: sqlx::query_scalar(provider_sql)
+                    .fetch_all(pool)
+                    .await
+                    .map_err(store_error)?,
+                statuses: sqlx::query_scalar(status_sql)
+                    .fetch_all(pool)
+                    .await
+                    .map_err(store_error)?,
+                protocols: sqlx::query_scalar(protocol_sql)
+                    .fetch_all(pool)
+                    .await
+                    .map_err(store_error)?,
+                user_ids: sqlx::query_scalar(user_sql)
+                    .fetch_all(pool)
+                    .await
+                    .map_err(store_error)?,
+                key_ids: sqlx::query_scalar(key_sql)
+                    .fetch_all(pool)
+                    .await
+                    .map_err(store_error)?,
+                harnesses: sqlx::query_scalar(harness_sql)
+                    .fetch_all(pool)
+                    .await
+                    .map_err(store_error)?,
+                kinds: sqlx::query_scalar(kind_sql)
+                    .fetch_all(pool)
+                    .await
+                    .map_err(store_error)?,
+                sessions: sqlx::query(session_sql)
+                    .fetch_all(pool)
+                    .await
+                    .map_err(store_error)?
+                    .iter()
+                    .map(|row| {
+                        Ok(RequestSessionFacet {
+                            id: row.try_get(0).map_err(store_error)?,
+                            display_number: row.try_get(1).map_err(store_error)?,
+                        })
+                    })
+                    .collect::<StoreResult<Vec<_>>>()?,
+            }),
+        }
     }
 
     async fn usage_summary(&self, filter: &UsageFilter) -> StoreResult<Vec<UsageBucket>> {
@@ -2346,6 +2955,8 @@ impl PersistenceStore for SqlStore {
         &self,
         since_ms: i64,
         roots_only: bool,
+        before_ms: Option<i64>,
+        before_id: Option<&str>,
         limit: usize,
     ) -> StoreResult<Vec<crate::sessions::SessionRow>> {
         let pg = self.postgres();
@@ -2354,19 +2965,244 @@ impl PersistenceStore for SqlStore {
         } else {
             ""
         };
+        let param = |index| {
+            if pg {
+                format!("${index}")
+            } else {
+                format!("?{index}")
+            }
+        };
         let sql = format!(
-            "{SESSION_COLUMNS} WHERE last_seen_ms >= {}{roots} \
-             ORDER BY last_seen_ms DESC, id LIMIT {}",
-            placeholder(pg, 1),
-            placeholder(pg, 2)
+            "{SESSION_COLUMNS} WHERE last_seen_ms >= {p1}{roots} \
+             AND (CAST({p2} AS BIGINT) IS NULL OR last_seen_ms < {p2} \
+                  OR (last_seen_ms = {p2} AND id < {p3})) \
+             ORDER BY last_seen_ms DESC, id DESC LIMIT {p4}",
+            p1 = param(1),
+            p2 = param(2),
+            p3 = param(3),
+            p4 = param(4),
         );
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         Ok(fetch_all_decoded!(
             self,
             &sql,
-            [since_ms, limit],
+            [since_ms, before_ms, before_id, limit],
             decode_session
         ))
+    }
+
+    async fn list_session_table(
+        &self,
+        filter: &SessionTableFilter,
+    ) -> StoreResult<SessionTablePage> {
+        let pg = self.postgres();
+        let param = |index| {
+            if pg {
+                format!("${index}")
+            } else {
+                format!("?{index}")
+            }
+        };
+        let sort = match filter.sort_by.as_str() {
+            "number" => "display_number",
+            "user" => "user_name",
+            "key" => "key_name",
+            "harness" => "harness",
+            "kind" => "kind",
+            "role" => "session_kind",
+            "first" => "first_seen_ms",
+            "last" => "last_seen_ms",
+            "requests" => "request_count",
+            "children" => "child_count",
+            "input" => "input_tokens",
+            "output" => "output_tokens",
+            "in_flight" => "in_flight",
+            _ => "last_seen_ms",
+        };
+        let direction = if filter.descending { "DESC" } else { "ASC" };
+        let facet_parameter = param(17);
+        let facet_clauses = [
+            facet_predicate(pg, &facet_parameter, "user", &["user_id"]),
+            facet_predicate(pg, &facet_parameter, "key", &["virtual_key_id"]),
+            facet_predicate(pg, &facet_parameter, "harness", &["harness"]),
+            facet_predicate(pg, &facet_parameter, "kind", &["kind"]),
+        ]
+        .join(" AND ");
+        let sql = format!(
+            "WITH data AS (SELECT s.id, s.parent_id, s.kind, s.harness, s.harness_version, \
+             s.external_id, s.session_kind, s.client_label, s.virtual_key_id, s.user_id, \
+             s.depth, s.root_request_id, s.spawned_by_request_id, s.first_seen_ms, \
+             s.last_seen_ms, s.request_count, s.display_number, \
+             (SELECT CAST(COUNT(*) AS BIGINT) FROM sessions child WHERE child.parent_id = s.id) AS child_count, \
+             (SELECT CAST(SUM(r.input_tokens) AS BIGINT) FROM requests r WHERE r.session_id = s.id) AS input_tokens, \
+             (SELECT CAST(SUM(r.output_tokens) AS BIGINT) FROM requests r WHERE r.session_id = s.id) AS output_tokens, \
+             (SELECT CAST(COUNT(*) AS BIGINT) FROM requests r WHERE r.session_id = s.id AND r.status = 'running') AS in_flight, \
+             u.username AS user_name, k.label AS key_name \
+             FROM sessions s LEFT JOIN users u ON u.id = s.user_id \
+             LEFT JOIN api_keys k ON k.id = s.virtual_key_id) \
+             SELECT *, CAST(COUNT(*) OVER() AS BIGINT) AS total FROM data \
+             WHERE (CAST({p1} AS TEXT) IS NULL OR LOWER(COALESCE(id, '') || ' ' || \
+               COALESCE(external_id, '') || ' ' || COALESCE(user_name, '') || ' ' || \
+               COALESCE(key_name, '') || ' ' || COALESCE(harness, '') || ' ' || \
+               COALESCE(session_kind, '') || ' ' || COALESCE(CAST(display_number AS TEXT), '') || ' ' || \
+               COALESCE('S-' || CAST(display_number AS TEXT), '')) LIKE {p1} ESCAPE '\\') \
+             AND (CAST({p2} AS TEXT) IS NULL OR user_id = {p2}) \
+             AND (CAST({p3} AS TEXT) IS NULL OR virtual_key_id = {p3}) \
+             AND (CAST({p4} AS TEXT) IS NULL OR harness = {p4}) \
+             AND (CAST({p5} AS TEXT) IS NULL OR kind = {p5}) \
+             AND {facet_clauses} \
+             AND (CAST({p6} AS BIGINT) IS NULL OR first_seen_ms >= {p6}) \
+             AND (CAST({p7} AS BIGINT) IS NULL OR first_seen_ms < {p7}) \
+             AND (CAST({p8} AS BIGINT) IS NULL OR last_seen_ms >= {p8}) \
+             AND (CAST({p9} AS BIGINT) IS NULL OR last_seen_ms < {p9}) \
+             AND (CAST({p10} AS BIGINT) IS NULL OR request_count >= {p10}) \
+             AND (CAST({p18} AS BIGINT) IS NULL OR request_count <= {p18}) \
+             AND (CAST({p11} AS BIGINT) IS NULL OR child_count >= {p11}) \
+             AND (CAST({p19} AS BIGINT) IS NULL OR child_count <= {p19}) \
+             AND (CAST({p12} AS BIGINT) IS NULL OR input_tokens >= {p12}) \
+             AND (CAST({p20} AS BIGINT) IS NULL OR input_tokens <= {p20}) \
+             AND (CAST({p13} AS BIGINT) IS NULL OR output_tokens >= {p13}) \
+             AND (CAST({p21} AS BIGINT) IS NULL OR output_tokens <= {p21}) \
+             AND (CAST({p14} AS BIGINT) IS NULL OR in_flight >= {p14}) \
+             AND (CAST({p22} AS BIGINT) IS NULL OR in_flight <= {p22}) \
+             ORDER BY {sort} {direction}, id DESC LIMIT {p15} OFFSET {p16}",
+            p1 = param(1),
+            p2 = param(2),
+            p3 = param(3),
+            p4 = param(4),
+            p5 = param(5),
+            p6 = param(6),
+            p7 = param(7),
+            p8 = param(8),
+            p9 = param(9),
+            p10 = param(10),
+            p11 = param(11),
+            p12 = param(12),
+            p13 = param(13),
+            p14 = param(14),
+            p15 = param(15),
+            p16 = param(16),
+            p18 = param(18),
+            p19 = param(19),
+            p20 = param(20),
+            p21 = param(21),
+            p22 = param(22),
+        );
+        let search = filter.search.as_ref().map(|value| {
+            format!(
+                "%{}%",
+                value
+                    .to_lowercase()
+                    .replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_")
+            )
+        });
+        macro_rules! read {
+            ($pool:expr) => {{
+                let rows = sqlx::query(&sql)
+                    .bind(search.as_deref())
+                    .bind(filter.user_id.as_deref())
+                    .bind(filter.virtual_key_id.as_deref())
+                    .bind(filter.harness.as_deref())
+                    .bind(filter.kind.as_deref())
+                    .bind(filter.first_since_ms)
+                    .bind(filter.first_until_ms)
+                    .bind(filter.last_since_ms)
+                    .bind(filter.last_until_ms)
+                    .bind(filter.min_requests)
+                    .bind(filter.min_children)
+                    .bind(filter.min_input_tokens)
+                    .bind(filter.min_output_tokens)
+                    .bind(filter.min_in_flight)
+                    .bind(filter.limit)
+                    .bind(filter.offset)
+                    .bind(filter.facets_json.as_deref().unwrap_or("{}"))
+                    .bind(filter.max_requests)
+                    .bind(filter.max_children)
+                    .bind(filter.max_input_tokens)
+                    .bind(filter.max_output_tokens)
+                    .bind(filter.max_in_flight)
+                    .fetch_all($pool)
+                    .await
+                    .map_err(store_error)?;
+                let total = rows
+                    .first()
+                    .map(|row| row.try_get(23).map_err(store_error))
+                    .transpose()?
+                    .unwrap_or(0);
+                let sessions = rows
+                    .iter()
+                    .map(|row| {
+                        Ok(SessionTableRow {
+                            session: decode_session(row)?,
+                            child_count: row.try_get(17).map_err(store_error)?,
+                            input_tokens: row.try_get(18).map_err(store_error)?,
+                            output_tokens: row.try_get(19).map_err(store_error)?,
+                            in_flight: row.try_get(20).map_err(store_error)?,
+                            user_name: row.try_get(21).map_err(store_error)?,
+                            key_name: row.try_get(22).map_err(store_error)?,
+                        })
+                    })
+                    .collect::<StoreResult<Vec<_>>>()?;
+                SessionTablePage {
+                    sessions,
+                    total,
+                    offset: filter.offset,
+                    limit: filter.limit,
+                }
+            }};
+        }
+        Ok(match &self.pool {
+            SqlPool::Sqlite(pool) => read!(pool),
+            SqlPool::Postgres(pool) => read!(pool),
+        })
+    }
+
+    async fn session_facets(&self) -> StoreResult<SessionFacets> {
+        let harness =
+            "SELECT DISTINCT harness FROM sessions WHERE harness <> '' ORDER BY harness LIMIT 5000";
+        let users = "SELECT DISTINCT user_id FROM sessions WHERE user_id IS NOT NULL AND user_id <> '' ORDER BY user_id LIMIT 5000";
+        let keys = "SELECT DISTINCT virtual_key_id FROM sessions WHERE virtual_key_id IS NOT NULL AND virtual_key_id <> '' ORDER BY virtual_key_id LIMIT 5000";
+        let kinds = "SELECT DISTINCT kind FROM sessions WHERE kind <> '' ORDER BY kind LIMIT 5000";
+        match &self.pool {
+            SqlPool::Sqlite(pool) => Ok(SessionFacets {
+                harnesses: sqlx::query_scalar(harness)
+                    .fetch_all(pool)
+                    .await
+                    .map_err(store_error)?,
+                user_ids: sqlx::query_scalar(users)
+                    .fetch_all(pool)
+                    .await
+                    .map_err(store_error)?,
+                key_ids: sqlx::query_scalar(keys)
+                    .fetch_all(pool)
+                    .await
+                    .map_err(store_error)?,
+                kinds: sqlx::query_scalar(kinds)
+                    .fetch_all(pool)
+                    .await
+                    .map_err(store_error)?,
+            }),
+            SqlPool::Postgres(pool) => Ok(SessionFacets {
+                harnesses: sqlx::query_scalar(harness)
+                    .fetch_all(pool)
+                    .await
+                    .map_err(store_error)?,
+                user_ids: sqlx::query_scalar(users)
+                    .fetch_all(pool)
+                    .await
+                    .map_err(store_error)?,
+                key_ids: sqlx::query_scalar(keys)
+                    .fetch_all(pool)
+                    .await
+                    .map_err(store_error)?,
+                kinds: sqlx::query_scalar(kinds)
+                    .fetch_all(pool)
+                    .await
+                    .map_err(store_error)?,
+            }),
+        }
     }
 
     async fn session_children(
@@ -2378,6 +3214,47 @@ impl PersistenceStore for SqlStore {
             placeholder(self.postgres(), 1)
         );
         Ok(fetch_all_decoded!(self, &sql, [parent_id], decode_session))
+    }
+
+    async fn session_child_counts(&self, ids: &[String]) -> StoreResult<HashMap<String, i64>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let placeholders = (1..=ids.len())
+            .map(|index| placeholder(self.postgres(), index))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT parent_id, COUNT(*) FROM sessions WHERE parent_id IN ({placeholders}) GROUP BY parent_id"
+        );
+        let mut counts = HashMap::new();
+        match &self.pool {
+            SqlPool::Sqlite(pool) => {
+                let mut query = sqlx::query(&sql);
+                for id in ids {
+                    query = query.bind(id);
+                }
+                for row in query.fetch_all(pool).await.map_err(store_error)? {
+                    counts.insert(
+                        row.try_get(0).map_err(store_error)?,
+                        row.try_get(1).map_err(store_error)?,
+                    );
+                }
+            }
+            SqlPool::Postgres(pool) => {
+                let mut query = sqlx::query(&sql);
+                for id in ids {
+                    query = query.bind(id);
+                }
+                for row in query.fetch_all(pool).await.map_err(store_error)? {
+                    counts.insert(
+                        row.try_get(0).map_err(store_error)?,
+                        row.try_get(1).map_err(store_error)?,
+                    );
+                }
+            }
+        }
+        Ok(counts)
     }
 
     async fn session_descendants(
@@ -2403,17 +3280,35 @@ impl PersistenceStore for SqlStore {
     async fn session_requests(
         &self,
         session_id: &str,
+        before_ms: Option<i64>,
+        before_id: Option<&str>,
         limit: usize,
     ) -> StoreResult<Vec<RequestSummary>> {
         let pg = self.postgres();
+        let param = |index| {
+            if pg {
+                format!("${index}")
+            } else {
+                format!("?{index}")
+            }
+        };
         let sql = format!(
-            "{REQUEST_COLUMNS} WHERE session_id = {} ORDER BY created_at_ms DESC, id LIMIT {}",
-            placeholder(pg, 1),
-            placeholder(pg, 2)
+            "{REQUEST_COLUMNS} WHERE session_id = {p1} AND \
+             (CAST({p2} AS BIGINT) IS NULL OR created_at_ms < {p2} \
+              OR (created_at_ms = {p2} AND id < {p3})) \
+             ORDER BY created_at_ms DESC, id DESC LIMIT {p4}",
+            p1 = param(1),
+            p2 = param(2),
+            p3 = param(3),
+            p4 = param(4),
         );
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        let mut rows: Vec<RequestSummary> =
-            fetch_all_decoded!(self, &sql, [session_id, limit], decode_request);
+        let mut rows: Vec<RequestSummary> = fetch_all_decoded!(
+            self,
+            &sql,
+            [session_id, before_ms, before_id, limit],
+            decode_request
+        );
         rows.reverse();
         Ok(rows)
     }
@@ -2422,7 +3317,7 @@ impl PersistenceStore for SqlStore {
         &self,
         session_id: &str,
     ) -> StoreResult<Option<crate::sessions::ChainHead>> {
-        let latest = self.session_requests(session_id, 1).await?;
+        let latest = self.session_requests(session_id, None, None, 1).await?;
         let Some(request) = latest.into_iter().next() else {
             return Ok(None);
         };
@@ -2994,6 +3889,7 @@ enum WriteCommand {
         request_id: String,
         finish: Box<RequestFinish>,
     },
+    ClearHistory(oneshot::Sender<StoreResult<HistoryClearCounts>>),
     Flush(oneshot::Sender<()>),
 }
 
@@ -3056,6 +3952,10 @@ impl PersistenceQueue {
                     WriteCommand::Session(row) => store.upsert_session(*row).await,
                     WriteCommand::Finish { request_id, finish } => {
                         store.finish_request(&request_id, *finish).await
+                    }
+                    WriteCommand::ClearHistory(done) => {
+                        let _ = done.send(store.clear_history().await);
+                        continue;
                     }
                     WriteCommand::Flush(done) => {
                         let _ = done.send(());
@@ -3146,6 +4046,19 @@ impl PersistenceQueue {
         done_rx
             .await
             .map_err(|_| "persistence writer stopped before flush".to_string())
+    }
+
+    /// Clear durable inference history after all writes already in this FIFO.
+    /// New/in-flight requests may enqueue fresh history after the barrier.
+    pub async fn clear_history(&self) -> StoreResult<HistoryClearCounts> {
+        let (done_tx, done_rx) = oneshot::channel();
+        self.sender
+            .send(WriteCommand::ClearHistory(done_tx))
+            .await
+            .map_err(|_| "persistence queue is closed".to_string())?;
+        done_rx
+            .await
+            .map_err(|_| "persistence writer stopped before history clear".to_string())?
     }
 
     pub fn stats(&self) -> PersistenceQueueStats {
@@ -3266,12 +4179,13 @@ mod tests {
         };
         assert_eq!(
             migration_versions,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
         );
         let request_indexes: Vec<String> = match &store.pool {
             SqlPool::Sqlite(pool) => sqlx::query(
                 "SELECT name FROM sqlite_master WHERE type = 'index' \
                  AND name IN ('idx_requests_created_at_ms', \
+                              'idx_requests_created_id_desc', \
                               'idx_requests_virtual_key_created_at_ms') ORDER BY name",
             )
             .fetch_all(pool)
@@ -3286,6 +4200,7 @@ mod tests {
             request_indexes,
             [
                 "idx_requests_created_at_ms".to_string(),
+                "idx_requests_created_id_desc".to_string(),
                 "idx_requests_virtual_key_created_at_ms".to_string(),
             ]
         );
@@ -3337,6 +4252,7 @@ mod tests {
         seen: i64,
     ) -> crate::sessions::SessionRow {
         crate::sessions::SessionRow {
+            display_number: None,
             id: id.to_string(),
             parent_id: parent.map(str::to_string),
             kind: if external.is_some() {
@@ -3359,6 +4275,206 @@ mod tests {
             last_seen_ms: seen,
             request_count: 1,
         }
+    }
+
+    #[tokio::test]
+    async fn display_numbers_are_stable_and_continue_after_history_clear() {
+        let store = SqlStore::connect_sqlite("sqlite::memory:").await.unwrap();
+        store.begin_request(request("r1")).await.unwrap();
+        store
+            .upsert_session(session("s1", None, Some("external"), 100))
+            .await
+            .unwrap();
+        let first = store.get_request("r1").await.unwrap().unwrap();
+        let first_session = store.get_session("s1").await.unwrap().unwrap();
+        assert_eq!(first.display_number, Some(1));
+        assert_eq!(first_session.display_number, Some(1));
+        store.finish_request("r1", finish()).await.unwrap();
+        store
+            .upsert_session(session("s1", None, Some("external"), 101))
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .get_request("r1")
+                .await
+                .unwrap()
+                .unwrap()
+                .display_number,
+            Some(1)
+        );
+        assert_eq!(
+            store
+                .get_session("s1")
+                .await
+                .unwrap()
+                .unwrap()
+                .display_number,
+            Some(1)
+        );
+        store.clear_history().await.unwrap();
+        assert_eq!(store.display_number_watermarks().await.unwrap(), (1, 1));
+        store.begin_request(request("r2")).await.unwrap();
+        store
+            .upsert_session(session("s2", None, Some("other"), 200))
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .get_request("r2")
+                .await
+                .unwrap()
+                .unwrap()
+                .display_number,
+            Some(2)
+        );
+        assert_eq!(
+            store
+                .get_session("s2")
+                .await
+                .unwrap()
+                .unwrap()
+                .display_number,
+            Some(2)
+        );
+        let by_number = store
+            .list_requests_filtered(
+                &RequestListFilter {
+                    search: Some("R-2".to_owned()),
+                    ..RequestListFilter::default()
+                },
+                10,
+            )
+            .await
+            .unwrap();
+        assert_eq!(by_number.len(), 1);
+        assert_eq!(by_number[0].id, "r2");
+    }
+
+    #[tokio::test]
+    async fn session_table_filters_and_sorts_over_all_stored_rows() {
+        let store = SqlStore::connect_sqlite("sqlite::memory:").await.unwrap();
+        store
+            .upsert_session(session("s1", None, Some("one"), 100))
+            .await
+            .unwrap();
+        store
+            .upsert_session(session("s2", None, Some("two"), 200))
+            .await
+            .unwrap();
+        let mut first = request("r1");
+        first.session_id = Some("s1".to_owned());
+        store.begin_request(first).await.unwrap();
+        let mut second = request("r2");
+        second.session_id = Some("s2".to_owned());
+        store.begin_request(second).await.unwrap();
+        store.finish_request("r2", finish()).await.unwrap();
+        let page = store
+            .list_session_table(&SessionTableFilter {
+                sort_by: "in_flight".to_owned(),
+                descending: true,
+                limit: 10,
+                ..SessionTableFilter::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(page.total, 2);
+        assert_eq!(page.sessions[0].session.id, "s1");
+        assert_eq!(page.sessions[0].in_flight, 1);
+        assert_eq!(page.sessions[1].in_flight, 0);
+        assert_eq!(page.sessions[1].input_tokens, Some(10));
+        let filtered = store
+            .list_session_table(&SessionTableFilter {
+                min_in_flight: Some(1),
+                limit: 10,
+                ..SessionTableFilter::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(filtered.total, 1);
+        assert_eq!(filtered.sessions[0].session.id, "s1");
+        let excluded = store
+            .list_session_table(&SessionTableFilter {
+                facets_json: Some(
+                    r#"{"harness":{"include":[],"exclude":["claude-code"]}}"#.to_owned(),
+                ),
+                limit: 10,
+                ..SessionTableFilter::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(excluded.total, 0);
+        let bounded = store
+            .list_session_table(&SessionTableFilter {
+                min_requests: Some(1),
+                max_requests: Some(1),
+                min_in_flight: Some(0),
+                max_in_flight: Some(0),
+                limit: 10,
+                ..SessionTableFilter::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(bounded.total, 1);
+        assert_eq!(bounded.sessions[0].session.id, "s2");
+        let facets = store.session_facets().await.unwrap();
+        assert_eq!(facets.harnesses, vec!["claude-code"]);
+    }
+
+    #[tokio::test]
+    async fn request_facets_include_and_exclude_multiple_values() {
+        let store = SqlStore::connect_sqlite("sqlite::memory:").await.unwrap();
+        for (id, model, backend) in [
+            ("r1", "alpha", "a"),
+            ("r2", "beta", "b"),
+            ("r3", "gamma", "c"),
+        ] {
+            let mut row = request(id);
+            row.client_model = model.to_owned();
+            row.backend = Some(backend.to_owned());
+            store.begin_request(row).await.unwrap();
+        }
+        let facets = store.request_facets().await.unwrap();
+        assert_eq!(
+            facets.models,
+            vec!["alpha", "beta", "gamma", "public-model"]
+        );
+        assert_eq!(facets.providers, vec!["a", "b", "c"]);
+        let mixed = store
+            .list_requests_filtered(
+                &RequestListFilter {
+                    facets_json: Some(r#"{"model":{"include":["alpha","gamma"],"exclude":["gamma"]},"provider":{"include":[],"exclude":["b"]}}"#.to_owned()),
+                    ..RequestListFilter::default()
+                }, 10,
+            ).await.unwrap();
+        assert_eq!(
+            mixed.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            vec!["r1"]
+        );
+        let included = store
+            .list_requests_filtered(
+                &RequestListFilter {
+                    model_values_json: Some(r#"["alpha","gamma"]"#.to_owned()),
+                    backend_values_json: Some(r#"["a","c"]"#.to_owned()),
+                    ..RequestListFilter::default()
+                },
+                10,
+            )
+            .await
+            .unwrap();
+        assert_eq!(included.len(), 2);
+        let excluded = store
+            .list_requests_filtered(
+                &RequestListFilter {
+                    model_values_json: Some(r#"["beta"]"#.to_owned()),
+                    model_exclude: true,
+                    ..RequestListFilter::default()
+                },
+                10,
+            )
+            .await
+            .unwrap();
+        assert_eq!(excluded.len(), 2);
     }
 
     #[tokio::test]
@@ -3435,19 +4551,52 @@ mod tests {
             Some("bucket".to_string())
         );
 
-        let roots = store.list_sessions(0, true, 10).await.unwrap();
+        let roots = store.list_sessions(0, true, None, None, 10).await.unwrap();
         assert_eq!(
             roots.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
             ["root", "bucket"]
         );
-        let all = store.list_sessions(115, false, 10).await.unwrap();
+        let all = store
+            .list_sessions(115, false, None, None, 10)
+            .await
+            .unwrap();
         assert_eq!(
             all.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
             ["root", "bucket", "grand"]
         );
+        store
+            .upsert_session(session("bucket2", None, None, 130))
+            .await
+            .unwrap();
+        let first_page = store.list_sessions(0, true, None, None, 2).await.unwrap();
+        assert_eq!(
+            first_page
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            ["root", "bucket2"]
+        );
+        let second_page = store
+            .list_sessions(0, true, Some(130), Some("bucket2"), 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            second_page
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            ["bucket"]
+        );
         let children = store.session_children("root").await.unwrap();
         assert_eq!(children.len(), 1);
         assert_eq!(children[0].id, "child");
+        let counts = store
+            .session_child_counts(&["root".to_string(), "child".to_string(), "grand".to_string()])
+            .await
+            .unwrap();
+        assert_eq!(counts.get("root"), Some(&1));
+        assert_eq!(counts.get("child"), Some(&1));
+        assert_eq!(counts.get("grand"), None);
         let descendants = store.session_descendants("root", 10).await.unwrap();
         assert_eq!(
             descendants
@@ -3494,7 +4643,10 @@ mod tests {
             })
             .await
             .unwrap();
-        let requests = store.session_requests("root", 10).await.unwrap();
+        let requests = store
+            .session_requests("root", None, None, 10)
+            .await
+            .unwrap();
         assert_eq!(
             requests
                 .iter()
@@ -3917,6 +5069,66 @@ mod tests {
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].hash, "new");
         assert_eq!(store.prune_orphan_blobs().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn queued_history_clear_removes_inference_tables_but_keeps_configuration() {
+        let store = Arc::new(
+            SqlStore::connect_sqlite("sqlite::memory:")
+                .await
+                .expect("connect"),
+        );
+        sqlx::query("INSERT INTO sessions (id, kind, harness, depth, first_seen_ms, last_seen_ms) VALUES ('session-1', 'declared', 'codex', 0, 100, 100)")
+            .execute(sqlite_pool(&store))
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO settings (key, value) VALUES ('keep-me', 'yes')")
+            .execute(sqlite_pool(&store))
+            .await
+            .unwrap();
+        let queue = PersistenceQueue::spawn(
+            Arc::clone(&store) as Arc<dyn PersistenceWriter>,
+            NonZeroUsize::new(16).unwrap(),
+        );
+        queue.try_begin(request("old")).unwrap();
+        queue
+            .try_body(BodyWrite {
+                event: skeleton_event("old", 1, 100),
+                items: vec![item("old", "client_in", 0, "old-blob")],
+                blobs: vec![blob("old-blob", "\"body\"")],
+            })
+            .unwrap();
+
+        let counts = queue.clear_history().await.unwrap();
+        assert_eq!(
+            counts,
+            HistoryClearCounts {
+                requests: 1,
+                sessions: 1
+            }
+        );
+        for table in [
+            "requests",
+            "sessions",
+            "request_events",
+            "request_items",
+            "content_blobs",
+        ] {
+            let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+                .fetch_one(sqlite_pool(&store))
+                .await
+                .unwrap();
+            assert_eq!(count, 0, "{table} was not cleared");
+        }
+        let setting: String =
+            sqlx::query_scalar("SELECT value FROM settings WHERE key = 'keep-me'")
+                .fetch_one(sqlite_pool(&store))
+                .await
+                .unwrap();
+        assert_eq!(setting, "yes");
+        queue.try_begin(request("new")).unwrap();
+        queue.flush().await.unwrap();
+        assert!(store.get_request("new").await.unwrap().is_some());
     }
 
     #[tokio::test]

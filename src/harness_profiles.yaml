@@ -25,11 +25,25 @@ harnesses:
     version: { header: { name: user-agent, regex: '^omp/([0-9][^ ]*)' } }
     session_id:
       first_of:
+        - header: x-omp-session-id
+        - header: x-llm-session-id
         - header: x-claude-code-session-id
         - header: session_id
         - header: x-client-request-id
         - body: { path: /prompt_cache_key }
-    sub_sessions: infer
+    sub_session_id:
+      first_of:
+        - header: x-omp-sub-session-id
+        - header: x-llm-sub-session-id
+    parent_session_id:
+      first_of:
+        - header: x-omp-parent-session-id
+        - header: x-llm-parent-session-id
+    session_kind:
+      first_of:
+        - header: x-omp-session-kind
+        - header: x-llm-session-kind
+    sub_sessions: declared
 
   # Claude Code always speaks Anthropic Messages. The session header is
   # documented; the agent headers are added on top of it for spawned agents.

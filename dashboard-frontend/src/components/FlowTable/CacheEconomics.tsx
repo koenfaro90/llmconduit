@@ -23,6 +23,8 @@ import { useMemo, useState } from 'react';
 import type { FlowSummary, ModelPrice } from '../../api/types';
 import { aggregateCacheByKey, type CacheAggregateRow } from './tokenEconomics';
 import { cn } from '../../lib/cn';
+import { DataTable } from '../ui/DataTable';
+import type { DataTableColumn } from '../ui/dataTableModel';
 
 export function CacheEconomics({
   rows,
@@ -41,6 +43,17 @@ export function CacheEconomics({
 
   // Overall coverage: how many model groups have ANY measured cache-hit rate (reported cached).
   const measuredGroups = aggregates.filter((a) => a.hitRate.quality !== 'unavailable').length;
+  const columns: DataTableColumn<CacheAggregateRow>[] = [
+    { id: 'model', label: 'model', width: '40%', required: true, render: (agg) => <span className="font-mono text-text" title={agg.key}>{agg.key}</span> },
+    { id: 'hit', label: 'cache hit', width: '20%', align: 'right', render: (agg) => <span data-testid="agg-hit-rate" data-quality={agg.hitRate.quality}>
+      <span className={agg.hitRate.quality === 'unavailable' ? 'text-text-muted' : 'text-text'}>{agg.hitRate.value}</span>
+      {agg.estimated && <span className="ml-1.5 rounded-sm bg-status-cooling/15 px-1 text-[9px] uppercase tracking-wide text-status-cooling"
+        data-testid="agg-est" title="estimate — at least one flow in this group has an estimated cost confidence">est</span>}
+    </span> },
+    { id: 'saved', label: '$ saved', width: '20%', align: 'right', render: (agg) => <span data-testid="agg-saved" data-quality={agg.saved.quality}
+      className={agg.saved.quality === 'unavailable' ? 'text-text-muted' : 'text-meta'}>{agg.saved.value}</span> },
+    { id: 'reported', label: 'reported', width: '20%', align: 'right', render: (agg) => <span data-testid="agg-reported" className="text-text-muted">{agg.reportedSamples}/{agg.totalSamples}</span> },
+  ];
 
   return (
     <section
@@ -72,61 +85,12 @@ export function CacheEconomics({
               No model usage in the current flow set.
             </div>
           ) : (
-            <table className="w-full text-xs" data-testid="cache-economics-table">
-              <thead>
-                <tr className="text-[10px] uppercase tracking-[0.12em] text-text-muted">
-                  <th className="py-1 text-left font-normal">model</th>
-                  <th className="py-1 text-right font-normal">cache hit</th>
-                  <th className="py-1 text-right font-normal">$ saved</th>
-                  <th className="py-1 text-right font-normal">reported</th>
-                </tr>
-              </thead>
-              <tbody>
-                {aggregates.map((agg) => (
-                  <AggregateRow key={agg.key} agg={agg} />
-                ))}
-              </tbody>
-            </table>
+            <DataTable id="cache-economics" rows={aggregates} rowKey={(agg) => agg.key} columns={columns}
+              tableTestId="cache-economics-table" rowTestId="cache-economics-row" clientPageSize={20}
+              rowAttributes={(agg) => ({ 'data-model': agg.key })} />
           )}
         </div>
       )}
     </section>
-  );
-}
-
-function AggregateRow({ agg }: { agg: CacheAggregateRow }) {
-  return (
-    <tr className="border-t border-line/40" data-testid="cache-economics-row" data-model={agg.key}>
-      <td className="truncate py-1 pr-2 font-mono text-text" title={agg.key}>
-        {agg.key}
-      </td>
-      <td className="py-1 text-right tabular-nums" data-testid="agg-hit-rate" data-quality={agg.hitRate.quality}>
-        <span className={agg.hitRate.quality === 'unavailable' ? 'text-text-muted' : 'text-text'}>
-          {agg.hitRate.value}
-        </span>
-        {/* The cross-cutting rule: an aggregate that includes a non-confident member is an
-            ESTIMATE — labelled, so a confident roll-up is never confused with a best-effort one.
-            Rendered whenever the group is estimated, INDEPENDENT of `hitRate.quality`: a derived
-            `$ saved` (or a zero-denominator / unavailable-rate row) must still carry the `est` label
-            so an estimate is never shown unlabelled. */}
-        {agg.estimated && (
-          <span
-            className="ml-1.5 rounded-sm bg-status-cooling/15 px-1 text-[9px] uppercase tracking-wide text-status-cooling"
-            data-testid="agg-est"
-            title="estimate — at least one flow in this group has an estimated cost confidence"
-          >
-            est
-          </span>
-        )}
-      </td>
-      <td className="py-1 text-right tabular-nums" data-testid="agg-saved" data-quality={agg.saved.quality}>
-        <span className={agg.saved.quality === 'unavailable' ? 'text-text-muted' : 'text-meta'}>
-          {agg.saved.value}
-        </span>
-      </td>
-      <td className="py-1 text-right tabular-nums text-text-muted" data-testid="agg-reported">
-        {agg.reportedSamples}/{agg.totalSamples}
-      </td>
-    </tr>
   );
 }

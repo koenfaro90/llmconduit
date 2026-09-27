@@ -926,6 +926,20 @@ mod tests {
             Some(&json!({"prompt_cache_key": "omp-cache"})),
         );
         assert_eq!(identity.session_id.as_deref(), Some("omp-cache"));
+
+        let identity = detector.detect(
+            &headers(&[
+                ("user-agent", "omp/18.1.18"),
+                ("x-omp-session-id", "main-1"),
+                ("x-omp-sub-session-id", "advisor-1"),
+                ("x-omp-session-kind", "advisor"),
+            ]),
+            None,
+        );
+        assert_eq!(identity.session_id.as_deref(), Some("main-1"));
+        assert_eq!(identity.sub_session_id.as_deref(), Some("advisor-1"));
+        assert_eq!(identity.session_kind.as_deref(), Some("advisor"));
+        assert_eq!(identity.sub_sessions, SubSessionPolicy::Declared);
     }
 
     #[test]

@@ -20,6 +20,7 @@ import { useDashboard } from '../../store/hooks';
 import { getConnection, queryKeys } from '../../api/connection';
 import { pickAttempts, sameAttempts } from '../../api/attempts';
 import type { FlowFilters } from './filterTypes';
+import { matchesFacet } from '../ui/facetModel';
 
 export interface FlowRowsResult {
   /** Filtered rows, newest-on-top (the array the virtualizer renders). */
@@ -34,6 +35,9 @@ export interface FlowRowsResult {
   clients: string[];
   /** Sessions — distinct detected harnesses present, for the harness filter chips. */
   harnesses: string[];
+  sessions: string[];
+  userIds: string[];
+  keyIds: string[];
 }
 
 /** Union the live store rows (authoritative) with REST-only rows, newest-on-top. */
@@ -111,6 +115,7 @@ function mergeLiveWithRest(live: FlowSummary, rest: FlowSummary | undefined): Fl
   const status = live.status === 'open' && rest.status !== 'open' ? rest.status : live.status;
   const merged: FlowSummary = {
     ...live,
+    display_number: live.display_number ?? rest.display_number,
     status,
     // REST-authoritative request line: replace a WS placeholder with the real value.
     method: rest.method || live.method,
@@ -169,6 +174,7 @@ function shallowEqualSummary(a: FlowSummary, b: FlowSummary): boolean {
     a.status === b.status &&
     a.method === b.method &&
     a.uri === b.uri &&
+    (a.display_number ?? null) === (b.display_number ?? null) &&
     (a.response_id ?? null) === (b.response_id ?? null) &&
     (a.model_requested ?? null) === (b.model_requested ?? null) &&
     (a.model_served ?? null) === (b.model_served ?? null) &&
@@ -227,6 +233,14 @@ function applyFilters(rows: FlowSummary[], f: FlowFilters): FlowSummary[] {
     if (f.harness && row.harness !== f.harness) return false;
     if (f.session && row.session_id !== f.session) return false;
     if (f.cacheBust === true && row.cache_bust !== true) return false;
+    if (!matchesFacet(f.facets.status, [row.status]) ||
+      !matchesFacet(f.facets.model, [row.model_requested, row.model_served]) ||
+      !matchesFacet(f.facets.upstream, [row.upstream_target]) ||
+      !matchesFacet(f.facets.client, [row.client_label]) ||
+      !matchesFacet(f.facets.harness, [row.harness]) ||
+      !matchesFacet(f.facets.session, [row.session_id]) ||
+      !matchesFacet(f.facets.cacheBust, [row.cache_bust === true ? 'true' : row.cache_bust === false ? 'false' : null]) ||
+      !matchesFacet(f.facets.user, [row.user_id]) || !matchesFacet(f.facets.key, [row.virtual_key_id])) return false;
     return true;
   });
 }
@@ -291,6 +305,9 @@ export function useFlowRows(filters: FlowFilters): FlowRowsResult {
   // have no label ⇒ contribute nothing (an absent attribution is never a filterable client).
   const clients = useMemo(() => clientsByVolume(merged), [merged]);
   const harnesses = useMemo(() => distinct(merged, (r) => [r.harness]), [merged]);
+  const sessions = useMemo(() => distinct(merged, (r) => [r.session_id]), [merged]);
+  const userIds = useMemo(() => distinct(merged, (r) => [r.user_id]), [merged]);
+  const keyIds = useMemo(() => distinct(merged, (r) => [r.virtual_key_id]), [merged]);
 
-  return { rows, total: merged.length, models, upstreams, clients, harnesses };
+  return { rows, total: merged.length, models, upstreams, clients, harnesses, sessions, userIds, keyIds };
 }

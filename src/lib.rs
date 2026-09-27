@@ -195,6 +195,7 @@ pub fn build_app_with_gateway_control_plane(
 /// enter the persisted upstream [`Config`].
 #[derive(Clone)]
 pub struct ControlPlaneRuntime {
+    pub display_numbers: crate::control_plane_store::DisplayNumbers,
     pub persistence_store: Option<Arc<dyn crate::control_plane_store::PersistenceStore>>,
     pub persistence_queue: Option<crate::control_plane_store::PersistenceQueue>,
     /// Whether persisted request items keep image/data URIs.
@@ -214,14 +215,19 @@ pub struct ControlPlaneRuntime {
 
 impl Default for ControlPlaneRuntime {
     fn default() -> Self {
+        let display_numbers = crate::control_plane_store::DisplayNumbers::default();
         Self {
+            display_numbers: display_numbers.clone(),
             persistence_store: None,
             persistence_queue: None,
             persistence_keep_media: true,
             conversation_id_header: crate::control_plane::DEFAULT_CONVERSATION_ID_HEADER
                 .to_string(),
             harness_detector: Arc::new(crate::harness::HarnessDetector::builtin()),
-            session_linker: Arc::new(crate::sessions::SessionLinker::new(true)),
+            session_linker: Arc::new(crate::sessions::SessionLinker::with_display_numbers(
+                true,
+                display_numbers,
+            )),
             yaml_key_specs: Vec::new(),
             client_auth_required: false,
             users_configured: false,
@@ -653,6 +659,7 @@ pub fn build_app_with_gateway_control_plane_runtime(
     gateway = gateway
         .with_persistence_keep_media(runtime.persistence_keep_media)
         .with_harness_detector(runtime.harness_detector)
+        .with_display_numbers(runtime.display_numbers)
         .with_session_linker(runtime.session_linker)
         .with_key_registry_source(runtime.yaml_key_specs, runtime.client_auth_required);
     gateway.set_users_configured(runtime.users_configured);

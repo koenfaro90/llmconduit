@@ -46,6 +46,7 @@ const MAX_SESSIONS: usize = 2_000;
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
 pub struct SessionRequestStub {
     pub api_call_id: String,
+    pub display_number: Option<i64>,
     pub client_model: String,
     pub created_at_ms: u64,
     /// `running`, `completed` or `failed`.
@@ -167,6 +168,20 @@ impl SessionHub {
         self.seq.load(Ordering::Relaxed)
     }
 
+    /// Remove the active-session cut when an operator clears durable history.
+    /// Broadcast the removed ids so open dashboards refetch an empty cut.
+    pub fn clear(&self) {
+        if !self.enabled {
+            return;
+        }
+        let mut state = self.state.lock().expect("session hub lock poisoned");
+        let touched = state.sessions.keys().cloned().collect();
+        state.sessions.clear();
+        state.by_request.clear();
+        drop(state);
+        self.bump_and_broadcast(touched);
+    }
+
     /// Record a request BEGIN at the link seam. `rows` are the linker's
     /// upserts (the touched session nodes, newest state); `primary` is the node
     /// the request was linked into. Bounded: a full/absent session is created
@@ -255,6 +270,8 @@ impl SessionHub {
                 .find(|stub| stub.api_call_id == api_call_id)
         {
             stub.status = status.to_string();
+            entry.last_activity_ms = entry.last_activity_ms.max(completed_at_ms);
+            entry.row.last_seen_ms = entry.row.last_seen_ms.max(completed_at_ms as i64);
             stub.input_tokens = input_tokens;
             stub.output_tokens = output_tokens;
             stub.cached_tokens = cached_tokens;
@@ -267,7 +284,6 @@ impl SessionHub {
         if let Some(id) = touched {
             self.bump_and_broadcast(vec![id]);
         }
-        let _ = completed_at_ms;
     }
 
     /// The active-session cut for the REST endpoint: every session with
@@ -282,7 +298,13 @@ impl SessionHub {
         let mut sessions: Vec<ActiveSession> = state
             .sessions
             .values()
-            .filter(|entry| entry.last_activity_ms >= cutoff)
+            .filter(|entry| {
+                entry.last_activity_ms >= cutoff
+                    || entry
+                        .requests
+                        .iter()
+                        .any(|request| request.status == "running")
+            })
             .map(|entry| {
                 let (r1, r5, r10, r15) = window_counts(&entry.requests, now_ms);
                 ActiveSession {
@@ -317,7 +339,12 @@ impl SessionHub {
         // the entries, so their by_request index entries can be purged after.
         let mut dropped_request_ids: Vec<String> = Vec::new();
         state.sessions.retain(|_id, entry| {
-            let keep = entry.last_activity_ms >= cutoff || entry.row.last_seen_ms as u64 >= cutoff;
+            let keep = entry.last_activity_ms >= cutoff
+                || entry.row.last_seen_ms as u64 >= cutoff
+                || entry
+                    .requests
+                    .iter()
+                    .any(|request| request.status == "running");
             if !keep {
                 dropped_request_ids
                     .extend(entry.requests.iter().map(|stub| stub.api_call_id.clone()));
@@ -386,6 +413,7 @@ mod tests {
 
     fn row(id: &str, last_seen: i64) -> crate::sessions::SessionRow {
         crate::sessions::SessionRow {
+            display_number: None,
             id: id.to_string(),
             parent_id: None,
             kind: "declared".to_string(),
@@ -408,6 +436,7 @@ mod tests {
     fn stub(id: &str, at: u64) -> SessionRequestStub {
         SessionRequestStub {
             api_call_id: id.to_string(),
+            display_number: None,
             client_model: "m".to_string(),
             created_at_ms: at,
             status: "running".to_string(),
@@ -603,10 +632,48 @@ mod tests {
     fn sessions_age_out_after_ttl() {
         let hub = SessionHub::new();
         hub.record_begin(&[row("s1", 1_000)], "s1", stub("r1", 1_000));
+        hub.record_terminal(SessionTerminal {
+            api_call_id: "r1",
+            status: "completed",
+            input_tokens: None,
+            output_tokens: None,
+            cached_tokens: None,
+            reasoning_tokens: None,
+            error: None,
+            terminal_reason: None,
+            completed_at_ms: 1_000,
+        });
         let still = hub.active_sessions(1_000 + SESSION_TTL_MS - 1);
         assert_eq!(still.len(), 1);
         let gone = hub.active_sessions(1_000 + SESSION_TTL_MS + 1);
         assert!(gone.is_empty());
+    }
+
+    #[test]
+    fn running_request_keeps_session_active_until_completion() {
+        let hub = SessionHub::new();
+        hub.record_begin(&[row("s1", 1_000)], "s1", stub("r1", 1_000));
+        let completed_at_ms = 1_000 + SESSION_TTL_MS + 1;
+        assert_eq!(hub.active_sessions(completed_at_ms).len(), 1);
+        hub.record_terminal(SessionTerminal {
+            api_call_id: "r1",
+            status: "completed",
+            input_tokens: Some(3),
+            output_tokens: Some(2),
+            cached_tokens: None,
+            reasoning_tokens: None,
+            error: None,
+            terminal_reason: None,
+            completed_at_ms,
+        });
+        let active = hub.active_sessions(completed_at_ms);
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].row.last_seen_ms, completed_at_ms as i64);
+        assert_eq!(active[0].requests[0].status, "completed");
+        assert!(
+            hub.active_sessions(completed_at_ms + SESSION_TTL_MS + 1)
+                .is_empty()
+        );
     }
 
     #[test]

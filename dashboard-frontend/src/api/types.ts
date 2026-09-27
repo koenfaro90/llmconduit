@@ -521,6 +521,7 @@ export interface FlowStatusPayload extends PhaseTimings {
   type: 'flow_status';
   /** REQUIRED authoritative flow key (matches D1 FlowRecord + D6 kill + D13 `:id`). */
   api_call_id: ApiCallId;
+  display_number?: number | null;
   /** OPTIONAL secondary correlation id (the engine response id); coexists with api_call_id. */
   response_id?: ResponseId | null;
   status: FlowStatus;
@@ -655,6 +656,7 @@ export interface SeqCursors {
  */
 export interface FlowSummary extends PhaseTimings {
   api_call_id: ApiCallId;
+  display_number?: number | null;
   response_id?: ResponseId | null;
   method: string;
   uri: string;
@@ -731,6 +733,7 @@ export type SnapshotFlowSummary = FlowSummary;
 /** One session-tree node (the Rust `sessions::SessionRow`). */
 export interface SessionRow {
   id: string;
+  display_number?: number | null;
   parent_id: string | null;
   kind: 'declared' | 'inferred' | string;
   harness: string;
@@ -750,20 +753,51 @@ export interface SessionRow {
   request_count: number;
 }
 
+/** Durable session node with its direct-child count. */
+export interface SessionNode extends SessionRow {
+  child_count: number;
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  in_flight?: number;
+  user_name?: string | null;
+  key_name?: string | null;
+}
+
+export interface SessionTableResponse {
+  sessions: SessionNode[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
+export interface SessionFacetsResponse {
+  harnesses: string[];
+  user_ids: string[];
+  key_ids: string[];
+  kinds: string[];
+}
+
 /** `GET /dashboard/api/history/sessions` */
 export interface SessionsResponse {
-  sessions: SessionRow[];
+  sessions: SessionNode[];
   since_ms: number;
   limit: number;
   truncated: boolean;
+  next_before_ms?: number | null;
+  next_before_id?: string | null;
 }
 
 /** A durable request row as the history API returns it (subset the UI reads). */
 export interface HistoryRequest {
   id: string;
+  display_number?: number | null;
+  session_display_number?: number | null;
   response_id: string | null;
+  user_id?: string | null;
+  virtual_key_id?: string | null;
   client_protocol: string;
   client_model: string;
+  alias?: string | null;
   backend: string | null;
   resolved_model: string | null;
   status: string;
@@ -774,9 +808,12 @@ export interface HistoryRequest {
   output_tokens: number | null;
   cached_tokens: number | null;
   error: string | null;
+  terminal_reason?: string | null;
   client_label: string | null;
   harness: string | null;
   harness_version: string | null;
+  harness_session_id?: string | null;
+  session_kind?: string | null;
   session_id: string | null;
   chain_parent_request_id: string | null;
   item_count: number | null;
@@ -786,15 +823,43 @@ export interface HistoryRequest {
   cache_bust: boolean | null;
 }
 
+/** A stable, newest-first page of durable requests; there is no default time window. */
+export interface HistoryRequestsResponse {
+  requests: HistoryRequest[];
+  limit: number;
+  has_more: boolean;
+  next_before_ms: number | null;
+  next_before_id: string | null;
+}
+
+export interface RequestFacetsResponse {
+  models: string[];
+  providers: string[];
+  statuses: string[];
+  protocols: string[];
+  user_ids: string[];
+  key_ids: string[];
+  harnesses: string[];
+  kinds: string[];
+  sessions: Array<{ id: string; display_number: number | null }>;
+}
+
+export interface HistoryClearResponse {
+  requests: number;
+  sessions: number;
+}
+
 /** `GET /dashboard/api/history/sessions/:id` */
 export interface SessionDetailResponse {
-  session: SessionRow;
+  session: SessionNode;
   /** Nearest first. */
   ancestors: SessionRow[];
-  children: SessionRow[];
+  children: SessionNode[];
   /** Oldest first. */
   requests: HistoryRequest[];
   requests_truncated: boolean;
+  next_before_ms?: number | null;
+  next_before_id?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -804,6 +869,7 @@ export interface SessionDetailResponse {
 /** One request stub on a live session's ring (body-free scalar facts). */
 export interface SessionRequestStub {
   api_call_id: string;
+  display_number?: number | null;
   client_model: string;
   created_at_ms: number;
   /** `running` | `completed` | `failed`. */
@@ -838,7 +904,7 @@ export interface SessionAggregate {
 /** `GET /dashboard/api/sessions/active` */
 export interface ActiveSessionsResponse {
   /** Newest activity first. */
-  sessions: Array<ActiveSession & { aggregate: SessionAggregate | null }>;
+  sessions: Array<ActiveSession & { aggregate: SessionAggregate | null; child_count?: number | null }>;
   /** The sessions-domain WS cursor at the cut. */
   seq: number;
 }
@@ -879,6 +945,7 @@ export interface FlowDelta {
 export interface FlowDetail extends PhaseTimings {
   flow_seq: number;
   api_call_id: ApiCallId;
+  display_number?: number | null;
   response_id?: ResponseId | null;
   /** Absent when the body has been evicted by the summary-byte quota (D1). */
   inbound_body?: unknown;
@@ -2074,7 +2141,7 @@ export function isDashboardPayload(v: unknown): v is DashboardPayload {
       // Gap 07: `cached`/`reasoning` are OPTIONAL (absent/null ⇒ unreported/UNAVAILABLE,
       // distinct from a present finite `0`); `prompt`/`completion`/`total` required finite.
       return (
-        isStr(v.api_call_id) && isOptStr(v.response_id) &&
+        isStr(v.api_call_id) && isOptStr(v.response_id) && isOptUint(v.display_number) &&
         isNum(v.prompt) && isNum(v.completion) && isNum(v.total) &&
         isOptNum(v.cached) && isOptNum(v.reasoning)
       );
@@ -2126,7 +2193,7 @@ function isSeqCursors(v: unknown): v is SeqCursors {
 function isFlowSummary(v: unknown): v is FlowSummary {
   return (
     isObj(v) &&
-    isStr(v.api_call_id) && isOptStr(v.response_id) &&
+    isStr(v.api_call_id) && isOptStr(v.response_id) && isOptUint(v.display_number) &&
     isStr(v.method) && isStr(v.uri) &&
     isOptStr(v.model_requested) && isOptStr(v.model_served) && isOptStr(v.upstream_target) &&
     isOptUsage(v.usage) &&

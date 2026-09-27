@@ -76,22 +76,21 @@ describe('FlowTable — filtering', () => {
     ]);
   });
 
-  it('a status chip narrows the rows', () => {
-    const { getByText, getByTestId, getAllByTestId } = renderWithQuery(<FlowTable selectedId={null} onSelect={noop} />);
+  it('a status facet narrows the rows immediately', () => {
+    const { getByRole, getByTestId, getAllByTestId } = renderWithQuery(<FlowTable selectedId={null} onSelect={noop} />);
     expect(getAllByTestId('flow-row')).toHaveLength(3);
-    // Click the `open` status chip.
-    fireEvent.click(getByText('open'));
+    fireEvent.click(getByRole('button', { name: 'Status' }));
+    fireEvent.click(getByRole('checkbox', { name: 'Include Status: open' }));
     const rows = getAllByTestId('flow-row');
     expect(rows).toHaveLength(1);
     expect(within(rows[0]!).getByText('running')).toBeTruthy();
     expect(getByTestId('flow-count').textContent).toContain('1 / 3');
   });
 
-  it('a model chip narrows the rows', () => {
-    const { getAllByText, getAllByTestId } = renderWithQuery(<FlowTable selectedId={null} onSelect={noop} />);
-    // `gpt-4o` appears as a model chip; clicking it keeps the two gpt-4o rows.
-    const chip = getAllByText('gpt-4o').find((el) => el.tagName === 'BUTTON')!;
-    fireEvent.click(chip);
+  it('a model facet narrows the rows', () => {
+    const { getByRole, getAllByTestId } = renderWithQuery(<FlowTable selectedId={null} onSelect={noop} />);
+    fireEvent.click(getByRole('button', { name: 'Model' }));
+    fireEvent.click(getByRole('checkbox', { name: 'Include Model: gpt-4o' }));
     expect(getAllByTestId('flow-row')).toHaveLength(2);
   });
 });
@@ -188,21 +187,16 @@ describe('FlowTable — live WS update + interactions', () => {
     expect(badge.getAttribute('data-source')).toBe('user_agent');
   });
 
-  // Gap 15: the per-client filter chip narrows the table to one client_label.
-  it('a client filter chip narrows the rows to that client (gap 15)', () => {
+  it('a client facet narrows the rows to that client (gap 15)', () => {
     seedFlows([
       makeFlow({ api_call_id: 'api_x1', status: 'completed', client_label: 'key-A', client_source: 'key_hash' }),
       makeFlow({ api_call_id: 'api_x2', status: 'completed', client_label: 'key-A', client_source: 'key_hash' }),
       makeFlow({ api_call_id: 'api_y1', status: 'completed', client_label: 'svc-checkout', client_source: 'configured_header' }),
     ]);
-    const { getAllByTestId, getByTestId } = renderWithQuery(<FlowTable selectedId={null} onSelect={noop} />);
+    const { getAllByTestId, getByTestId, getByRole } = renderWithQuery(<FlowTable selectedId={null} onSelect={noop} />);
     expect(getAllByTestId('flow-row')).toHaveLength(3);
-    // `key-A` appears as a client filter chip (its label is in a bounded truncate span); resolve the
-    // enclosing chip button via the filter-bar chip-label testid (the CLIENT cell also renders `key-A`).
-    const chip = getAllByTestId('flow-filter-chip-label')
-      .find((el) => el.textContent === 'key-A')!
-      .closest('button')!;
-    fireEvent.click(chip);
+    fireEvent.click(getByRole('button', { name: 'Client' }));
+    fireEvent.click(getByRole('checkbox', { name: 'Include Client: key-A' }));
     expect(getAllByTestId('flow-row')).toHaveLength(2);
     expect(getByTestId('flow-count').textContent).toContain('2 / 3');
   });
@@ -235,21 +229,27 @@ describe('FlowTable — sessions facts (harness column + cache-bust marker)', ()
       makeFlow({ api_call_id: 'api_f2', started_ms: 2, harness: 'codex', cache_bust: false, divergence_kind: 'append' }),
       makeFlow({ api_call_id: 'api_f3', started_ms: 1, harness: 'codex' }),
     ]);
-    const { getAllByTestId, getByTestId, getByText } = renderWithQuery(<FlowTable selectedId={null} onSelect={noop} />);
+    const { getAllByTestId, getByTestId, getByRole } = renderWithQuery(<FlowTable selectedId={null} onSelect={noop} />);
     await act(async () => {});
     expect(getAllByTestId('flow-row').length).toBe(3);
-    // Harness chips are derived from the rows in view.
-    const bar = getByTestId('flow-filter-bar');
-    const harnessGroup = within(bar).getByText('harness').parentElement as HTMLElement;
-    const codexChip = within(harnessGroup).getByText('codex');
-    fireEvent.click(codexChip);
+    fireEvent.click(getByRole('button', { name: 'Harness' }));
+    const codex = getByRole('checkbox', { name: 'Include Harness: codex' });
+    fireEvent.click(codex);
     await act(async () => {});
+    expect(getByRole('button', { name: 'flows columns' })).toBeTruthy();
+    fireEvent.click(getByRole('button', { name: 'flows columns' }));
+    fireEvent.click(within(getByTestId('flows-column-chooser')).getByLabelText('cache bust'));
+    expect(getByRole('button', { name: 'Cache bust' })).toBeTruthy();
     expect(getAllByTestId('flow-row').length).toBe(2);
-    fireEvent.click(codexChip); // toggle off
+    fireEvent.click(codex);
     await act(async () => {});
-    fireEvent.click(getByText('busts'));
+    fireEvent.click(getByRole('button', { name: 'Cache bust' }));
+    fireEvent.click(getByRole('checkbox', { name: 'Include Cache bust: Yes' }));
     await act(async () => {});
     expect(getAllByTestId('flow-row').length).toBe(1);
     expect(getByTestId('flow-count').textContent).toBe('1 / 3');
+    fireEvent.click(within(getByTestId('flows-column-chooser')).getByLabelText('cache bust'));
+    expect(getByTestId('flow-hidden-filters').textContent).toContain('Cache bust');
+    expect(getAllByTestId('flow-row').length).toBe(1);
   });
 });

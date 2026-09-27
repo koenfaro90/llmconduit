@@ -14,6 +14,7 @@
  */
 import { createStore } from 'zustand/vanilla';
 import { EMPTY_FILTERS, type FlowFilters } from '../components/FlowTable/filterTypes';
+import { emptyFacet } from '../components/ui/facetModel';
 
 export interface FlowFilterState {
   filters: FlowFilters;
@@ -42,13 +43,18 @@ export const flowFilterStore = createStore<FlowFilterState>((set) => ({
   setFilters: (filters) => set({ filters }),
   // Cross-link setters are DETERMINISTIC (finding 10): a click SETS the facet so the table always
   // lands filtered to what was clicked. (The FilterBar owns the toggle-off-on-repeat chip behavior.)
-  setUpstream: (upstream) => set((s) => ({ filters: { ...s.filters, upstream } })),
-  setModel: (model) => set((s) => ({ filters: { ...s.filters, model } })),
+  setUpstream: (upstream) => set((s) => ({ filters: { ...s.filters, upstream,
+    facets: { ...s.filters.facets, upstream: emptyFacet() } } })),
+  setModel: (model) => set((s) => ({ filters: { ...s.filters, model,
+    facets: { ...s.filters.facets, model: emptyFacet() } } })),
   // Gap 15: a "by client" roll-up click SETS the client facet so the table lands scoped to that
   // client (the FilterBar owns the toggle-off-on-repeat chip behavior, like the other facets).
-  setClient: (client) => set((s) => ({ filters: { ...s.filters, client } })),
-  setSession: (session) => set((s) => ({ filters: { ...s.filters, session } })),
-  setHarness: (harness) => set((s) => ({ filters: { ...s.filters, harness } })),
+  setClient: (client) => set((s) => ({ filters: { ...s.filters, client,
+    facets: { ...s.filters.facets, client: emptyFacet() } } })),
+  setSession: (session) => set((s) => ({ filters: { ...s.filters, session,
+    facets: { ...s.filters.facets, session: emptyFacet() } } })),
+  setHarness: (harness) => set((s) => ({ filters: { ...s.filters, harness,
+    facets: { ...s.filters.facets, harness: emptyFacet() } } })),
   clear: () => set({ filters: EMPTY_FILTERS }),
 }));
 

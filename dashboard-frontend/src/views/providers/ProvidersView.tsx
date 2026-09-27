@@ -1,6 +1,8 @@
 import { useMemo, useState, type FormEvent, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { getConnection, queryKeys } from '../../api/connection';
+import { FacetSelect, type FacetSelection } from '../../components/ui/FacetSelect';
+import { emptyFacet, matchesFacet } from '../../components/ui/facetModel';
 import type { ConfiguredProvider, CreateConfiguredProviderRequest, FleetModelEntry, FleetModelsResponse, MeshAdminState, MeshDisabledModel, MeshJoinKey, MeshNode, ProviderHealth } from '../../api/types';
 import { EMPTY_FILTERS } from '../../components/FlowTable/filterTypes';
 import { useFlowRows } from '../../components/FlowTable/useFlowRows';
@@ -8,6 +10,8 @@ import { fmtCost, fmtElapsed, fmtTokens } from '../../components/FlowTable/forma
 import { buildProviderLatency, fmtProviderLatencyMs } from '../../components/viz/providerLatency';
 import { Panel } from '../../components/ui/Panel';
 import { Button } from '../../components/ui/Button';
+import { DataTable } from '../../components/ui/DataTable';
+import type { DataTableColumn } from '../../components/ui/dataTableModel';
 import { useAuth, useDashboard } from '../../store/hooks';
 import { useTopologyQuery } from '../../store/useTopologyQuery';
 import { cn } from '../../lib/cn';
@@ -24,7 +28,7 @@ const DASH = '—';
 const INPUT = 'rounded-md border border-line bg-bg px-2 py-1.5 font-mono text-xs text-text outline-none focus:border-accent';
 
 export function ProvidersView() {
-  const [status, setStatus] = useState<'all' | ProviderHealth['status']>('all');
+  const [status, setStatus] = useState<FacetSelection>(emptyFacet);
   const [query, setQuery] = useState('');
   const [createdToken, setCreatedToken] = useState<{ label: string | null; token: string } | null>(null);
   const { client } = getConnection();
@@ -100,7 +104,7 @@ export function ProvidersView() {
   const filteredRows = useMemo(() => {
     const needle = query.trim().toLowerCase();
     return inventory.rows.filter((row) => {
-      if (status !== 'all' && row.status !== status) return false;
+      if (!matchesFacet(status, [row.status])) return false;
       if (!needle) return true;
       return [
         row.id,
@@ -135,21 +139,7 @@ export function ProvidersView() {
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <div className="flex overflow-hidden rounded-md border border-line text-xs" role="group" aria-label="Provider status">
-            {(['all', 'healthy', 'cooling', 'down'] as const).map((item) => (
-              <button
-                key={item}
-                type="button"
-                onClick={() => setStatus(item)}
-                className={cn(
-                  'px-3 py-1.5 uppercase tracking-[0.12em]',
-                  status === item ? 'bg-accent/15 text-accent' : 'bg-panel text-text-muted hover:text-text',
-                )}
-              >
-                {item}
-              </button>
-            ))}
-          </div>
+          <FacetSelect label="Status" options={['healthy', 'cooling', 'down']} value={status} onChange={setStatus} />
           <label className="relative">
             <span className="absolute left-2.5 top-1.5 text-xs text-text-muted">⌕</span>
             <input
@@ -743,44 +733,34 @@ function SummaryStrip({ summary }: { summary: ProviderInventorySummary }) {
 }
 
 function ProviderTable({ rows, total }: { rows: ProviderInventoryRow[]; total: number }) {
+  const columns: DataTableColumn<ProviderInventoryRow>[] = [
+    { id: 'provider', label: 'Provider', width: '22%', required: true },
+    { id: 'models', label: 'Advertised models', width: '19%' },
+    { id: 'limits', label: 'Windows & limits', width: '19%' },
+    { id: 'usage', label: 'Usage', width: '14%' },
+    { id: 'latency', label: 'Latency', width: '13%' },
+    { id: 'traffic', label: 'Traffic', width: '13%' },
+  ];
   return (
     <Panel className="overflow-hidden" data-testid="providers-table" data-available={rows.length > 0 ? 'true' : 'false'}>
       <div className="flex items-center justify-between border-b border-line px-4 py-3">
         <h2 className="text-sm font-semibold">Providers</h2>
         <span className="font-mono text-[10px] text-text-muted">{rows.length} / {total}</span>
       </div>
-      <div className="overflow-auto">
-        <table className="w-full min-w-[1180px] text-left text-xs">
-          <thead className="bg-panel text-[10px] uppercase tracking-[0.12em] text-text-muted">
-            <tr>
-              <th className="px-4 py-2">Provider</th>
-              <th className="px-3 py-2">Advertised models</th>
-              <th className="px-3 py-2">Windows & limits</th>
-              <th className="px-3 py-2">Usage</th>
-              <th className="px-3 py-2">Latency</th>
-              <th className="px-3 py-2">Traffic</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-line">
-            {rows.map((row) => <ProviderRow key={row.key} row={row} />)}
-          </tbody>
-        </table>
-      </div>
-      {rows.length === 0 && (
-        <div className="p-6 text-center text-xs italic text-text-muted" data-testid="providers-empty" data-quality="unavailable">
-          No providers match this filter.
-        </div>
-      )}
+      <DataTable id="providers" rows={rows} rowKey={(row) => row.key} columns={columns} clientPageSize={25}
+        minWidth={1180} renderRow={(row, visible) => <ProviderRow key={row.key} row={row} visible={visible} />}
+        emptyContent={<div className="p-6 text-center text-xs italic text-text-muted" data-testid="providers-empty" data-quality="unavailable">No providers match this filter.</div>} />
     </Panel>
   );
 }
 
-function ProviderRow({ row }: { row: ProviderInventoryRow }) {
+function ProviderRow({ row, visible }: { row: ProviderInventoryRow; visible: readonly DataTableColumn<ProviderInventoryRow>[] }) {
   const errorRate = row.usage.requests > 0 ? (row.usage.failures / row.usage.requests) * 100 : null;
   const latency = buildProviderLatency(row.perProvider, row.id);
+  const has = (id: string) => visible.some((column) => column.id === id);
   return (
     <tr data-testid="provider-row" data-provider={row.id} data-resource={row.resourceId ?? ''}>
-      <td className="px-4 py-3 align-top">
+      {has('provider') && <td className="px-4 py-3 align-top">
         <div className="flex items-center gap-2">
           <span className={cn('h-2.5 w-2.5 rounded-full', statusDot(row.status))} aria-hidden />
           <div>
@@ -795,8 +775,8 @@ function ProviderRow({ row }: { row: ProviderInventoryRow }) {
           catalog {row.catalogSize ?? DASH} · fetched {row.catalogFetchedMs ? fmtElapsed(Date.now() - row.catalogFetchedMs) + ' ago' : DASH}
         </div>
         {row.lastError && <div className="mt-1 max-w-[18rem] truncate text-[10px] text-status-down" title={row.lastError}>{row.lastError}</div>}
-      </td>
-      <td className="px-3 py-3 align-top">
+      </td>}
+      {has('models') && <td className="px-3 py-3 align-top">
         <div className="flex max-w-[19rem] flex-wrap gap-1">
           {row.advertisedModels.slice(0, 6).map((model) => (
             <span key={model} className="rounded-sm bg-line/60 px-1.5 py-0.5 font-mono text-[10px]" title={model}>{model}</span>
@@ -815,8 +795,8 @@ function ProviderRow({ row }: { row: ProviderInventoryRow }) {
         <div className="mt-2 text-[10px] text-text-muted">
           priced {row.priceCoverage.priced}/{row.priceCoverage.total || 0}
         </div>
-      </td>
-      <td className="px-3 py-3 align-top">
+      </td>}
+      {has('limits') && <td className="px-3 py-3 align-top">
         <div className="mb-2 border-l-2 border-accent/40 pl-2">
           <div className="text-[9px] uppercase tracking-[0.12em] text-text-muted">capacity / availability</div>
           <div className="mt-1 text-[10px] text-text-muted">
@@ -851,8 +831,8 @@ function ProviderRow({ row }: { row: ProviderInventoryRow }) {
             </div>
           </>
         )}
-      </td>
-      <td className="px-3 py-3 align-top font-mono text-[10px] tabular-nums">
+      </td>}
+      {has('usage') && <td className="px-3 py-3 align-top font-mono text-[10px] tabular-nums">
         <MetricLine label="req" value={String(row.usage.requests)} quality="measured" />
         <MetricLine label="err" value={formatPercent(errorRate)} quality={errorRate == null ? 'unavailable' : 'derived'} danger={(errorRate ?? 0) > 0} />
         <MetricLine label="tok" value={fmtTokens(row.usage.promptTokens == null && row.usage.completionTokens == null ? null : (row.usage.promptTokens ?? 0) + (row.usage.completionTokens ?? 0))} quality={row.usage.promptTokens == null && row.usage.completionTokens == null ? 'unavailable' : 'measured'} />
@@ -860,19 +840,19 @@ function ProviderRow({ row }: { row: ProviderInventoryRow }) {
         <MetricLine label="cost" value={fmtCost(row.usage.cost)} quality={costQuality(row.usage.costConfidence)} />
         <MetricLine label="hit%" value={formatPercent(row.cacheMetrics?.cache_hit_rate == null ? null : row.cacheMetrics.cache_hit_rate * 100)} quality={row.cacheMetrics?.cache_hit_rate == null ? 'unavailable' : 'derived'} />
         <MetricLine label="kv" value={formatPercent(row.cacheMetrics?.kv_cache_usage == null ? null : row.cacheMetrics.kv_cache_usage * 100)} quality={row.cacheMetrics?.kv_cache_usage == null ? 'unavailable' : 'derived'} />
-      </td>
-      <td className="px-3 py-3 align-top font-mono text-[10px] tabular-nums">
+      </td>}
+      {has('latency') && <td className="px-3 py-3 align-top font-mono text-[10px] tabular-nums">
         <MetricLine label="p50" value={latency.p50.text} quality={latency.p50.quality} />
         <MetricLine label="p95" value={latency.p95.text} quality={latency.p95.quality} />
         <MetricLine label="p99" value={latency.p99.text} quality={latency.p99.quality} danger={row.perProvider ? row.perProvider.p99 >= 1000 : false} />
         <MetricLine label="fail" value={latency.errorRate.text} quality={latency.errorRate.quality} danger={(row.perProvider?.error_rate ?? 0) > 0} />
-      </td>
-      <td className="px-3 py-3 align-top font-mono text-[10px] tabular-nums">
+      </td>}
+      {has('traffic') && <td className="px-3 py-3 align-top font-mono text-[10px] tabular-nums">
         <MetricLine label="req/s" value={row.edge ? row.edge.throughput.toFixed(2) : DASH} quality={row.edge ? 'derived' : 'unavailable'} />
         <MetricLine label="tok/s" value={row.edge ? row.edge.tokens_per_sec.toFixed(row.edge.tokens_per_sec < 10 ? 1 : 0) : DASH} quality={row.edge ? 'derived' : 'unavailable'} />
         <MetricLine label="$/s" value={row.edge ? fmtCost(row.edge.cost_per_sec) : DASH} quality={row.edge && row.edge.cost_per_sec > 0 ? 'derived' : 'unavailable'} />
         <MetricLine label="attempt p99" value={row.perProvider ? fmtProviderLatencyMs(row.perProvider.p99) : DASH} quality={row.perProvider ? 'derived' : 'unavailable'} />
-      </td>
+      </td>}
     </tr>
   );
 }

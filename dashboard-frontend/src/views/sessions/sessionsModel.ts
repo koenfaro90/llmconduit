@@ -17,11 +17,13 @@
  *    renders `—`, never a fabricated `0`.
  */
 import type { DivergenceKind, HistoryRequest, SessionRow } from '../../api/types';
+export { divergenceLabel } from '../../components/RequestTable/lineageModel';
 
 export type Quality = 'measured' | 'derived' | 'unavailable';
 
 /** Compact label for a session node: the harness's own id when declared, else the gateway id. */
 export function sessionLabel(node: SessionRow): string {
+  if (node.display_number != null) return `S-${node.display_number}`;
   const id = node.external_id ?? node.id;
   return id.length > 18 ? `${id.slice(0, 8)}…${id.slice(-6)}` : id;
 }
@@ -81,25 +83,7 @@ export function rollupRequests(requests: HistoryRequest[]): RequestRollup {
   return { count: requests.length, busts, kinds, inputTokens: input, outputTokens: output, cachedTokens: cached, quality: 'derived' };
 }
 
-/** Copy for a divergence kind (table chips + the inspector's chain tab). */
-export function divergenceLabel(kind: DivergenceKind | null | undefined): { label: string; bust: boolean; title: string } {
-  switch (kind) {
-    case 'append':
-      return { label: 'append', bust: false, title: 'extends the predecessor: only new items were added' };
-    case 'instructions_changed':
-      return { label: 'instructions', bust: true, title: 'the system/instructions block changed inside the shared prefix' };
-    case 'tools_changed':
-      return { label: 'tools', bust: true, title: 'the tool list changed inside the shared prefix' };
-    case 'history_rewritten':
-      return { label: 'rewritten', bust: true, title: 'earlier conversation history changed or was removed' };
-    case 'new_chain':
-      return { label: 'new', bust: false, title: 'the start of a conversation: nothing in common with a known chain' };
-    default:
-      return { label: '—', bust: false, title: 'lineage not computed' };
-  }
-}
-
 /** Order root nodes by last activity, newest first (the API already does; keep it deterministic). */
-export function sortByActivity(nodes: SessionRow[]): SessionRow[] {
+export function sortByActivity<T extends SessionRow>(nodes: T[]): T[] {
   return [...nodes].sort((a, b) => b.last_seen_ms - a.last_seen_ms || a.id.localeCompare(b.id));
 }

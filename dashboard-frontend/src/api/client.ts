@@ -38,7 +38,9 @@ import type {
   FlowsQuery,
   FlowsResponse,
   HistoryBodyHop,
+  HistoryClearResponse,
   HistoryMetricsResponse,
+  HistoryRequestsResponse,
   KillResponse,
   LoginRequest,
   MeResponse,
@@ -497,9 +499,51 @@ export class DashboardClient {
 
   // -- Durable history (SQL-backed; 503 when no SQL store is configured) ----
 
-  /** `GET /history/sessions` — recent session-tree nodes (roots only unless `roots: false`). */
-  historySessions(query: { since_ms?: number; limit?: number; roots?: boolean } = {}): Promise<SessionsResponse> {
+  historyRequests(query: {
+    limit?: number;
+    q?: string;
+    status?: string;
+    model?: string;
+    backend?: string;
+    model_values?: string;
+    model_exclude?: boolean;
+    backend_values?: string;
+    backend_exclude?: boolean;
+    protocol?: string;
+    user_id?: string;
+    virtual_key_id?: string;
+    facets?: string;
+    since_ms?: number;
+    until_ms?: number;
+    before_ms?: number;
+    before_id?: string;
+  } = {}): Promise<HistoryRequestsResponse> {
+    return this.request<HistoryRequestsResponse>(`/history/requests${buildQuery(query)}`);
+  }
+
+  clearHistory(confirm: string): Promise<HistoryClearResponse> {
+    return this.mutate<HistoryClearResponse>('/history/clear', 'POST', { confirm });
+  }
+
+  /** `GET /history/sessions` — session-tree nodes within the requested window (roots by default). */
+  historySessions(query: { since_ms?: number; limit?: number; roots?: boolean; before_ms?: number; before_id?: string } = {}): Promise<SessionsResponse> {
     return this.request<SessionsResponse>(`/history/sessions${buildQuery(query)}`);
+  }
+
+  historyRequestFacets() {
+    return this.request<import('./types').RequestFacetsResponse>('/history/requests/facets');
+  }
+
+  historySessionTable(query: { q?: string; user_id?: string; virtual_key_id?: string; harness?: string; kind?: string; facets?: string;
+    first_since_ms?: number; first_until_ms?: number; last_since_ms?: number; last_until_ms?: number;
+    min_requests?: number; max_requests?: number; min_children?: number; max_children?: number;
+    min_input_tokens?: number; max_input_tokens?: number; min_output_tokens?: number; max_output_tokens?: number;
+    min_in_flight?: number; max_in_flight?: number; sort_by?: string; descending?: boolean; offset?: number; limit?: number } = {}) {
+    return this.request<import('./types').SessionTableResponse>(`/history/sessions/table${buildQuery(query)}`);
+  }
+
+  historySessionFacets() {
+    return this.request<import('./types').SessionFacetsResponse>('/history/sessions/facets');
   }
 
   /** `GET /sessions/active` — the live hub's active-session cut (last 15 minutes). */
@@ -507,8 +551,8 @@ export class DashboardClient {
     return this.request<ActiveSessionsResponse>('/sessions/active');
   }
 
-  /** `GET /history/sessions/:id` — one node with its ancestors, children and newest requests. */
-  historySession(id: string, query: { limit?: number } = {}): Promise<SessionDetailResponse> {
+  /** `GET /history/sessions/:id` — one node with its ancestors, children and paged requests. */
+  historySession(id: string, query: { limit?: number; before_ms?: number; before_id?: string } = {}): Promise<SessionDetailResponse> {
     return this.request<SessionDetailResponse>(`/history/sessions/${encodeURIComponent(id)}${buildQuery(query)}`);
   }
 

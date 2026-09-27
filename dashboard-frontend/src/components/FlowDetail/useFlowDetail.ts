@@ -14,11 +14,12 @@
  */
 import { useCallback, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { FlowDetail as FlowDetailDto, FlowStatusPayload, FlowSummary } from '../../api/types';
+import type { FlowDetail as FlowDetailDto, FlowStatusPayload, FlowSummary, HistoryRequest } from '../../api/types';
 import { getConnection, queryKeys } from '../../api/connection';
 import { UnauthorizedError } from '../../api/client';
 import { useAuth, useDashboard } from '../../store/hooks';
 import { dashboardStore } from '../../store/dashboardStore';
+import { historyFlowDetail, historyFlowSummary } from '../RequestTable/requestsModel';
 
 export type KillState =
   | { phase: 'idle' }
@@ -44,6 +45,7 @@ export interface FlowDetailView {
   liveFlow: FlowSummary | null;
   status: FlowSummary['status'] | null;
   seeking: boolean;
+  historical: boolean;
   /** True when the selected flow is present in the frozen snapshot cut (store rows). */
   inCut: boolean;
   /** The frozen `monitor_seq` cut while seeking (else null) — bounds the monitor join. */
@@ -55,31 +57,55 @@ export interface FlowDetailView {
   killState: KillState;
 }
 
-export function useFlowDetail(apiCallId: string | null): FlowDetailView {
+export function useFlowDetail(apiCallId: string | null, historyRequest?: HistoryRequest): FlowDetailView {
   const { client } = getConnection();
   const queryClient = useQueryClient();
   const connection = useDashboard((s) => s.connection);
   const mutationsEnabled = useAuth((s) => s.mutationsEnabled);
-  const seekMonitorSeq = useDashboard((s) => s.seekMonitorSeq);
-  const seekAtMs = useDashboard((s) => s.seekAtMs);
-  const seeking = connection === 'seeking';
+  const rawSeekMonitorSeq = useDashboard((s) => s.seekMonitorSeq);
+  const rawSeekAtMs = useDashboard((s) => s.seekAtMs);
+  const seekMonitorSeq = historyRequest ? null : rawSeekMonitorSeq;
+  const seekAtMs = historyRequest ? null : rawSeekAtMs;
+  // The durable Requests view is independent of the time-travel cut.
+  const seeking = connection === 'seeking' && !historyRequest;
 
   // The live store row (authoritative status/usage). While seeking this IS the frozen snapshot row.
-  const liveFlow = useDashboard((s) => (apiCallId ? s.flows.get(apiCallId) ?? null : null));
+  const storeFlow = useDashboard((s) => (apiCallId ? s.flows.get(apiCallId) ?? null : null));
   // A selection is "in the cut" when the frozen snapshot rows contain it. While seeking, a flow
   // NOT in the cut must not fetch any detail (no live body, no live anything) — finding 1.
-  const inCut = liveFlow !== null;
+  const inCut = storeFlow !== null;
 
   // The detail fetch is DISABLED while seeking for an out-of-cut selection: no live `/flows/:id`
   // leaks post-cut data for a flow the snapshot never held. For an in-cut flow it still loads, but
   // only the BODIES are consumed during seek (see `frozenDetail`).
-  const detailEnabled = !!apiCallId && (!seeking || inCut);
+  const detailEnabled = !!apiCallId && (!historyRequest || (connection !== 'seeking' && inCut)) && (!seeking || inCut);
   const detailQuery = useQuery({
     queryKey: apiCallId ? queryKeys.flowDetail(apiCallId) : ['flows', '__none__'],
     queryFn: () => client.flowDetail(apiCallId as string),
     enabled: detailEnabled,
+    retry: historyRequest ? false : undefined,
   });
-  const detail = detailEnabled ? detailQuery.data ?? null : null;
+  const historical = !!historyRequest && (connection === 'seeking' || !inCut || detailQuery.isError);
+  const historicalBodies = useQuery({
+    queryKey: apiCallId ? ['history', 'requests', apiCallId, 'inspector-bodies'] : ['history', 'requests', '__none__', 'inspector-bodies'],
+    queryFn: async () => {
+      const [inbound, upstream] = await Promise.allSettled([
+        client.historyRequestBody(apiCallId as string, 'client_in'),
+        client.historyRequestBody(apiCallId as string, 'upstream_out'),
+      ]);
+      return {
+        inbound: inbound.status === 'fulfilled' ? inbound.value : undefined,
+        upstream: upstream.status === 'fulfilled' ? upstream.value : undefined,
+      };
+    },
+    enabled: historical,
+    retry: false,
+    refetchInterval: historical && historyRequest?.status === 'running' ? 3_000 : false,
+  });
+  const liveFlow = historical && historyRequest ? historyFlowSummary(historyRequest) : storeFlow;
+  const detail = historical && historyRequest
+    ? historyFlowDetail(historyRequest, historicalBodies.data?.inbound, historicalBodies.data?.upstream)
+    : detailEnabled ? detailQuery.data ?? null : null;
   // Non-body surfaces (headers/deltas/timeline/status/usage/cost/elapsed) must come from the FROZEN
   // cut while seeking, so the live REST detail is withheld from them (finding 1).
   const frozenDetail = seeking ? null : detail;
@@ -159,14 +185,14 @@ export function useFlowDetail(apiCallId: string | null): FlowDetailView {
       // No mutations against a frozen cut: while seeking (D11 paused) the store holds the
       // historical snapshot, and the optimistic `patchFlowStatus` would mutate it (finding 2).
       // The kill button is already disabled while seeking; this guards a programmatic call too.
-      if (seeking) return;
+      if (seeking || historical) return;
       if (!mutationsEnabled) {
         setKillState({ phase: 'forbidden' });
         return;
       }
       killMutation.mutate(id);
     },
-    [killMutation, mutationsEnabled, seeking],
+    [killMutation, mutationsEnabled, seeking, historical],
   );
 
   return {
@@ -178,10 +204,11 @@ export function useFlowDetail(apiCallId: string | null): FlowDetailView {
     // seeking `frozenDetail` is null, so an in-cut flow reads its status from the frozen row only.
     status: liveFlow?.status ?? frozenDetail?.status ?? null,
     seeking,
+    historical,
     inCut,
     seekMonitorSeq,
     seekAtMs,
-    mutationsEnabled,
+    mutationsEnabled: mutationsEnabled && !historical,
     kill,
     killState,
   };

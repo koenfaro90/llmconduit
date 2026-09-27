@@ -2,6 +2,7 @@
 import type { ComponentType } from 'react';
 import type { RouteName } from '../router/useHashRoute';
 import { FlowsView } from './FlowsView';
+import { RequestsView } from './requests/RequestsView';
 import { TopologyView } from './TopologyView';
 import { SankeyView } from './SankeyView';
 import { TheaterView } from './TheaterView';
@@ -16,6 +17,7 @@ import { ChatView } from './chat/ChatView';
 
 export const VIEW_BY_ROUTE: Record<RouteName, ComponentType> = {
   flows: FlowsView,
+  requests: RequestsView,
   sessions: SessionsView,
   throughput: ThroughputView,
   activity: ActivityView,

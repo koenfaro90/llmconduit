@@ -48,6 +48,7 @@ import type {
   SessionDetailResponse,
   SessionRequestStub,
   SessionRow,
+  SessionNode,
   SessionUser,
   SessionsResponse,
   SnapshotFrame,
@@ -78,6 +79,7 @@ let AUTH_POLICIES: AuthPolicy[] = [
 ];
 let AUTH_KEYS: AuthApiKey[] = [
   { id: 'key_ops', principal_id: 'usr_ops', name: 'operator laptop', prefix: 'llmc_7ad2', enabled: true, created_at: '2026-06-03T10:00:00Z', expires_at: null, last_used_at: '2026-06-21T14:19:40Z' },
+  { id: 'key_batch', principal_id: 'usr_batch', name: 'batch worker', prefix: 'llmc_8bc1', enabled: true, created_at: '2026-06-04T10:00:00Z', expires_at: null, last_used_at: '2026-06-21T14:18:00Z' },
 ];
 let AUTH_SESSIONS: AuthSession[] = [
   { id: 'sess_admin', kind: 'dashboard', principal_id: 'usr_ops', key_id: 'key_ops', endpoint: null, requested_model: null, started_at: '2026-06-21T14:00:00Z', expires_at: '2026-06-21T22:00:00Z' },
@@ -419,7 +421,7 @@ function seedFlows(): FlowSummary[] {
       client_label: `python-httpx/${'x'.repeat(4096)}`, client_source: 'user_agent',
     });
   }
-  return flows;
+  return flows.map((flow, index) => ({ ...flow, display_number: index + 1 }));
 }
 
 /**
@@ -552,6 +554,13 @@ function json(body: unknown, status = 200): Response {
   });
 }
 
+type MockFacets = Record<string, { include: string[]; exclude: string[] }>;
+function mockFacetMatch(facets: MockFacets, key: string, candidates: readonly (string | null | undefined)[]): boolean {
+  const value = facets[key];
+  return !value || (value.include.length === 0 || value.include.some((item) => candidates.includes(item))) &&
+    !value.exclude.some((item) => candidates.includes(item));
+}
+
 /** Captures kill POSTs so tests can assert the CSRF header round-tripped. */
 export const mockKillLog: { id: string; csrf: string | null }[] = [];
 
@@ -593,6 +602,7 @@ export const mockFetch: typeof fetch = async (input, init): Promise<Response> =>
   // of 8+ chars), a token login for any non-empty token; the response carries the user.
   if (path === '/dashboard/login' && method === 'POST') {
     const body = parseBody(init?.body);
+    mockHistoryCleared = false;
     if (typeof body.username === 'string') {
       const user = MOCK_USERS.find((u) => u.username === body.username);
       if (!user || typeof body.password !== 'string' || body.password.length < 8) return json({ error: 'invalid username or password' }, 401);
@@ -972,19 +982,144 @@ export const mockFetch: typeof fetch = async (input, init): Promise<Response> =>
   }
 
   // -- Durable history (sessions view + chain diff) --
+  if (path === '/dashboard/api/history/clear' && method === 'POST') {
+    if (mockSessionUser && !mockSessionUser.is_admin) return json({ error: 'administrator role required' }, 403);
+    if (headerValue(init?.headers, 'X-CSRF-Token') !== MOCK_CSRF) return json({ error: 'missing or invalid CSRF token' }, 403);
+    if (parseBody(init?.body).confirm !== 'DELETE ALL REQUESTS AND SESSIONS') return json({ error: 'confirmation phrase did not match' }, 400);
+    mockHistoryCleared = true;
+    return json({ requests: MOCK_HISTORY_REQUESTS.length, sessions: MOCK_SESSIONS.length });
+  }
+  if (path === '/dashboard/api/history/requests/facets') {
+    const requests = mockHistoryCleared ? [] : MOCK_HISTORY_REQUESTS;
+    return json({ models: [...new Set(requests.flatMap((request) => [request.client_model, request.alias, request.resolved_model]
+      .filter((value): value is string => !!value)))].sort(),
+      providers: [...new Set(requests.map((request) => request.backend).filter((value): value is string => !!value))].sort(),
+      statuses: [...new Set(requests.map((request) => request.status))].sort(),
+      protocols: [...new Set(requests.map((request) => request.client_protocol))].sort(),
+      user_ids: [...new Set(requests.map((request) => request.user_id).filter((id): id is string => !!id))].sort(),
+      key_ids: [...new Set(requests.map((request) => request.virtual_key_id).filter((id): id is string => !!id))].sort(),
+      harnesses: [...new Set(requests.map((request) => request.harness).filter((value): value is string => !!value))].sort(),
+      kinds: [...new Set(requests.map((request) => request.session_kind).filter((value): value is string => !!value))].sort(),
+      sessions: [...new Map(requests.filter((request) => request.session_id).map((request) => [request.session_id,
+        { id: request.session_id, display_number: request.session_display_number }])).values()] });
+  }
+  if (path === '/dashboard/api/history/requests') {
+    const limit = Math.max(1, Math.min(500, Number(qs.get('limit') ?? 100)));
+    const q = qs.get('q')?.trim().toLowerCase();
+    const requestNumber = /^r-(\d+)$/.exec(q ?? '')?.[1];
+    const sessionNumber = /^s-(\d+)$/.exec(q ?? '')?.[1];
+    const status = qs.get('status');
+    const model = qs.get('model');
+    const backend = qs.get('backend');
+    const modelValues = JSON.parse(qs.get('model_values') ?? '[]') as string[];
+    const backendValues = JSON.parse(qs.get('backend_values') ?? '[]') as string[];
+    const protocol = qs.get('protocol');
+    const userId = qs.get('user_id');
+    const keyId = qs.get('virtual_key_id');
+    const facets = JSON.parse(qs.get('facets') ?? '{}') as MockFacets;
+    const sinceMs = qs.get('since_ms');
+    const untilMs = qs.get('until_ms');
+    const beforeMs = qs.get('before_ms');
+    const beforeId = qs.get('before_id');
+    const matches = (mockHistoryCleared ? [] : MOCK_HISTORY_REQUESTS)
+      .filter((row) => requestNumber ? row.display_number === Number(requestNumber) : sessionNumber
+        ? row.session_display_number === Number(sessionNumber) : !q || [row.id, row.response_id, row.client_model, row.alias, row.resolved_model,
+        row.harness, row.harness_session_id, row.backend, row.client_label, row.session_id]
+        .some((value) => value?.toLowerCase().includes(q)))
+      .filter((row) => !status || row.status === status)
+      .filter((row) => !model || row.client_model === model || row.resolved_model === model)
+      .filter((row) => !backend || row.backend === backend)
+      .filter((row) => modelValues.length === 0 || (modelValues.some((value) => [row.client_model, row.alias, row.resolved_model].includes(value)) !== (qs.get('model_exclude') === 'true')))
+      .filter((row) => backendValues.length === 0 || (backendValues.includes(row.backend ?? '') !== (qs.get('backend_exclude') === 'true')))
+      .filter((row) => !protocol || row.client_protocol === protocol)
+      .filter((row) => !userId || row.user_id === userId)
+      .filter((row) => !keyId || row.virtual_key_id === keyId)
+      .filter((row) => mockFacetMatch(facets, 'status', [row.status]) &&
+        mockFacetMatch(facets, 'model', [row.client_model, row.alias, row.resolved_model]) &&
+        mockFacetMatch(facets, 'provider', [row.backend]) &&
+        mockFacetMatch(facets, 'protocol', [row.client_protocol]) &&
+        mockFacetMatch(facets, 'user', [row.user_id]) && mockFacetMatch(facets, 'key', [row.virtual_key_id]) &&
+        mockFacetMatch(facets, 'harness', [row.harness]) && mockFacetMatch(facets, 'kind', [row.session_kind]) &&
+        mockFacetMatch(facets, 'session', [row.session_id]))
+      .filter((row) => sinceMs == null || row.created_at_ms >= Number(sinceMs))
+      .filter((row) => untilMs == null || row.created_at_ms < Number(untilMs))
+      .filter((row) => beforeMs == null || row.created_at_ms < Number(beforeMs) ||
+        (row.created_at_ms === Number(beforeMs) && row.id < (beforeId ?? '')))
+      .sort((a, b) => b.created_at_ms - a.created_at_ms || b.id.localeCompare(a.id));
+    const requests = matches.slice(0, limit);
+    const hasMore = matches.length > limit;
+    const last = requests.at(-1);
+    return json({ requests, limit, has_more: hasMore, next_before_ms: hasMore ? last?.created_at_ms ?? null : null,
+      next_before_id: hasMore ? last?.id ?? null : null });
+  }
   if (path === '/dashboard/api/sessions/active') {
-    return json(MOCK_ACTIVE_SESSIONS());
+    return json(mockHistoryCleared ? { sessions: [], seq: 0 } : MOCK_ACTIVE_SESSIONS());
+  }
+  if (path === '/dashboard/api/history/sessions/facets') {
+    const sessions = mockHistoryCleared ? [] : MOCK_SESSIONS;
+    return json({ harnesses: [...new Set(sessions.map((session) => session.harness))].sort(),
+      user_ids: [...new Set(sessions.map((session) => session.user_id).filter((id): id is string => !!id))].sort(),
+      key_ids: [...new Set(sessions.map((session) => session.virtual_key_id).filter((id): id is string => !!id))].sort(),
+      kinds: [...new Set(sessions.map((session) => session.kind))].sort() });
+  }
+  if (path === '/dashboard/api/history/sessions/table') {
+    const facets = JSON.parse(qs.get('facets') ?? '{}') as MockFacets;
+    const rows = (mockHistoryCleared ? [] : MOCK_SESSIONS).map((session) => {
+      const requests = MOCK_HISTORY_REQUESTS.filter((request) => request.session_id === session.id);
+      const sum = (key: 'input_tokens' | 'output_tokens') => requests.some((request) => request[key] != null)
+        ? requests.reduce((total, request) => total + (request[key] ?? 0), 0) : null;
+      return { ...mockSessionNode(session), input_tokens: sum('input_tokens'), output_tokens: sum('output_tokens'),
+        in_flight: requests.filter((request) => request.status === 'running').length,
+        user_name: session.user_id === 'user_dev' ? 'dev' : null,
+        key_name: session.virtual_key_id === 'key_dev_ci' ? 'ci' : null };
+    });
+    const q = qs.get('q')?.toLowerCase();
+    const filtered = rows.filter((row) => !q || [row.id, row.external_id, row.harness, row.user_name, row.key_name, String(row.display_number), `S-${row.display_number}`]
+      .some((value) => value?.toLowerCase().includes(q)))
+      .filter((row) => !qs.get('user_id') || row.user_id === qs.get('user_id'))
+      .filter((row) => !qs.get('virtual_key_id') || row.virtual_key_id === qs.get('virtual_key_id'))
+      .filter((row) => !qs.get('harness') || row.harness === qs.get('harness'))
+      .filter((row) => !qs.get('kind') || row.kind === qs.get('kind'))
+      .filter((row) => mockFacetMatch(facets, 'user', [row.user_id]) && mockFacetMatch(facets, 'key', [row.virtual_key_id]) &&
+        mockFacetMatch(facets, 'harness', [row.harness]) && mockFacetMatch(facets, 'kind', [row.kind]))
+      .filter((row) => !qs.get('first_since_ms') || row.first_seen_ms >= Number(qs.get('first_since_ms')))
+      .filter((row) => !qs.get('first_until_ms') || row.first_seen_ms < Number(qs.get('first_until_ms')))
+      .filter((row) => !qs.get('last_since_ms') || row.last_seen_ms >= Number(qs.get('last_since_ms')))
+      .filter((row) => !qs.get('last_until_ms') || row.last_seen_ms < Number(qs.get('last_until_ms')))
+      .filter((row) => !qs.get('min_requests') || row.request_count >= Number(qs.get('min_requests')))
+      .filter((row) => !qs.get('max_requests') || row.request_count <= Number(qs.get('max_requests')))
+      .filter((row) => !qs.get('min_children') || row.child_count >= Number(qs.get('min_children')))
+      .filter((row) => !qs.get('max_children') || row.child_count <= Number(qs.get('max_children')))
+      .filter((row) => !qs.get('min_input_tokens') || (row.input_tokens != null && row.input_tokens >= Number(qs.get('min_input_tokens'))))
+      .filter((row) => !qs.get('max_input_tokens') || (row.input_tokens != null && row.input_tokens <= Number(qs.get('max_input_tokens'))))
+      .filter((row) => !qs.get('min_output_tokens') || (row.output_tokens != null && row.output_tokens >= Number(qs.get('min_output_tokens'))))
+      .filter((row) => !qs.get('max_output_tokens') || (row.output_tokens != null && row.output_tokens <= Number(qs.get('max_output_tokens'))))
+      .filter((row) => !qs.get('min_in_flight') || row.in_flight >= Number(qs.get('min_in_flight')))
+      .filter((row) => !qs.get('max_in_flight') || row.in_flight <= Number(qs.get('max_in_flight')));
+    const sortBy = qs.get('sort_by') ?? 'last';
+    const field = ({ number: 'display_number', user: 'user_name', key: 'key_name', harness: 'harness', kind: 'kind', role: 'session_kind',
+      first: 'first_seen_ms', last: 'last_seen_ms', requests: 'request_count', children: 'child_count',
+      input: 'input_tokens', output: 'output_tokens', in_flight: 'in_flight' } as Record<string, keyof typeof rows[number]>)[sortBy] ?? 'last_seen_ms';
+    const descending = qs.get('descending') !== 'false';
+    filtered.sort((a, b) => {
+      const x = a[field]; const y = b[field];
+      const cmp = typeof x === 'number' && typeof y === 'number' ? x - y : String(x ?? '').localeCompare(String(y ?? ''));
+      return (descending ? -cmp : cmp) || b.id.localeCompare(a.id);
+    });
+    const offset = Math.max(0, Number(qs.get('offset') ?? 0));
+    const limit = Math.max(1, Math.min(500, Number(qs.get('limit') ?? 100)));
+    return json({ sessions: filtered.slice(offset, offset + limit), total: filtered.length, offset, limit });
   }
   if (path === '/dashboard/api/history/sessions') {
     const roots = qs.get('roots') !== 'false';
-    const sessions = roots ? MOCK_SESSIONS.filter((s) => s.parent_id === null) : MOCK_SESSIONS;
+    const sessions = (mockHistoryCleared ? [] : roots ? MOCK_SESSIONS.filter((s) => s.parent_id === null) : MOCK_SESSIONS).map(mockSessionNode);
     const resp: SessionsResponse = { sessions, since_ms: 0, limit: 100, truncated: false };
     return json(resp);
   }
   const sessionMatch = path.match(/^\/dashboard\/api\/history\/sessions\/([^/]+)$/);
   if (sessionMatch) {
     const id = decodeURIComponent(sessionMatch[1] ?? '');
-    const session = MOCK_SESSIONS.find((s) => s.id === id);
+    const session = mockHistoryCleared ? undefined : MOCK_SESSIONS.find((s) => s.id === id);
     if (!session) return json({ error: 'session not found' }, 404);
     const ancestors: SessionRow[] = [];
     let cursor = session.parent_id;
@@ -995,9 +1130,9 @@ export const mockFetch: typeof fetch = async (input, init): Promise<Response> =>
       cursor = parent.parent_id;
     }
     const resp: SessionDetailResponse = {
-      session,
+      session: mockSessionNode(session),
       ancestors,
-      children: MOCK_SESSIONS.filter((s) => s.parent_id === id),
+      children: MOCK_SESSIONS.filter((s) => s.parent_id === id).map(mockSessionNode),
       requests: MOCK_HISTORY_REQUESTS.filter((r) => r.session_id === id),
       requests_truncated: false,
     };
@@ -1006,7 +1141,7 @@ export const mockFetch: typeof fetch = async (input, init): Promise<Response> =>
   const bodyMatch = path.match(/^\/dashboard\/api\/history\/requests\/([^/]+)\/body$/);
   if (bodyMatch) {
     const id = decodeURIComponent(bodyMatch[1] ?? '');
-    const body = MOCK_REQUEST_BODIES[id];
+    const body = mockHistoryCleared ? undefined : MOCK_REQUEST_BODIES[id];
     return body ? json(body) : json({ error: 'request body not stored' }, 404);
   }
 
@@ -1022,6 +1157,7 @@ const SEED_NOW = Date.now();
 
 function mockSession(over: Partial<SessionRow> & Pick<SessionRow, 'id' | 'harness'>): SessionRow {
   return {
+    display_number: over.id === 'sess_root' ? 1 : over.id === 'sess_agent' ? 2 : 3,
     parent_id: null,
     kind: 'declared',
     harness_version: null,
@@ -1040,6 +1176,10 @@ function mockSession(over: Partial<SessionRow> & Pick<SessionRow, 'id' | 'harnes
   };
 }
 
+function mockSessionNode(session: SessionRow): SessionNode {
+  return { ...session, child_count: MOCK_SESSIONS.filter((child) => child.parent_id === session.id).length };
+}
+
 
 /** The live hub cut: root + agent sessions active, the codex one aged out (mirrors
  *  the 15-minute window — its last activity is 40+ seconds old but still inside;
@@ -1054,6 +1194,7 @@ function MOCK_ACTIVE_SESSIONS(): ActiveSessionsResponse {
       .filter((r) => r.session_id === session.id)
       .map((r) => ({
         api_call_id: r.id,
+        display_number: r.display_number,
         client_model: r.client_model,
         created_at_ms: rebase(r.created_at_ms),
         status: r.status,
@@ -1085,7 +1226,8 @@ function MOCK_ACTIVE_SESSIONS(): ActiveSessionsResponse {
             reasoning_tokens: null,
           }
         : null;
-      return { ...session, requests: stubs, ...windows(stubs), aggregate };
+      return { ...session, requests: stubs, ...windows(stubs), aggregate,
+        child_count: MOCK_SESSIONS.filter((child) => child.parent_id === session.id).length };
     });
   return { sessions: rows, seq: 1 };
 }
@@ -1097,9 +1239,14 @@ export const MOCK_SESSIONS: SessionRow[] = [
 
 function mockRequest(over: Partial<HistoryRequest> & Pick<HistoryRequest, 'id' | 'session_id' | 'created_at_ms'>): HistoryRequest {
   return {
+    display_number: ({ api_002: 1, api_001: 2, api_agent_1: 3, api_005: 4, api_004: 5 } as Record<string, number>)[over.id] ?? null,
+    session_display_number: over.session_id === 'sess_root' ? 1 : over.session_id === 'sess_agent' ? 2 : 3,
     response_id: null,
+    user_id: 'usr_ops',
+    virtual_key_id: 'key_ops',
     client_protocol: 'anthropic_messages',
     client_model: 'claude-x',
+    alias: 'claude-x',
     backend: 'vllm-a',
     resolved_model: 'llama-3.1-70b',
     status: 'completed',
@@ -1112,6 +1259,7 @@ function mockRequest(over: Partial<HistoryRequest> & Pick<HistoryRequest, 'id' |
     client_label: 'key-9f3a1c0b2d4e',
     harness: 'claude-code',
     harness_version: '2.1.205',
+    harness_session_id: 'session-demo',
     chain_parent_request_id: null,
     item_count: 4,
     shared_prefix_items: null,
@@ -1124,10 +1272,10 @@ function mockRequest(over: Partial<HistoryRequest> & Pick<HistoryRequest, 'id' |
 
 export const MOCK_HISTORY_REQUESTS: HistoryRequest[] = [
   mockRequest({ id: 'api_002', session_id: 'sess_root', created_at_ms: SEED_NOW - 12_000, item_count: 3 }),
-  mockRequest({ id: 'api_001', session_id: 'sess_root', created_at_ms: SEED_NOW - 2_400, status: 'running', completed_at_ms: null, chain_parent_request_id: 'api_002', divergence_kind: 'append', shared_prefix_items: 3, item_count: 5 }),
+  mockRequest({ id: 'api_001', session_id: 'sess_root', created_at_ms: SEED_NOW - 2_400, status: 'running', completed_at_ms: null, first_token_at_ms: null, input_tokens: null, output_tokens: null, cached_tokens: null, chain_parent_request_id: 'api_002', divergence_kind: 'append', shared_prefix_items: 3, item_count: 5 }),
   mockRequest({ id: 'api_agent_1', session_id: 'sess_agent', created_at_ms: SEED_NOW - 30_000, item_count: 3 }),
-  mockRequest({ id: 'api_005', session_id: 'sess_codex', created_at_ms: SEED_NOW - 120_000, harness: 'codex', harness_version: '0.104.0', client_protocol: 'responses', client_label: 'python-httpx/0.27', item_count: 4 }),
-  mockRequest({ id: 'api_004', session_id: 'sess_codex', created_at_ms: SEED_NOW - 40_000, harness: 'codex', harness_version: '0.104.0', client_protocol: 'responses', client_label: 'python-httpx/0.27', chain_parent_request_id: 'api_005', divergence_kind: 'tools_changed', divergence_index: 1, shared_prefix_items: 1, item_count: 7, cache_bust: true }),
+  mockRequest({ id: 'api_005', session_id: 'sess_codex', created_at_ms: SEED_NOW - 120_000, user_id: 'usr_batch', virtual_key_id: 'key_batch', harness: 'codex', harness_version: '0.104.0', harness_session_id: 'codex-session-1', client_protocol: 'responses', client_model: 'codex-large', alias: 'codex-large', resolved_model: 'gpt-4o', client_label: 'python-httpx/0.27', item_count: 4 }),
+  mockRequest({ id: 'api_004', session_id: 'sess_codex', created_at_ms: SEED_NOW - 40_000, user_id: 'usr_batch', virtual_key_id: 'key_batch', harness: 'codex', harness_version: '0.104.0', harness_session_id: 'codex-session-1', client_protocol: 'responses', client_model: 'codex-large', alias: 'codex-large', resolved_model: 'gpt-4o', client_label: 'python-httpx/0.27', chain_parent_request_id: 'api_005', divergence_kind: 'tools_changed', divergence_index: 1, shared_prefix_items: 1, item_count: 7, cache_bust: true }),
 ];
 
 /** Reassembled inbound bodies (what `/history/requests/:id/body` returns) for the chain diff. */
@@ -1153,6 +1301,7 @@ export const MOCK_REQUEST_BODIES: Record<string, unknown> = {
   },
   api_002: { model: 'claude-x', system: 'You are Claude Code.', messages: [{ role: 'user', content: 'hi' }] },
   api_001: { model: 'claude-x', system: 'You are Claude Code.', messages: [{ role: 'user', content: 'hi' }, { role: 'assistant', content: 'hello' }, { role: 'user', content: 'more' }] },
+  api_agent_1: { model: 'claude-x', messages: [{ role: 'user', content: 'Subagent task' }] },
 };
 
 function parseBody(body: BodyInit | null | undefined): Record<string, unknown> {
@@ -1167,6 +1316,7 @@ function parseBody(body: BodyInit | null | undefined): Record<string, unknown> {
 
 /** The mock's signed-in user (null after a token login). */
 let mockSessionUser: SessionUser | null = null;
+let mockHistoryCleared = false;
 
 export const MOCK_USERS: UserRecord[] = [
   { id: 'user_admin', username: 'admin', is_admin: true, created_at_ms: Date.now() - 86_400_000 * 30, updated_at_ms: Date.now() - 86_400_000 * 30 },
@@ -1181,6 +1331,7 @@ export const MOCK_KEYS: ApiKeyRecord[] = [
 /** Reset the mutable mock account state (tests). */
 export function resetMockAccounts(): void {
   mockSessionUser = null;
+  mockHistoryCleared = false;
   CONFIGURED_PROVIDERS = [{
     id: 'managed-local-lab',
     name: 'Local lab',

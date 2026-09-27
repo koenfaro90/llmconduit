@@ -202,6 +202,8 @@ pub fn classify(predecessor: &[ItemFingerprint], current: &[ItemFingerprint]) ->
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SessionRow {
     pub id: String,
+    #[serde(default)]
+    pub display_number: Option<i64>,
     pub parent_id: Option<String>,
     pub kind: String,
     pub harness: String,
@@ -260,6 +262,7 @@ struct Node {
 
 #[derive(Debug, Default)]
 struct Index {
+    display_numbers: crate::control_plane_store::DisplayNumbers,
     nodes: HashMap<String, Node>,
     declared: HashMap<(String, String), String>,
     anonymous: HashMap<(String, String), String>,
@@ -276,14 +279,41 @@ pub struct SessionLinker {
 
 impl SessionLinker {
     pub fn new(infer_sub_sessions: bool) -> Self {
+        Self::with_display_numbers(
+            infer_sub_sessions,
+            crate::control_plane_store::DisplayNumbers::default(),
+        )
+    }
+
+    pub fn with_display_numbers(
+        infer_sub_sessions: bool,
+        display_numbers: crate::control_plane_store::DisplayNumbers,
+    ) -> Self {
         Self {
-            index: Mutex::new(Index::default()),
+            index: Mutex::new(Index {
+                display_numbers,
+                ..Index::default()
+            }),
             infer_sub_sessions,
         }
     }
 
     pub fn infer_sub_sessions(&self) -> bool {
         self.infer_sub_sessions
+    }
+
+    /// Drop remembered lineage after durable history is cleared, so the next
+    /// request starts a fresh chain instead of referencing a deleted parent.
+    pub fn clear(&self) {
+        let mut index = self
+            .index
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let display_numbers = index.display_numbers.clone();
+        *index = Index {
+            display_numbers,
+            ..Index::default()
+        };
     }
 
     /// Whether a declared session is already known in memory. The caller uses
@@ -321,6 +351,9 @@ impl SessionLinker {
         for (row, head) in rows {
             if index.nodes.contains_key(&row.id) {
                 continue;
+            }
+            if let Some(number) = row.display_number {
+                index.display_numbers.observe_session(number);
             }
             index.insert_node(row, head);
         }
@@ -621,6 +654,7 @@ impl Index {
             .unwrap_or(0);
         let row = SessionRow {
             id: new_id(),
+            display_number: Some(self.display_numbers.next_session()),
             parent_id: parent_id.map(str::to_string),
             kind: KIND_DECLARED.to_string(),
             harness: identity.harness.clone(),
@@ -661,6 +695,7 @@ impl Index {
         }
         let row = SessionRow {
             id: new_id(),
+            display_number: Some(self.display_numbers.next_session()),
             parent_id: None,
             kind: KIND_INFERRED.to_string(),
             harness: identity.harness.clone(),
@@ -698,6 +733,7 @@ impl Index {
             .unwrap_or(1);
         let row = SessionRow {
             id: new_id(),
+            display_number: Some(self.display_numbers.next_session()),
             parent_id: Some(parent_id.to_string()),
             kind: KIND_INFERRED.to_string(),
             harness: identity.harness.clone(),
@@ -1178,6 +1214,7 @@ mod tests {
     fn seeding_restores_a_declared_session_and_its_head() {
         let linker = SessionLinker::new(true);
         let row = SessionRow {
+            display_number: None,
             id: "node-1".to_string(),
             parent_id: None,
             kind: KIND_DECLARED.to_string(),

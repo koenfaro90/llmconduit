@@ -9,6 +9,8 @@ import { useQuery } from '@tanstack/react-query';
 import { getConnection, queryKeys } from '../../api/connection';
 import { useAuth } from '../../store/hooks';
 import { Panel } from '../../components/ui/Panel';
+import { DataTable } from '../../components/ui/DataTable';
+import type { DataTableColumn } from '../../components/ui/dataTableModel';
 import { LineChart } from '../../viz/LineChart';
 import { fmtTokens } from '../../components/FlowTable/format';
 import { cn } from '../../lib/cn';
@@ -38,6 +40,17 @@ export function ActivityView() {
   const userName = (id: string | null) => (id == null ? 'unattributed' : users.data?.users.find((u) => u.id === id)?.username ?? id.slice(0, 8));
   const keyLabel = (id: string | null) => (id == null ? DASH : keys.data?.keys.find((k) => k.id === id)?.label ?? id.slice(0, 8));
   const totals = rows.reduce((a, r) => ({ requests: a.requests + r.requests, failed: a.failed + r.failed }), { requests: 0, failed: 0 });
+  const columns: DataTableColumn<(typeof rows)[number]>[] = [
+    { id: 'user', label: 'user', width: '16%', required: true, render: (row) => <span className={cn(row.user_id == null && 'italic text-text-muted')} data-testid="activity-user">{userName(row.user_id)}</span> },
+    { id: 'key', label: 'key', width: '16%', render: (row) => <span className="font-mono text-text-muted" title={row.virtual_key_id ?? undefined}>{keyLabel(row.virtual_key_id)}</span> },
+    { id: 'requests', label: 'reqs', width: '8%', align: 'right', render: (row) => row.requests },
+    { id: 'failed', label: 'failed', width: '8%', align: 'right', render: (row) => <span className={cn(row.failed > 0 && 'text-status-down')}>{row.failed}</span> },
+    { id: 'error', label: 'err %', width: '8%', align: 'right', render: (row) => row.error_pct == null ? DASH : row.error_pct.toFixed(1) },
+    { id: 'input', label: 'in', width: '8%', align: 'right', render: (row) => fmtTokens(row.input_tokens) },
+    { id: 'cached', label: 'cached', width: '8%', align: 'right', render: (row) => fmtTokens(row.cached_tokens) },
+    { id: 'output', label: 'out', width: '8%', align: 'right', render: (row) => fmtTokens(row.output_tokens) },
+    { id: 'trend', label: 'requests / bucket', width: '20%', render: (row) => <span className="block h-8"><LineChart height={32} width={160} series={[{ key: 'r', label: 'requests', points: row.series }]} formatY={() => ''} /></span> },
+  ];
 
   return (
     <div className="min-h-0 min-w-0 flex-1 overflow-auto p-4" data-testid="activity-view">
@@ -66,25 +79,9 @@ export function ActivityView() {
         <Panel className="px-3 py-3 text-xs text-text-muted" data-testid="activity-empty">No requests in this window.</Panel>
       ) : (
         <div className="rounded-md border border-line">
-          <div className="grid grid-cols-[minmax(100px,1fr)_minmax(100px,1fr)_72px_72px_64px_80px_80px_80px_160px] gap-2 border-b border-line bg-panel-raised px-3 py-1.5 text-[10px] uppercase tracking-[0.14em] text-text-muted">
-            <span>user</span><span>key</span><span className="text-right">reqs</span><span className="text-right">failed</span><span className="text-right">err %</span>
-            <span className="text-right">in</span><span className="text-right">cached</span><span className="text-right">out</span><span>requests / bucket</span>
-          </div>
-          {rows.map((row) => (
-            <div key={`${row.user_id}/${row.virtual_key_id}`} className="grid grid-cols-[minmax(100px,1fr)_minmax(100px,1fr)_72px_72px_64px_80px_80px_80px_160px] items-center gap-2 border-b border-line/50 px-3 py-1 text-xs" data-testid="activity-row" data-user={row.user_id ?? 'none'}>
-              <span className={cn('truncate', row.user_id == null && 'italic text-text-muted')} data-testid="activity-user">{userName(row.user_id)}</span>
-              <span className="truncate font-mono text-text-muted" title={row.virtual_key_id ?? undefined}>{keyLabel(row.virtual_key_id)}</span>
-              <span className="text-right tabular-nums">{row.requests}</span>
-              <span className={cn('text-right tabular-nums', row.failed > 0 && 'text-status-down')}>{row.failed}</span>
-              <span className="text-right tabular-nums text-text-muted">{row.error_pct == null ? DASH : row.error_pct.toFixed(1)}</span>
-              <span className="text-right tabular-nums text-text-muted">{fmtTokens(row.input_tokens)}</span>
-              <span className="text-right tabular-nums text-text-muted">{fmtTokens(row.cached_tokens)}</span>
-              <span className="text-right tabular-nums text-text-muted">{fmtTokens(row.output_tokens)}</span>
-              <span className="h-8">
-                <LineChart height={32} width={160} series={[{ key: 'r', label: 'requests', points: row.series }]} formatY={() => ''} />
-              </span>
-            </div>
-          ))}
+          <DataTable id="activity" rows={rows} rowKey={(row) => `${row.user_id}/${row.virtual_key_id}`}
+            columns={columns} rowTestId="activity-row" rowAttributes={(row) => ({ 'data-user': row.user_id ?? 'none' })}
+            clientPageSize={25} minWidth={900} />
         </div>
       )}
     </div>

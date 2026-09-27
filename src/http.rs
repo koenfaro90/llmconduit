@@ -282,6 +282,14 @@ fn protected_routes(gateway: Arc<Gateway>, auth: Arc<DashboardAuth>) -> Router<A
         .route("/dashboard/api/snapshot", get(dashboard_snapshot))
         .route("/dashboard/api/history/requests", get(history_requests))
         .route(
+            "/dashboard/api/history/clear",
+            post(crate::persistent_history_api::clear_inference_history),
+        )
+        .route(
+            "/dashboard/api/history/requests/facets",
+            get(crate::persistent_history_api::history_request_facets),
+        )
+        .route(
             "/dashboard/api/history/requests/{id}",
             get(history_request_detail),
         )
@@ -296,6 +304,14 @@ fn protected_routes(gateway: Arc<Gateway>, auth: Arc<DashboardAuth>) -> Router<A
         .route(
             "/dashboard/api/history/sessions",
             get(crate::persistent_history_api::history_sessions),
+        )
+        .route(
+            "/dashboard/api/history/sessions/table",
+            get(crate::persistent_history_api::history_session_table),
+        )
+        .route(
+            "/dashboard/api/history/sessions/facets",
+            get(crate::persistent_history_api::history_session_facets),
         )
         .route(
             "/dashboard/api/history/sessions/{id}",
@@ -1366,6 +1382,7 @@ async fn log_api_call(
     // return a right-sized redacted copy for durable ingress, so persistence
     // never adds another 10 MiB scan on the Tokio worker.
     let instrument = is_flow_capture_request(&method, uri.path());
+    let display_number = instrument.then(|| gateway.display_numbers().next_request());
     let persistence_requested = instrument && gateway.persistence_enabled();
     let mut persistence_inbound = if persistence_requested {
         let protocol = crate::flow_persistence::client_protocol_for_path(uri.path())
@@ -1505,6 +1522,7 @@ async fn log_api_call(
                 &link.session_id,
                 crate::session_hub::SessionRequestStub {
                     api_call_id: api_call_id.clone(),
+                    display_number,
                     client_model: requested_model.as_deref().unwrap_or_default().to_owned(),
                     created_at_ms: u64::try_from(now_ms).unwrap_or(u64::MAX),
                     status: "running".to_string(),
@@ -1526,6 +1544,7 @@ async fn log_api_call(
         let row = crate::flow_persistence::begin_request(
             crate::flow_persistence::BeginPersistenceInput {
                 api_call_id: &api_call_id,
+                display_number,
                 conversation_id,
                 virtual_key_id,
                 client_protocol: crate::flow_persistence::client_protocol_for_path(uri.path())
@@ -1685,7 +1704,7 @@ async fn log_api_call(
             dashboard_client_header().as_deref(),
         );
         let headers_redacted = crate::dashboard_flow::redact_headers(&headers);
-        gateway.flow_store().open_with_session(
+        gateway.flow_store().open_with_session_and_number(
             api_call_id.clone(),
             method.to_string(),
             uri.path().to_string(),
@@ -1693,6 +1712,7 @@ async fn log_api_call(
             inbound_body,
             client,
             session_facts.clone(),
+            display_number,
         );
         gateway.flow_store().middleware_guard(&api_call_id)
     } else {
