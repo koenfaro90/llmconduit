@@ -2854,7 +2854,8 @@ impl FailoverUpstreamClient {
                     }
                     let body = read_capped_upstream_error_body(response).await;
                     let err = AppError::upstream(format!(
-                        "upstream completions failed with {status}: {}",
+                        "upstream {} failed with {status}: {}",
+                        request.upstream_path(),
                         redact_and_truncate_error_body(&body.text, 500)
                     ));
                     self.mark_failure(provider_index, &err);
