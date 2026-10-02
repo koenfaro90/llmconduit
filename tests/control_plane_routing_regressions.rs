@@ -400,3 +400,72 @@ async fn operational_alias_strips_images_when_probe_rejected_upstream_model() {
         "a probe rejection must keep image bytes away from the backend: {serialized}"
     );
 }
+
+/// vLLM reports a failure after the response started as an SSE `{"error": {...}}` event (HTTP
+/// 200 already sent). The gateway must relay that message, not a chunk-parse error
+/// (`missing field 'id'`) that hides e.g. an EngineCore crash.
+#[tokio::test]
+async fn upstream_sse_error_event_is_relayed_with_its_message() {
+    let primary = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"id": "passthrough-model"}]
+        })))
+        .mount(&primary)
+        .await;
+    let error_event = json!({"error": {
+        "message": "EngineCore encountered an issue. See stack trace (above) for the root cause.",
+        "type": "InternalServerError", "param": null, "code": 500
+    }});
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(format!("data: {error_event}\n\n")),
+        )
+        .mount(&primary)
+        .await;
+
+    let config = base_config(&format!("{}/v1/", primary.uri()));
+    let (app, _gateway) = llmconduit::build_app_with_gateway_control_plane(
+        config,
+        None,
+        AppOptions::default(),
+        vec![operational_route(
+            "managed-alias",
+            "http://127.0.0.1:11/v1/",
+        )],
+        UnknownModelPolicy::Passthrough,
+        None,
+    )
+    .expect("routes-only control-plane app");
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "passthrough-model",
+                        "stream": false,
+                        "messages": [{"role": "user", "content": "hello"}]
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("gateway response");
+
+    assert!(!response.status().is_success());
+    let body = axum::body::to_bytes(response.into_body(), 8192)
+        .await
+        .expect("response body");
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("EngineCore encountered an issue"), "{text}");
+    assert!(!text.contains("missing field"), "{text}");
+}

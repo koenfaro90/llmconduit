@@ -5374,10 +5374,21 @@ async fn stream_success_response(
                         yield Ok(chunk);
                     }
                     Err(err) => {
-                        yield Err(AppError::upstream(format!(
-                            "failed to parse upstream chat chunk: {err}; payload={}",
-                            redact_and_truncate_error_body(&event.data, 500)
-                        )));
+                        // vLLM (and other OpenAI-compatible servers) report a failure that
+                        // happens after the stream started as an SSE `{"error": {...}}` event.
+                        // Surface its code and message instead of a misleading chunk-parse
+                        // error (`missing field 'id'`), which hid e.g. an EngineCore crash.
+                        let message = match upstream_error_event(&event.data) {
+                            Some((code, detail)) => format!(
+                                "upstream chat failed with {code}: {}",
+                                redact_and_truncate_error_body(&detail, 500)
+                            ),
+                            None => format!(
+                                "failed to parse upstream chat chunk: {err}; payload={}",
+                                redact_and_truncate_error_body(&event.data, 500)
+                            ),
+                        };
+                        yield Err(AppError::upstream(message));
                         return;
                     }
                 },
@@ -5571,6 +5582,31 @@ impl Drop for UpstreamTapGuard {
         // with the barrier's own close) so the writer drains + finalize resolves.
         self.capture.upstream_response_done(!self.clean);
     }
+}
+
+/// `(code, message)` when an SSE data payload is an OpenAI-style error event
+/// (`{"error": {"message": ..., "code": ...}}`) rather than a completion chunk.
+fn upstream_error_event(data: &str) -> Option<(String, String)> {
+    let value: Value = serde_json::from_str(data).ok()?;
+    let error = value.get("error")?;
+    let message = match error {
+        Value::String(text) => text.clone(),
+        Value::Object(map) => map
+            .get("message")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| error.to_string()),
+        _ => return None,
+    };
+    let code = error
+        .get("code")
+        .map(|code| match code {
+            Value::String(text) => text.clone(),
+            other => other.to_string(),
+        })
+        .filter(|code| !code.is_empty() && code != "null")
+        .unwrap_or_else(|| "error".to_string());
+    Some((code, message))
 }
 
 fn parse_chat_completion_chunk(data: &str) -> Result<ChatCompletionChunk, serde_json::Error> {
@@ -6679,6 +6715,30 @@ mod tests {
             value["choices"][0]["delta"]["tool_calls"][0]["type"],
             Value::String("function".to_string())
         );
+    }
+
+    #[test]
+    fn upstream_error_event_extracts_vllm_engine_error() {
+        let data = r#"{"error": {"message": "EngineCore encountered an issue. See stack trace (above) for the root cause.", "type": "InternalServerError", "param": null, "code": 500}}"#;
+        assert_eq!(
+            super::upstream_error_event(data),
+            Some((
+                "500".to_string(),
+                "EngineCore encountered an issue. See stack trace (above) for the root cause."
+                    .to_string()
+            ))
+        );
+        assert_eq!(
+            super::upstream_error_event(r#"{"error": "boom"}"#),
+            Some(("error".to_string(), "boom".to_string()))
+        );
+    }
+
+    #[test]
+    fn upstream_error_event_ignores_normal_chunks() {
+        let chunk = r#"{"id": "c1", "object": "chat.completion.chunk", "choices": []}"#;
+        assert_eq!(super::upstream_error_event(chunk), None);
+        assert_eq!(super::upstream_error_event("not json"), None);
     }
 
     #[test]
