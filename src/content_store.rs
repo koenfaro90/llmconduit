@@ -280,20 +280,41 @@ pub fn split_value(
     Ok(SplitBody { skeleton, items })
 }
 
+/// Compact JSON with object keys sorted recursively, independent of map ordering.
+fn canonical_json(value: &Value) -> String {
+    fn sorted(value: &Value) -> Value {
+        match value {
+            Value::Object(map) => {
+                let mut entries: Vec<_> = map.iter().collect();
+                entries.sort_by(|a, b| a.0.cmp(b.0));
+                Value::Object(
+                    entries
+                        .into_iter()
+                        .map(|(k, v)| (k.clone(), sorted(v)))
+                        .collect(),
+                )
+            }
+            Value::Array(items) => Value::Array(items.iter().map(sorted).collect()),
+            other => other.clone(),
+        }
+    }
+    serde_json::to_string(&sorted(value)).unwrap_or_else(|_| "null".to_string())
+}
+
 fn push_item(
     items: &mut Vec<SplitItem>,
     section: ItemSection,
     kind: Option<String>,
     item: Value,
 ) -> Value {
-    // `serde_json::Value` objects are `BTreeMap`-backed (no `preserve_order`
-    // feature), so `to_string` already yields sorted keys without whitespace.
-    let canonical = serde_json::to_string(&item).unwrap_or_else(|_| "null".to_string());
+    // Content addressing needs one canonical form per logical object, while the wire keeps
+    // client key order (`serde_json` `preserve_order`): sort keys explicitly for storage.
+    let canonical = canonical_json(&item);
     let hash = hash_canonical(&canonical);
     let mut stripped = item;
     let stripped_keys = strip_identity_ignored_keys(&mut stripped);
     let identity = if normalize_identity_forms(&mut stripped) | stripped_keys {
-        hash_canonical(&serde_json::to_string(&stripped).unwrap_or_else(|_| "null".to_string()))
+        hash_canonical(&canonical_json(&stripped))
     } else {
         hash.clone()
     };

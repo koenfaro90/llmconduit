@@ -15907,3 +15907,76 @@ async fn f1b_mid_stream_disconnect_marks_served_partial() {
         "a mid-stream disconnect marks served_response partial: {artifact}"
     );
 }
+
+/// JSON Schema property order is semantic for constrained decoding: grammar backends (xgrammar)
+/// emit properties in schema order, so re-sorting keys moves free-text fields last and changes
+/// what the model generates (observed: gpt-oss looping in a re-ordered trailing string until
+/// max_tokens). The raw client body is parsed and re-serialized on the way upstream, so this
+/// asserts on the serialized upstream text, not on `Value` equality (which ignores key order).
+#[tokio::test]
+async fn chat_preserves_json_schema_and_tool_parameter_key_order_upstream() {
+    let upstream = MockUpstream::default();
+    upstream
+        .push_response(vec![Ok(content_chunk("chat-1", "{\"zeta\":\"a\"}"))])
+        .await;
+    let gateway = test_gateway(upstream.clone(), MockSearch::default());
+    let app = llmconduit::build_app_from_gateway(gateway);
+    // Raw string on purpose: `json!` would already sort keys without `preserve_order`.
+    let body = r#"{
+        "model": "glm-5.1",
+        "messages": [{"role": "user", "content": "extract"}],
+        "tools": [{"type": "function", "function": {"name": "lookup", "parameters": {
+            "type": "object",
+            "properties": {"zulu": {"type": "string"}, "alpha": {"type": "string"}},
+            "required": ["zulu", "alpha"]}}}],
+        "response_format": {"type": "json_schema", "json_schema": {"name": "meta", "strict": true,
+            "schema": {"type": "object", "additionalProperties": false,
+                "properties": {"zeta": {"type": "string"}, "mike": {"type": "string"}, "alpha": {"type": "string"}},
+                "required": ["zeta", "mike", "alpha"]}}}
+    }"#;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status().as_u16(), 200);
+    let _ = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("read body");
+
+    let requests = upstream.requests().await;
+    assert_eq!(requests.len(), 1);
+    let wire = serde_json::to_string(&requests[0]).expect("serialize upstream request");
+    // Property names in serialized order for the `properties` object that follows `anchor`.
+    let property_order = |anchor: &str| -> Vec<String> {
+        let start = wire
+            .find(anchor)
+            .unwrap_or_else(|| panic!("{anchor} missing in {wire}"));
+        let after = &wire[start..];
+        let props = &after[after.find("\"properties\":").expect("properties")..];
+        let value: serde_json::Value =
+            serde_json::Deserializer::from_str(&props["\"properties\":".len()..])
+                .into_iter::<serde_json::Value>()
+                .next()
+                .expect("properties value")
+                .expect("valid json");
+        value.as_object().expect("object").keys().cloned().collect()
+    };
+    assert_eq!(
+        property_order("\"response_format\""),
+        ["zeta", "mike", "alpha"],
+        "response_format schema properties re-ordered: {wire}"
+    );
+    assert_eq!(
+        property_order("\"parameters\""),
+        ["zulu", "alpha"],
+        "tool parameter properties re-ordered: {wire}"
+    );
+}

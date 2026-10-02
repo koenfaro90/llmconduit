@@ -43,7 +43,10 @@ regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["charset", "http2", "json", "rustls-tls", "stream"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `preserve_order`: JSON object key order is semantic for clients we proxy. Constrained decoding
+# emits JSON Schema properties in schema order, and tool parameter order shapes generation;
+# re-sorting keys changed model output (gpt-oss looping in a re-ordered trailing field).
+serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml = "0.9"
 # Read-only TOML config support (G7). `parse`+`serde` only; we never serialize
 # back to TOML (config is written as YAML), so `display` is intentionally off.
