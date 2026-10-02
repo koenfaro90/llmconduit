@@ -272,6 +272,8 @@ fn inference_endpoint_name(endpoint: crate::upstream::InferenceEndpoint) -> &'st
         crate::upstream::InferenceEndpoint::Messages => "messages",
         crate::upstream::InferenceEndpoint::CountTokens => "count_tokens",
         crate::upstream::InferenceEndpoint::Completions => "completions",
+        crate::upstream::InferenceEndpoint::Embeddings => "embeddings",
+        crate::upstream::InferenceEndpoint::Rerank => "rerank",
     }
 }
 

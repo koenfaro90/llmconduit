@@ -15980,3 +15980,113 @@ async fn chat_preserves_json_schema_and_tool_parameter_key_order_upstream() {
         "tool parameter properties re-ordered: {wire}"
     );
 }
+
+fn raw_passthrough_config(server_uri: &str) -> Config {
+    Config {
+        provider_metrics_targets: Vec::new(),
+        bind_addr: "127.0.0.1:0".parse().expect("socket addr"),
+        upstream_base_url: format!("{server_uri}/v1/").parse().expect("url"),
+        upstream_api_key: Some("upstream-secret".to_string()),
+        upstream_model: None,
+        system_prompt_prefix: None,
+        upstream_request_log_path: None,
+        turn_capture_dir: None,
+        upstream_chat_kwargs: JsonMap::new(),
+        upstreams: Vec::new(),
+        fallback_upstreams: Vec::new(),
+        upstream_failure_cooldown_secs: 30,
+        model_profiles: std::collections::BTreeMap::new(),
+        model_routes: Vec::new(),
+        template_family: None,
+        brave_base_url: "https://example.com/".parse().expect("url"),
+        brave_api_key: None,
+        brave_max_results: 5,
+        request_timeout: std::time::Duration::from_secs(30),
+        connect_timeout_secs: 10,
+        max_web_search_rounds: 5,
+        flatten_content: true,
+        max_replay_entries: 1000,
+        debug_log_max_age_hours: None,
+        min_completion_tokens: 4096,
+        max_sse_frame_bytes: 8 * 1024 * 1024,
+        max_request_body_bytes: 10 * 1024 * 1024,
+        image_agent_enabled: false,
+        vision_url: None,
+        vision_model: None,
+        image_cache_max_size: 100,
+        image_cache_ttl_secs: 300,
+        unsupported_image_policy: UnsupportedImagePolicy::Placeholder,
+        price_table: std::collections::HashMap::new(),
+        auth: Default::default(),
+        mesh: llmconduit::config::MeshConfig::default(),
+    }
+}
+
+/// `/v1/embeddings` and `/v1/rerank` share the raw `/v1/completions` passthrough: the body
+/// (incl. `dimensions`, `top_n`) reaches the upstream path unchanged and the upstream response
+/// is returned as-is.
+async fn assert_raw_endpoint_passthrough(
+    endpoint: &str,
+    request_body: serde_json::Value,
+    upstream_body: serde_json::Value,
+) {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(endpoint))
+        .and(header("authorization", "Bearer upstream-secret"))
+        .and(body_json(request_body.clone()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(upstream_body.clone()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let app = llmconduit::build_app(raw_passthrough_config(&server.uri()));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(endpoint)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&request_body).expect("serialize"),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status().as_u16(), 200, "{endpoint}");
+    let body_bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("read body");
+    let body: serde_json::Value = serde_json::from_slice(&body_bytes).expect("json body");
+    assert_eq!(body, upstream_body, "{endpoint}");
+}
+
+#[tokio::test]
+async fn proxies_embeddings_endpoint_passthrough() {
+    assert_raw_endpoint_passthrough(
+        "/v1/embeddings",
+        json!({"model": "qwen3-embedding", "input": ["a", "b"], "dimensions": 1024}),
+        json!({
+            "object": "list",
+            "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2]}],
+            "model": "qwen3-embedding",
+            "usage": {"prompt_tokens": 2, "total_tokens": 2}
+        }),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn proxies_rerank_endpoint_passthrough() {
+    assert_raw_endpoint_passthrough(
+        "/v1/rerank",
+        json!({"model": "qwen3-reranker", "query": "q", "documents": ["x", "y"], "top_n": 1}),
+        json!({
+            "id": "rerank-1",
+            "model": "qwen3-reranker",
+            "results": [{"index": 1, "relevance_score": 0.9, "document": {"text": "y"}}],
+            "usage": {"total_tokens": 7}
+        }),
+    )
+    .await;
+}

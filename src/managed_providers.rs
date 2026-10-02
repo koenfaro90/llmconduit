@@ -480,7 +480,7 @@ impl UpstreamClient for ManagedProviderUpstream {
                 &request.authorization,
                 &provider,
                 &requested_model,
-                InferenceEndpoint::Completions,
+                request.endpoint,
             )?;
             request.body = proxy_body_with_model(request.body, &requested_model)?;
             request.authorization_route = Some("configured".to_string());

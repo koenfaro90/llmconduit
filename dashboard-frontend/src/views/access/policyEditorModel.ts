@@ -13,6 +13,8 @@ export const inferenceEndpointOptions: readonly EndpointOption[] = [
   { value: 'chat', label: 'Chat Completions', description: 'OpenAI-compatible chat requests at /v1/chat/completions.' },
   { value: 'messages', label: 'Anthropic Messages', description: 'Anthropic-compatible requests at /v1/messages.' },
   { value: 'completions', label: 'Legacy Completions', description: 'Legacy OpenAI completions at /v1/completions.' },
+  { value: 'embeddings', label: 'Embeddings', description: 'OpenAI-compatible embeddings at /v1/embeddings.' },
+  { value: 'rerank', label: 'Rerank', description: 'Jina/Cohere-style reranking at /v1/rerank.' },
   { value: 'models', label: 'Model List', description: 'List available models at /v1/models.' },
   { value: 'count_tokens', label: 'Token Counting', description: 'Anthropic-compatible token counting.' },
 ];

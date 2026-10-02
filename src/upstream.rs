@@ -389,6 +389,9 @@ pub enum InferenceEndpoint {
     Messages,
     CountTokens,
     Completions,
+    /// Raw-proxied like `Completions`: `/v1/embeddings` and `/v1/rerank` bypass the engine.
+    Embeddings,
+    Rerank,
 }
 
 type CandidatePredicate =
@@ -461,6 +464,10 @@ pub struct ProxyCompletionsRequest {
     pub authorization: AuthorizationScope,
     pub authorization_route: Option<String>,
     pub authorization_provider: Option<String>,
+    /// Which raw-proxied API this is (`Completions`, `Embeddings` or `Rerank`): selects the
+    /// upstream path and the endpoint authorization is checked against. Routing, model
+    /// rewriting and failover are shared because all three are single-shot JSON passthroughs.
+    pub endpoint: InferenceEndpoint,
 }
 
 impl ProxyCompletionsRequest {
@@ -471,6 +478,21 @@ impl ProxyCompletionsRequest {
             authorization: AuthorizationScope::unrestricted(),
             authorization_route: None,
             authorization_provider: None,
+            endpoint: InferenceEndpoint::Completions,
+        }
+    }
+
+    pub fn with_endpoint(mut self, endpoint: InferenceEndpoint) -> Self {
+        self.endpoint = endpoint;
+        self
+    }
+
+    /// Upstream path (relative to the provider base URL) for this proxy endpoint.
+    pub fn upstream_path(&self) -> &'static str {
+        match self.endpoint {
+            InferenceEndpoint::Embeddings => "embeddings",
+            InferenceEndpoint::Rerank => "rerank",
+            _ => "completions",
         }
     }
 
@@ -2089,14 +2111,16 @@ impl UpstreamClient for ReqwestUpstreamClient {
                 .unwrap_or("primary"),
             request.authorization_route.as_deref(),
             &model,
-            InferenceEndpoint::Completions,
+            request.endpoint,
         )?;
-        let url = self.endpoint_url("completions")?;
+        let path = request.upstream_path();
+        let url = self.endpoint_url(path)?;
         let outbound =
             copy_proxy_request_headers(self.client.post(url), &request.headers).body(request.body);
-        self.with_auth(outbound).send().await.map_err(|err| {
-            AppError::upstream(format!("upstream completions request failed: {err}"))
-        })
+        self.with_auth(outbound)
+            .send()
+            .await
+            .map_err(|err| AppError::upstream(format!("upstream {path} request failed: {err}")))
     }
 
     fn provider_base_url(&self) -> String {
@@ -2783,7 +2807,7 @@ impl FailoverUpstreamClient {
             &provider.name,
             request.authorization_route.as_deref(),
             &model,
-            InferenceEndpoint::Completions,
+            request.endpoint,
         )?;
         if !self.provider_is_available(provider_index) {
             return Err(self.cooldown_error());
@@ -2806,7 +2830,7 @@ impl FailoverUpstreamClient {
                 &provider.name,
                 request.authorization_route.as_deref(),
                 &model,
-                InferenceEndpoint::Completions,
+                request.endpoint,
             ) {
                 continue;
             }
@@ -2816,6 +2840,7 @@ impl FailoverUpstreamClient {
                 authorization: request.authorization.clone(),
                 authorization_route: request.authorization_route.clone(),
                 authorization_provider: Some(provider.name.clone()),
+                endpoint: request.endpoint,
             };
             match self.providers[provider_index]
                 .client
@@ -3358,13 +3383,14 @@ impl UpstreamClient for FailoverUpstreamClient {
                 &provider.name,
                 request.authorization_route.as_deref(),
                 &model,
-                InferenceEndpoint::Completions,
+                request.endpoint,
             )
         });
         if !any_authorized {
-            return Err(AppError::forbidden(
-                "no authorized upstream candidate can proxy completions",
-            ));
+            return Err(AppError::forbidden(format!(
+                "no authorized upstream candidate can proxy {}",
+                request.upstream_path()
+            )));
         }
         let provider_indices = self.available_provider_indices();
         if provider_indices.is_empty() {

@@ -141,6 +141,8 @@ pub fn build_router(gateway: Arc<Gateway>, options: RouterOptions) -> Router {
         .route("/v1/messages", on(MethodFilter::OPTIONS, probe_messages))
         .route("/v1/chat/completions", post(post_chat_completions))
         .route("/v1/completions", post(post_completions))
+        .route("/v1/embeddings", post(post_embeddings))
+        .route("/v1/rerank", post(post_rerank))
         .route("/v1/models", get(get_models))
         .route_layer(middleware::from_fn_with_state(
             Arc::clone(&gateway),
@@ -751,6 +753,8 @@ fn auth_endpoint(path: &str) -> &'static str {
         "/v1/messages" => "messages",
         "/v1/messages/count_tokens" => "count_tokens",
         "/v1/completions" => "completions",
+        "/v1/embeddings" => "embeddings",
+        "/v1/rerank" => "rerank",
         "/v1/models" => "models",
         _ => "unknown",
     }
@@ -1813,6 +1817,8 @@ fn is_client_api_path_with_model(path: &str) -> bool {
             | "/v1/messages/count_tokens"
             | "/v1/chat/completions"
             | "/v1/completions"
+            | "/v1/embeddings"
+            | "/v1/rerank"
     )
 }
 
@@ -3400,6 +3406,88 @@ async fn post_completions(
     headers: HeaderMap,
     body: Bytes,
 ) -> AppResult<Response> {
+    proxy_raw_endpoint(
+        gateway,
+        auth,
+        headers,
+        body,
+        crate::upstream::InferenceEndpoint::Completions,
+    )
+    .await
+}
+
+/// OpenAI Embeddings API, proxied to the upstream that serves the requested model; the
+/// upstream's status and body are returned as-is (`dimensions` etc. pass through untouched).
+#[utoipa::path(
+    post,
+    path = "/v1/embeddings",
+    tag = "inference",
+    operation_id = "post_embeddings",
+    request_body(content = serde_json::Value, content_type = "application/json", description = "OpenAI Embeddings request (`model`, `input`, optional `dimensions`, `encoding_format`)."),
+    responses(
+        (status = 200, description = "Embedding list object, as returned by the upstream.", body = serde_json::Value),
+        (status = 401, body = crate::openapi::ApiError, description = "Missing or invalid API key (when client auth is required)."),
+        (status = 502, body = crate::openapi::ApiError, description = "The upstream could not be reached.")
+    ),
+    security(("bearer" = []), ("api_key" = []))
+)]
+pub(crate) async fn post_embeddings(
+    State(gateway): State<Arc<Gateway>>,
+    auth: Option<Extension<crate::authz::AuthContext>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> AppResult<Response> {
+    proxy_raw_endpoint(
+        gateway,
+        auth,
+        headers,
+        body,
+        crate::upstream::InferenceEndpoint::Embeddings,
+    )
+    .await
+}
+
+/// Jina/Cohere-style rerank API (vLLM `/v1/rerank`), proxied to the upstream that serves the
+/// requested model; the upstream's status and body are returned as-is.
+#[utoipa::path(
+    post,
+    path = "/v1/rerank",
+    tag = "inference",
+    operation_id = "post_rerank",
+    request_body(content = serde_json::Value, content_type = "application/json", description = "Rerank request (`model`, `query`, `documents`, optional `top_n`)."),
+    responses(
+        (status = 200, description = "Rerank result object, as returned by the upstream.", body = serde_json::Value),
+        (status = 401, body = crate::openapi::ApiError, description = "Missing or invalid API key (when client auth is required)."),
+        (status = 502, body = crate::openapi::ApiError, description = "The upstream could not be reached.")
+    ),
+    security(("bearer" = []), ("api_key" = []))
+)]
+pub(crate) async fn post_rerank(
+    State(gateway): State<Arc<Gateway>>,
+    auth: Option<Extension<crate::authz::AuthContext>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> AppResult<Response> {
+    proxy_raw_endpoint(
+        gateway,
+        auth,
+        headers,
+        body,
+        crate::upstream::InferenceEndpoint::Rerank,
+    )
+    .await
+}
+
+/// Shared raw passthrough for the single-shot JSON APIs that bypass the engine
+/// (`/v1/completions`, `/v1/embeddings`, `/v1/rerank`): model-based routing, authorization
+/// and usage accounting are identical; only the upstream path and endpoint label differ.
+async fn proxy_raw_endpoint(
+    gateway: Arc<Gateway>,
+    auth: Option<Extension<crate::authz::AuthContext>>,
+    headers: HeaderMap,
+    body: Bytes,
+    endpoint: crate::upstream::InferenceEndpoint,
+) -> AppResult<Response> {
     let request_metadata = auth
         .as_ref()
         .map(|_| {
@@ -3419,11 +3507,7 @@ async fn post_completions(
         .transpose()?;
     let authorization =
         if let (Some(context), Some((model, _))) = (auth.as_ref(), request_metadata.as_ref()) {
-            authorize_inference(
-                Some(&context.0),
-                crate::upstream::InferenceEndpoint::Completions,
-                model,
-            )?
+            authorize_inference(Some(&context.0), endpoint, model)?
         } else {
             crate::upstream::AuthorizationScope::unrestricted()
         };
@@ -3433,7 +3517,8 @@ async fn post_completions(
         .upstream_client()
         .proxy_completions(
             crate::upstream::ProxyCompletionsRequest::new(headers, body)
-                .with_authorization(authorization),
+                .with_authorization(authorization)
+                .with_endpoint(endpoint),
         )
         .await?;
     let accounting = request_metadata.map(|(model, streaming)| {
@@ -3443,6 +3528,7 @@ async fn post_completions(
             model,
             streaming,
             response.status().is_success(),
+            endpoint,
         )
     });
     Ok(proxy_upstream_response(response, lease, accounting))
@@ -3837,6 +3923,7 @@ struct RawCompletionAccounting {
     requested_model: String,
     parser: RawCompletionUsageParser,
     upstream_success: bool,
+    endpoint: crate::upstream::InferenceEndpoint,
 }
 
 impl RawCompletionAccounting {
@@ -3846,6 +3933,7 @@ impl RawCompletionAccounting {
         requested_model: String,
         streaming: bool,
         upstream_success: bool,
+        endpoint: crate::upstream::InferenceEndpoint,
     ) -> Self {
         Self {
             gateway,
@@ -3853,6 +3941,7 @@ impl RawCompletionAccounting {
             requested_model,
             parser: RawCompletionUsageParser::new(streaming),
             upstream_success,
+            endpoint,
         }
     }
 
@@ -3868,7 +3957,7 @@ impl RawCompletionAccounting {
         self.gateway.record_authenticated_usage_values(
             Some(context),
             None,
-            crate::upstream::InferenceEndpoint::Completions,
+            self.endpoint,
             self.requested_model.clone(),
             status,
             served_model,

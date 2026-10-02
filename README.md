@@ -945,6 +945,8 @@ server-side and are never returned to the browser.
 | `POST /v1/messages` | Anthropic Messages API |
 | `POST /v1/messages/count_tokens` | Anthropic token counting |
 | `POST /v1/completions` | Legacy completions passthrough |
+| `POST /v1/embeddings` | Embeddings passthrough (routed by `model`; `dimensions` etc. forwarded as-is) |
+| `POST /v1/rerank` | Jina/Cohere-style rerank passthrough (vLLM `/v1/rerank`), routed by `model` |
 | `GET /v1/models` | Proxied model list |
 | `GET /health` | Health check (`{"status":"healthy"}`) |
 | `GET /` | Process check (`{"status":"ok"}`); browsers are redirected to `/dashboard` when it is registered |

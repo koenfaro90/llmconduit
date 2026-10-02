@@ -31,6 +31,8 @@ describe('policyEditorModel', () => {
       'chat',
       'messages',
       'completions',
+      'embeddings',
+      'rerank',
       'models',
       'count_tokens',
     ]);

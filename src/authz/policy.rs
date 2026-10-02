@@ -40,6 +40,8 @@ pub enum Endpoint {
     Messages,
     CountTokens,
     Completions,
+    Embeddings,
+    Rerank,
     Models,
 }
 
@@ -51,6 +53,8 @@ impl Endpoint {
             Self::Messages => "messages",
             Self::CountTokens => "count_tokens",
             Self::Completions => "completions",
+            Self::Embeddings => "embeddings",
+            Self::Rerank => "rerank",
             Self::Models => "models",
         }
     }
@@ -62,6 +66,8 @@ impl Endpoint {
             "messages" => Some(Self::Messages),
             "count_tokens" => Some(Self::CountTokens),
             "completions" => Some(Self::Completions),
+            "embeddings" => Some(Self::Embeddings),
+            "rerank" => Some(Self::Rerank),
             "models" => Some(Self::Models),
             _ => None,
         }
@@ -833,5 +839,26 @@ mod tests {
                 max_daily_session_starts: Some(10),
             }
         );
+    }
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::Endpoint;
+
+    #[test]
+    fn endpoint_names_round_trip() {
+        for endpoint in [
+            Endpoint::Responses,
+            Endpoint::ChatCompletions,
+            Endpoint::Messages,
+            Endpoint::CountTokens,
+            Endpoint::Completions,
+            Endpoint::Embeddings,
+            Endpoint::Rerank,
+            Endpoint::Models,
+        ] {
+            assert_eq!(Endpoint::parse(endpoint.as_str()), Some(endpoint));
+        }
     }
 }

@@ -958,6 +958,8 @@ fn inference_endpoint(endpoint: crate::upstream::InferenceEndpoint) -> Endpoint 
         crate::upstream::InferenceEndpoint::Messages => Endpoint::Messages,
         crate::upstream::InferenceEndpoint::CountTokens => Endpoint::CountTokens,
         crate::upstream::InferenceEndpoint::Completions => Endpoint::Completions,
+        crate::upstream::InferenceEndpoint::Embeddings => Endpoint::Embeddings,
+        crate::upstream::InferenceEndpoint::Rerank => Endpoint::Rerank,
     }
 }
 

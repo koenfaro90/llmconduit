@@ -140,6 +140,8 @@ impl utoipa::Modify for SecuritySchemes {
         crate::http::get_openapi,
         crate::http::post_chat_completions,
         crate::http::post_completions,
+        crate::http::post_embeddings,
+        crate::http::post_rerank,
         crate::http::post_responses,
         crate::http::get_responses,
         crate::http::post_messages,
