@@ -3527,10 +3527,28 @@ impl UpstreamClient for RoutingUpstreamClient {
             };
         };
         let candidates = match resolution {
-            RoutingResolution::Route { model_id, .. } => vec![BackendCandidate {
-                model: model_id,
-                context_limit: None,
-            }],
+            // A route dispatches through its own failover chain, whose legs may
+            // apply a per-provider `upstream_model` rewrite (operational aliases
+            // carry the profile's `upstream_model` on each leg, not on the route
+            // spec). Ask that chain for its candidates so G4 judges the model id
+            // each leg actually sends — the same id the vision probe records
+            // under — instead of the client-facing alias. Plain ad-hoc routes
+            // have one leg without a rewrite, so this still yields `model_id`.
+            RoutingResolution::Route {
+                route_provider_index,
+                model_id,
+            } => {
+                let Some(route_provider) = self.route_providers.get(route_provider_index) else {
+                    return BackendCandidatePlan {
+                        candidates: Vec::new(),
+                    };
+                };
+                route_provider
+                    .client
+                    .backend_candidate_plan(&model_id)
+                    .await
+                    .candidates
+            }
             RoutingResolution::Catalog(candidate) => {
                 let Some(provider) = self.providers.get(candidate.provider_index) else {
                     return BackendCandidatePlan {

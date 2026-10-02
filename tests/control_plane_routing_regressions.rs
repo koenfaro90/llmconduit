@@ -292,3 +292,111 @@ async fn operational_alias_precedes_global_upstream_model_remap() {
         "global upstream_model must not steal an operational alias"
     );
 }
+
+/// Send one chat request carrying an image to an operational alias whose
+/// provider rewrites the model, after recording `probe_verdict` for the
+/// UPSTREAM model id the way the background vision probe does, and return the
+/// chat body the backend actually received.
+async fn chat_with_image_through_probed_alias(probe_verdict: bool) -> serde_json::Value {
+    // Mirrors production: profile/route `chandra-ocr-2` served by vLLM under
+    // the id `datalab-to/chandra-ocr-2`, no profile `native_vision` override.
+    const ALIAS: &str = "chandra-ocr-2";
+    const UPSTREAM_MODEL: &str = "datalab-to/chandra-ocr-2";
+    let primary = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"id": "primary-catalog-model"}]
+        })))
+        .mount(&primary)
+        .await;
+
+    let operational = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_partial_json(json!({"model": UPSTREAM_MODEL})))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(chat_sse_body("chat-ocr", "ocr text")),
+        )
+        .expect(1)
+        .mount(&operational)
+        .await;
+
+    let mut route = operational_route(ALIAS, &format!("{}/v1/", operational.uri()));
+    route.providers[0].upstream_model = Some(UPSTREAM_MODEL.to_string());
+    let backend_name = route.providers[0].backend_name.clone();
+    let (app, gateway) = llmconduit::build_app_with_gateway_control_plane(
+        base_config(&format!("{}/v1/", primary.uri())),
+        None,
+        AppOptions::default(),
+        vec![route],
+        UnknownModelPolicy::Passthrough,
+        None,
+    )
+    .expect("operational alias app");
+    // The probe targets come from `targets_from_routes`, which key on the
+    // provider's upstream model id, so that is the id the verdict lands under.
+    gateway
+        .native_vision_cache()
+        .record(&backend_name, UPSTREAM_MODEL, probe_verdict);
+
+    let image_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": ALIAS,
+                        "stream": false,
+                        "messages": [{"role": "user", "content": [
+                            {"type": "image_url", "image_url": {"url": image_url}},
+                            {"type": "text", "text": "OCR this page"}
+                        ]}]
+                    })
+                    .to_string(),
+                ))
+                .expect("request"),
+        )
+        .await
+        .expect("gateway response");
+    assert_eq!(response.status(), http::StatusCode::OK);
+
+    let requests = operational
+        .received_requests()
+        .await
+        .expect("operational requests");
+    let chat = requests
+        .iter()
+        .find(|request| request.url.path() == "/v1/chat/completions")
+        .expect("backend received the chat request");
+    serde_json::from_slice(&chat.body).expect("upstream chat JSON")
+}
+
+#[tokio::test]
+async fn operational_alias_passes_images_when_probe_accepted_upstream_model() {
+    let upstream = chat_with_image_through_probed_alias(true).await;
+    let serialized = upstream.to_string();
+    assert!(
+        serialized.contains("data:image/png;base64,"),
+        "probe said the upstream model takes images, so the image must reach it: {serialized}"
+    );
+    assert!(
+        !serialized.contains("image omitted"),
+        "image must not be degraded to a placeholder: {serialized}"
+    );
+}
+
+#[tokio::test]
+async fn operational_alias_strips_images_when_probe_rejected_upstream_model() {
+    let upstream = chat_with_image_through_probed_alias(false).await;
+    let serialized = upstream.to_string();
+    assert!(
+        !serialized.contains("data:image/png;base64,"),
+        "a probe rejection must keep image bytes away from the backend: {serialized}"
+    );
+}
