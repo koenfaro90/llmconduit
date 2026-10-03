@@ -93,6 +93,11 @@ fn validate_recipe(body: &CreateRecipeRevision) -> Result<String, &'static str> 
         "image",
         "command",
         "environment",
+        "environment_files",
+        "devices",
+        "group_add",
+        "privileged",
+        "cap_add",
         "mounts",
         "ports",
         "gpus",
@@ -121,12 +126,16 @@ fn validate_recipe(body: &CreateRecipeRevision) -> Result<String, &'static str> 
         || image.len() > 512
         || image.starts_with('-')
         || image.chars().any(char::is_whitespace)
-        || !image.rsplit_once("@sha256:").is_some_and(|(_, digest)| {
-            digest.len() == 64
-                && digest
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        })
+        || !image
+            .rsplit_once("@sha256:")
+            .map(|(_, digest)| digest)
+            .or_else(|| image.strip_prefix("sha256:"))
+            .is_some_and(|digest| {
+                digest.len() == 64
+                    && digest
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
     {
         return Err("image must be pinned by its sha256 digest");
     }
@@ -137,7 +146,9 @@ fn validate_recipe(body: &CreateRecipeRevision) -> Result<String, &'static str> 
         if env.iter().any(|(key, value)| {
             let upper = key.to_ascii_uppercase();
             !value.is_string()
-                || ["TOKEN", "SECRET", "PASSWORD", "API_KEY"]
+                || upper == "TOKEN"
+                || upper.ends_with("_TOKEN")
+                || ["SECRET", "PASSWORD", "API_KEY"]
                     .iter()
                     .any(|s| upper.contains(s))
         }) {
@@ -161,12 +172,20 @@ fn validate_recipe(body: &CreateRecipeRevision) -> Result<String, &'static str> 
             return Err("recipe string field has an invalid type");
         }
     }
-    for key in ["init", "read_only"] {
+    for key in ["init", "read_only", "privileged"] {
         if spec.get(key).is_some_and(|value| !value.is_boolean()) {
             return Err("recipe boolean field has an invalid type");
         }
     }
-    for key in ["command", "security_opt", "ulimits"] {
+    for key in [
+        "command",
+        "security_opt",
+        "ulimits",
+        "environment_files",
+        "devices",
+        "group_add",
+        "cap_add",
+    ] {
         if let Some(value) = spec.get(key)
             && !value
                 .as_array()
@@ -604,5 +623,21 @@ mod tests {
             serde_json::from_value::<ManagedReply>(serde_json::to_value(&reply).unwrap()).unwrap(),
             reply
         );
+    }
+
+    #[test]
+    fn imported_runtime_options_and_local_image_ids_round_trip() {
+        let body = CreateRecipeRevision {
+            description: "Imported inference".into(),
+            model_spec: serde_json::json!({"image":format!("sha256:{}", "a".repeat(64)),
+                "user":"0:0", "memory_limit":"115g", "privileged":true,
+                "devices":["/dev/infiniband:/dev/infiniband:rwm"],
+                "environment_files":["/home/koen/compose/fleet-observer/.secrets/model.env"],
+                "group_add":["44"]}),
+        };
+        let digest = validate_recipe(&body).unwrap();
+        let restored: CreateRecipeRevision =
+            serde_json::from_value(serde_json::to_value(&body).unwrap()).unwrap();
+        assert_eq!(validate_recipe(&restored).unwrap(), digest);
     }
 }

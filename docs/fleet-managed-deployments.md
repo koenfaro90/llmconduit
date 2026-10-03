@@ -53,3 +53,10 @@ Fleet image, host-owned manifest/policy, private token, durable `.managed-state`
 worker identity and configuration. See the control repository's live pilot notes
 for image revisions, host placement and verification evidence. Production inference
 routes and its PostgreSQL deployment remain independent of this pilot.
+
+Imported inference may use local immutable `sha256:` image IDs, private
+`environment_files`, `devices`, `group_add`, `cap_add` and `privileged` options.
+The controller stores these requests; Fleet's host-owned policy grants each
+exception explicitly. Numeric token-count settings are permitted; credential
+keys such as HF_TOKEN remain forbidden inline. Ports belong to recipe revisions
+and remain unchanged when adopting an existing LiteLLM endpoint.
