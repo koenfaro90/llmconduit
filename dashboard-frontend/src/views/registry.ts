@@ -15,6 +15,7 @@ import { ProvidersView } from './providers/ProvidersView';
 import { AccessView } from './access/AccessView';
 import { ChatView } from './chat/ChatView';
 
+import { BenchmarksView } from './infrastructure/BenchmarksView';
 import { HostsView } from './infrastructure/HostsView';
 import { RecipesView } from './infrastructure/RecipesView';
 import { ModelsView } from './infrastructure/ModelsView';
@@ -34,6 +35,7 @@ export const VIEW_BY_ROUTE: Record<RouteName, ComponentType> = {
   overview: OverviewView,
   providers: ProvidersView,
   hosts: HostsView,
+  benchmarks: BenchmarksView,
   recipes: RecipesView,
   models: ModelsView,
   deployment: DeploymentView,

@@ -23,6 +23,7 @@ export function LineChart({
   height = 160,
   unit = '',
   testId,
+  formatX,
   formatY = (v) => (Math.abs(v) >= 1000 ? `${(v / 1000).toFixed(1)}k` : v.toFixed(v < 10 ? 1 : 0)),
 }: {
   series: ChartSeries[];
@@ -30,6 +31,7 @@ export function LineChart({
   height?: number;
   unit?: string;
   testId?: string;
+  formatX?: (v: number) => string;
   formatY?: (v: number) => string;
 }) {
   const pad = { l: 44, r: 8, t: 8, b: 20 };
@@ -45,6 +47,7 @@ export function LineChart({
   const sy = (y: number) => pad.t + innerH - (yMax === 0 ? 0 : (y / yMax) * innerH);
   const ticks = [0, 0.5, 1].map((f) => yMax * f);
   const fmtX = (x: number) => {
+    if (formatX) return formatX(x);
     const d = new Date(x);
     return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
   };

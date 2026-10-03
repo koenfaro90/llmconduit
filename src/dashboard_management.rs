@@ -62,11 +62,15 @@ pub struct DesiredDeployment {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedCommand {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub benchmark: Option<crate::dashboard_benchmarks::BenchmarkCommand>,
     pub deployment_id: Option<String>,
     pub desired: Option<Value>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ManagedReply {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_status: Option<u16>,
     pub request_id: uuid::Uuid,
     pub result: Option<Value>,
     pub error: Option<String>,
@@ -305,7 +309,9 @@ pub async fn convert_recipe(
     }
 }
 
-async fn read(store: &dyn PersistenceStore) -> Result<(Option<String>, ManagementState), String> {
+pub(crate) async fn read(
+    store: &dyn PersistenceStore,
+) -> Result<(Option<String>, ManagementState), String> {
     let raw = store.get_setting(KEY).await?;
     let state = match &raw {
         Some(raw) => serde_json::from_str(raw).map_err(|_| "invalid stored management state")?,
@@ -641,6 +647,7 @@ async fn reconcile_deployment(
         .manage_fleet(
             endpoint,
             ManagedCommand {
+                benchmark: None,
                 deployment_id: Some(id.to_string()),
                 desired: Some(desired),
             },
@@ -727,6 +734,7 @@ mod tests {
     #[test]
     fn management_wire_fields_round_trip() {
         let command = ManagedCommand {
+            benchmark: None,
             deployment_id: Some("fixture".into()),
             desired: Some(serde_json::json!({"generation":1,"model":{"image":"fixture"}})),
         };
@@ -736,6 +744,7 @@ mod tests {
             command
         );
         let reply = ManagedReply {
+            error_status: None,
             request_id: uuid::Uuid::new_v4(),
             result: Some(serde_json::json!({"status":{"phase":"ready"}})),
             error: None,

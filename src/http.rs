@@ -249,6 +249,18 @@ fn protected_routes(gateway: Arc<Gateway>, auth: Arc<DashboardAuth>) -> Router<A
     // the `no_store` map.
     let api_routes = Router::new()
         .route(
+            "/dashboard/api/benchmarks",
+            get(crate::dashboard_benchmarks::list).post(crate::dashboard_benchmarks::create),
+        )
+        .route(
+            "/dashboard/api/benchmarks/{id}",
+            get(crate::dashboard_benchmarks::get),
+        )
+        .route(
+            "/dashboard/api/benchmarks/{id}/cancel",
+            post(crate::dashboard_benchmarks::cancel),
+        )
+        .route(
             "/dashboard/api/management/model-activity",
             get(crate::dashboard_management::model_activity),
         )

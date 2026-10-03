@@ -7,7 +7,7 @@ Guidance for AI coding agents working in this repo.
 Rust LLM API gateway. Accepts OpenAI Responses, OpenAI Chat Completions, and Anthropic Messages on the front; forwards to OpenAI-compatible `/v1/chat/completions` upstream, and proxies legacy `/v1/completions`, embeddings/rerank and dedicated image/video/audio
 task APIs (JSON/multipart/binary streaming). Video handles persist owner/backend
 routing in SQL. See `docs/media-api.md`. Infrastructure pages separate Hosts, Recipes,
-Models and Deployment; Providers retains upstream/mesh administration. Adds server-side Brave web search, per-model defaults, nested failover/model routing across upstreams, replay caching, request-log analysis, and an optional debug UI.
+Models, Deployment and Benchmarks; Providers retains upstream/mesh administration. Adds server-side Brave web search, per-model defaults, nested failover/model routing across upstreams, replay caching, request-log analysis, and an optional debug UI.
 
 Use the code layout below as the architecture map when touching unfamiliar areas.
 
@@ -63,6 +63,7 @@ uses same-origin `Origin`/`Host` validation for dashboard WebSockets. Kill requi
 | `src/debug_ui.rs` | `/debug` HTML + WS handler |
 | `src/dashboard_flow.rs` | (T13) DashboardFlowStore — authoritative per-flow records + capture seams |
 | `src/metrics.rs` | (T13) MetricsLayer — ring buffers, histograms, 5 s body-free snapshots |
+| `src/dashboard_benchmarks.rs` | Durable Fleet benchmark jobs, mesh commands and bounded live reports |
 | `src/dashboard_api.rs` | (T13) `/dashboard/api/*` REST handlers |
 | `src/dashboard_auth.rs` / `src/dashboard_ws.rs` | (T13) dashboard session-cookie auth + batched WS envelope |
 | `src/dashboard_ui.rs` | (T13) `include_dir!`-embedded SPA shell + static assets |

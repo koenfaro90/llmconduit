@@ -5,9 +5,9 @@
  */
 import { useSyncExternalStore } from 'react';
 
-export type RouteName = 'flows' | 'requests' | 'sessions' | 'throughput' | 'activity' | 'chat' | 'account' | 'topology' | 'sankey' | 'theater' | 'overview' | 'providers' | 'access' | 'hosts' | 'recipes' | 'models' | 'deployment';
+export type RouteName = 'flows' | 'requests' | 'sessions' | 'throughput' | 'activity' | 'chat' | 'account' | 'topology' | 'sankey' | 'theater' | 'overview' | 'providers' | 'access' | 'hosts' | 'recipes' | 'models' | 'deployment' | 'benchmarks';
 
-export const ROUTES: RouteName[] = ['flows', 'requests', 'sessions', 'throughput', 'activity', 'chat', 'account', 'topology', 'sankey', 'theater', 'overview', 'providers', 'access', 'hosts', 'recipes', 'models', 'deployment'];
+export const ROUTES: RouteName[] = ['flows', 'requests', 'sessions', 'throughput', 'activity', 'chat', 'account', 'topology', 'sankey', 'theater', 'overview', 'providers', 'access', 'hosts', 'recipes', 'models', 'deployment', 'benchmarks'];
 
 const DEFAULT_ROUTE: RouteName = 'chat';
 

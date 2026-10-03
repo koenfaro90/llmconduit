@@ -794,6 +794,7 @@ export const mockFetch: typeof fetch = async (input, init): Promise<Response> =>
     return json({ api_call_id: id, killed: true });
   }
 
+  if (path === '/dashboard/api/benchmarks' && method === 'GET') return json([]);
   if (path === '/dashboard/api/management' && method === 'GET') return json({ recipes: {}, deployments: {} });
   if (path === '/dashboard/api/management/model-activity' && method === 'GET') return json([]);
   if (path === '/dashboard/api/mesh') {

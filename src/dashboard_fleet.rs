@@ -261,6 +261,42 @@ impl FleetClient {
         Ok(value)
     }
 
+    pub async fn benchmark_command(
+        &self,
+        command: &crate::dashboard_benchmarks::BenchmarkCommand,
+    ) -> Result<serde_json::Value, FleetProxyError> {
+        use crate::dashboard_benchmarks::BenchmarkCommand;
+        let (method, path, body) = match command {
+            BenchmarkCommand::Start { request } => (
+                reqwest::Method::POST,
+                "/v1/benchmarks".to_string(),
+                Some(request),
+            ),
+            BenchmarkCommand::Get { id } => {
+                (reqwest::Method::GET, format!("/v1/benchmarks/{id}"), None)
+            }
+            BenchmarkCommand::Cancel { id } => (
+                reqwest::Method::POST,
+                format!("/v1/benchmarks/{id}/cancel"),
+                None,
+            ),
+        };
+        let id = match command {
+            BenchmarkCommand::Start { request } => {
+                request.get("id").and_then(serde_json::Value::as_str)
+            }
+            BenchmarkCommand::Get { id } | BenchmarkCommand::Cancel { id } => Some(id.as_str()),
+        };
+        if !id.is_some_and(|id| uuid::Uuid::parse_str(id).is_ok()) {
+            return Err(FleetProxyError::new(
+                StatusCode::BAD_REQUEST,
+                "invalid benchmark ID",
+            ));
+        };
+        self.request_body(method, &path, FLEET_REQUEST_TIMEOUT, body)
+            .await
+    }
+
     async fn request_body<T: DeserializeOwned>(
         &self,
         method: reqwest::Method,
@@ -362,6 +398,10 @@ pub struct FleetProxyError {
 impl FleetProxyError {
     pub(crate) fn new(status: StatusCode, message: &'static str) -> Self {
         Self { status, message }
+    }
+
+    pub(crate) fn status(&self) -> StatusCode {
+        self.status
     }
 
     fn into_response(self) -> Response {
@@ -571,6 +611,48 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn benchmark_client_routes_typed_commands_and_keeps_local_credentials() {
+        use crate::dashboard_benchmarks::BenchmarkCommand;
+        let server = MockServer::start().await;
+        let id = uuid::Uuid::new_v4().to_string();
+        for (verb, target) in [
+            ("POST", "/v1/benchmarks".to_string()),
+            ("GET", format!("/v1/benchmarks/{id}")),
+            ("POST", format!("/v1/benchmarks/{id}/cancel")),
+        ] {
+            Mock::given(method(verb))
+                .and(path(target))
+                .and(header("authorization", "Bearer secret-token"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({"id":id,"status":"running"})),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let client = test_client(&server.uri());
+        for command in [
+            BenchmarkCommand::Start {
+                request: serde_json::json!({"id":id,"deployment_id":"dep"}),
+            },
+            BenchmarkCommand::Get { id: id.clone() },
+            BenchmarkCommand::Cancel { id: id.clone() },
+        ] {
+            let value = client.benchmark_command(&command).await.unwrap();
+            assert_eq!(value["id"], id);
+            assert!(!value.to_string().contains("secret-token"));
+        }
+        assert!(
+            client
+                .benchmark_command(&BenchmarkCommand::Get {
+                    id: "../managed".into()
+                })
+                .await
+                .is_err()
+        );
+    }
     #[tokio::test]
     async fn fleet_host_client_authenticates_and_rejects_invalid_snapshots() {
         let server = MockServer::start().await;

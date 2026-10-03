@@ -11,6 +11,7 @@ pub mod control_plane_store;
 pub mod dashboard_access;
 pub mod dashboard_api;
 pub mod dashboard_auth;
+pub mod dashboard_benchmarks;
 pub mod dashboard_fleet;
 pub mod dashboard_fleet_host;
 pub mod dashboard_flow;
@@ -699,6 +700,7 @@ pub fn build_app_with_gateway_control_plane_runtime(
         register_protected_routes,
     };
     crate::dashboard_management::start_reconciler(Arc::clone(&gateway));
+    crate::dashboard_benchmarks::start_reconciler(Arc::clone(&gateway));
     let app = build_router(Arc::clone(&gateway), router_options);
     Ok((app, gateway))
 }

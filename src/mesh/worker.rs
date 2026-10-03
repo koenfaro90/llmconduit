@@ -478,14 +478,16 @@ pub(super) async fn handle_stream(
             .await
             .map_err(|_| AppError::bad_request("managed command timed out"))??;
             let mut reply = crate::dashboard_management::ManagedReply {
+                error_status: None,
                 request_id,
                 result: None,
                 error: None,
             };
             if let Some(fleet) = &runtime.fleet {
-                let result = match (command.deployment_id, command.desired) {
-                    (Some(id), Some(desired)) => fleet.apply_managed(&id, &desired).await,
-                    (None, None) => fleet.managed_report().await,
+                let result = match (command.benchmark, command.deployment_id, command.desired) {
+                    (Some(benchmark), None, None) => fleet.benchmark_command(&benchmark).await,
+                    (None, Some(id), Some(desired)) => fleet.apply_managed(&id, &desired).await,
+                    (None, None, None) => fleet.managed_report().await,
                     _ => Err(crate::dashboard_fleet::FleetProxyError::new(
                         axum::http::StatusCode::BAD_REQUEST,
                         "invalid managed command",
@@ -493,10 +495,10 @@ pub(super) async fn handle_stream(
                 };
                 match result {
                     Ok(result) => reply.result = Some(result),
-                    Err(_) => reply.error = Some(
-                        "Fleet rejected the managed command; inspect host policy and local state"
-                            .into(),
-                    ),
+                    Err(error) => {
+                        reply.error_status = Some(error.status().as_u16());
+                        reply.error=Some("Fleet rejected the command; deployment changed, is busy, or lacks benchmark support".into());
+                    }
                 }
             } else {
                 reply.error = Some("Fleet is not configured".into());

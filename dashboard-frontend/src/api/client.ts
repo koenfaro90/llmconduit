@@ -1,3 +1,4 @@
+import { isBenchmarkRun, type BenchmarkRun, type BenchmarkOptions } from '../views/infrastructure/benchmarkModel';
 /**
  * Typed REST client for the D13 endpoints. Cross-cutting behavior:
  *  - All reads carry the session cookie automatically (`credentials: 'include'`).
@@ -366,6 +367,10 @@ export class DashboardClient {
     return this.request('/mesh', undefined, isMeshAdminState);
   }
 
+  benchmarks(): Promise<BenchmarkRun[]> {return this.request('/benchmarks',undefined,(v):v is BenchmarkRun[]=>Array.isArray(v)&&v.every(isBenchmarkRun));}
+  benchmark(id:string):Promise<BenchmarkRun> {return this.request(`/benchmarks/${encodeURIComponent(id)}`,undefined,isBenchmarkRun);}
+  startBenchmark(body:{id:string;deployment_id:string;model:string;options:BenchmarkOptions}):Promise<BenchmarkRun> {return this.mutate<BenchmarkRun>('/benchmarks','POST',body).then(v=>{if(!isBenchmarkRun(v))throw Error('Invalid benchmark response');return v;});}
+  cancelBenchmark(id:string):Promise<BenchmarkRun> {return this.mutate<BenchmarkRun>(`/benchmarks/${encodeURIComponent(id)}/cancel`,'POST').then(v=>{if(!isBenchmarkRun(v))throw Error('Invalid benchmark response');return v;});}
   modelActivity(): Promise<import('./types').ModelActivity[]> {
     return this.request('/management/model-activity', undefined, (v): v is import('./types').ModelActivity[] => Array.isArray(v) && v.every(row => row && typeof row.model === 'string' && (row.backend == null || typeof row.backend === 'string') && Number.isFinite(row.last_request_at_ms) && Array.isArray(row.requests) && row.requests.length === 5 && row.requests.every((n: unknown) => typeof n === 'number' && Number.isInteger(n) && n >= 0)));
   }
