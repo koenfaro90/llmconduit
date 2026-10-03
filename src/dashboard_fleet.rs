@@ -148,6 +148,21 @@ impl FleetClient {
         }))
     }
 
+    pub async fn host_snapshot(
+        &self,
+    ) -> Result<crate::dashboard_fleet_host::FleetHostSnapshot, FleetProxyError> {
+        let snapshot: crate::dashboard_fleet_host::FleetHostSnapshot = self
+            .request_with_timeout(reqwest::Method::GET, "/v1/host", Duration::from_secs(4))
+            .await?;
+        if !snapshot.validate() {
+            return Err(FleetProxyError::new(
+                StatusCode::BAD_GATEWAY,
+                "Fleet returned an invalid host report",
+            ));
+        }
+        Ok(snapshot)
+    }
+
     pub async fn list_models(&self) -> Result<FleetModelsResponse, FleetProxyError> {
         self.request(reqwest::Method::GET, "/v1/models").await
     }
@@ -180,6 +195,16 @@ impl FleetClient {
     where
         T: DeserializeOwned,
     {
+        self.request_with_timeout(method, path, FLEET_REQUEST_TIMEOUT)
+            .await
+    }
+
+    async fn request_with_timeout<T: DeserializeOwned>(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        timeout: Duration,
+    ) -> Result<T, FleetProxyError> {
         let token = self.token().await?;
         let mut url = self.base_url.clone();
         url.set_path(path);
@@ -187,7 +212,7 @@ impl FleetClient {
             .client
             .request(method, url)
             .bearer_auth(token)
-            .timeout(FLEET_REQUEST_TIMEOUT)
+            .timeout(timeout)
             .send()
             .await
             .map_err(|error| {
@@ -478,6 +503,30 @@ mod tests {
             base_url: parse_loopback_url(base_url).expect("loopback mock URL"),
             token: FleetTokenSource::Env("secret-token".to_owned()),
         }
+    }
+
+    #[tokio::test]
+    async fn fleet_host_client_authenticates_and_rejects_invalid_snapshots() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/host"))
+            .and(header("authorization", "Bearer secret-token"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(crate::dashboard_fleet_host::fixture()),
+            )
+            .mount(&server)
+            .await;
+        let snapshot = test_client(&server.uri()).host_snapshot().await.unwrap();
+        assert!(snapshot.gpus[0].memory_total_mib.is_none());
+        server.reset().await;
+        let mut invalid = crate::dashboard_fleet_host::fixture();
+        invalid.schema_version = 2;
+        Mock::given(method("GET"))
+            .and(path("/v1/host"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(invalid))
+            .mount(&server)
+            .await;
+        assert!(test_client(&server.uri()).host_snapshot().await.is_err());
     }
 
     #[test]

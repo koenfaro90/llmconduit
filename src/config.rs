@@ -2433,12 +2433,7 @@ fn parse_mesh_config(config: &PersistedMeshConfig) -> Result<MeshConfig, String>
         if worker_identity_path.is_none() {
             return Err("mesh.worker.identity_path is required for worker mode".to_string());
         }
-        if config.worker.resources.is_empty() {
-            return Err(
-                "mesh.worker.resources must contain at least one resource for worker mode"
-                    .to_string(),
-            );
-        }
+        // A host may report Fleet telemetry before any inference recipe is deployed.
         if config.worker.heartbeat_interval_secs == 0 {
             return Err(
                 "mesh.worker.heartbeat_interval_secs must be greater than zero".to_string(),
@@ -5808,6 +5803,23 @@ upstreams:
         assert!(
             !yaml.contains("mesh:"),
             "default persisted config omits mesh so old configs round-trip unchanged"
+        );
+    }
+
+    #[test]
+    fn mesh_worker_telemetry_only_still_requires_authenticated_identity() {
+        let mut persisted = PersistedConfig::default();
+        persisted.mesh.worker.controller_addr = Some("controller.example:4433".into());
+        persisted.mesh.worker.controller_endpoint_id = Some("controller-id".into());
+        assert!(Config::from_persisted(&persisted).is_err());
+        persisted.mesh.worker.identity_path = Some("/tmp/worker.key".into());
+        let config = Config::from_persisted(&persisted).unwrap();
+        assert!(config.mesh.worker.resources.is_empty());
+        let encoded = serde_yaml::to_string(&persisted).unwrap();
+        let decoded: PersistedConfig = serde_yaml::from_str(&encoded).unwrap();
+        assert_eq!(
+            Config::from_persisted(&decoded).unwrap().mesh.worker,
+            config.mesh.worker
         );
     }
 

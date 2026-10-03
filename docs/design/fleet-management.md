@@ -1,6 +1,6 @@
 # Fleet machine management
 
-Agreed direction, 2026-10-03; not deployed functionality. Development work lands
+Agreed direction, 2026-10-03; host telemetry implemented on development. Development work lands
 on `development` in both GitLab repositories under
 `de-wielick/de-wielick/llm-tools`: `llmconduit` and `fleet`.
 
@@ -115,3 +115,33 @@ gpu03 is authorized for testing and OpenJev may be taken down when needed.
 At the 2026-10-03 inspection only gbspark01 was idle; there was no free Spark
 pair. Recheck live occupancy before deployment tests, and do not displace the
 other inference services for bootstrap work.
+
+
+## First implementation: live host reports
+
+Fleet now caches a bounded `GET /v1/host` report every five seconds. A mesh worker
+reads the local bearer-authenticated loopback API and adds an optional
+`host_snapshot` to its existing authenticated heartbeat. The controller validates
+schema, metric ranges, strings, inventory sizes and a 32 KiB report budget before
+accepting it. Legacy heartbeats remain compatible; an unavailable Fleet clears
+the report, and a disconnected/stale mesh session is not projected as live.
+
+The existing admin-only `/dashboard/api/mesh` response includes the latest
+snapshot per node. Providers → Fleet hosts shows CPU/load-source observations,
+host RAM, disk capacity, per-interface RX/TX rates, GPU utilization/temperature/
+power and running container statistics. Samples older than 20 seconds are marked
+stale; absent measurements display unavailable. GB10 has unified host RAM and
+null dedicated VRAM. No Fleet tokens, container environment or launch commands
+cross the mesh or dashboard API.
+
+A worker may have `resources: []` when observing a host with no deployed models.
+It still requires a pinned controller endpoint, its own identity and enrollment;
+it advertises no inference route. On each host configure
+`LLMCONDUIT_FLEET_URL=http://127.0.0.1:8090` and an env/file bearer token source.
+Fleet's standalone `contrib/compose.observer.yaml` uses host networking, host
+`/proc` and a Docker proxy that permits only reads. Execute under `~/compose`.
+Both ordinary Fleet and observation-only mode expose the report endpoint.
+
+This slice does not yet implement the central recipe catalog, applying resolved
+recipes, reservations, distributed lifecycle operations, inference-engine metrics
+or Fleet supervisor handover. These remain the next phases of the design above.

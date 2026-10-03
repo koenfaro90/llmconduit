@@ -160,9 +160,14 @@ impl WorkerRuntime {
                 healthy,
             });
         }
+        let host_snapshot = match &self.fleet {
+            Some(fleet) => fleet.host_snapshot().await.ok(),
+            None => None,
+        };
         Heartbeat {
             sequence,
             resources,
+            host_snapshot,
         }
     }
 

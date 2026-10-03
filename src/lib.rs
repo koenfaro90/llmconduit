@@ -12,6 +12,7 @@ pub mod dashboard_access;
 pub mod dashboard_api;
 pub mod dashboard_auth;
 pub mod dashboard_fleet;
+pub mod dashboard_fleet_host;
 pub mod dashboard_flow;
 pub mod dashboard_mesh;
 pub mod dashboard_ui;

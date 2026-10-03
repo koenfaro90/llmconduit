@@ -38,6 +38,7 @@ pub(crate) struct WorkerSession {
     last_seen: Mutex<Instant>,
     resources: Mutex<HashMap<String, ResourceState>>,
     model_switching: Mutex<Option<ModelSwitchingAdvertisement>>,
+    host_snapshot: Mutex<Option<crate::dashboard_fleet_host::FleetHostSnapshot>>,
 }
 
 #[derive(Debug, Clone)]
@@ -89,6 +90,7 @@ impl MeshRegistry {
             generation,
             connected_at: Instant::now(),
             last_seen: Mutex::new(Instant::now()),
+            host_snapshot: Mutex::new(None),
             model_switching: Mutex::new(advertisement.model_switching.clone()),
             resources: Mutex::new(resources_from_advertisement(advertisement)),
         });
@@ -117,6 +119,7 @@ impl MeshRegistry {
             generation,
             connected_at: Instant::now(),
             last_seen: Mutex::new(Instant::now()),
+            host_snapshot: Mutex::new(None),
             model_switching: Mutex::new(advertisement.model_switching.clone()),
             resources: Mutex::new(resources_from_advertisement(advertisement)),
         });
@@ -295,6 +298,21 @@ impl MeshRegistry {
             .model_switching
             .lock()
             .expect("mesh model-switching lock poisoned")
+            .clone()
+    }
+
+    pub(crate) fn host_snapshot(
+        &self,
+        endpoint_id: EndpointId,
+    ) -> Option<crate::dashboard_fleet_host::FleetHostSnapshot> {
+        let session = self.current_session_any_generation(endpoint_id)?;
+        if session.is_stale(Instant::now(), self.heartbeat_timeout) {
+            return None;
+        }
+        session
+            .host_snapshot
+            .lock()
+            .expect("mesh host snapshot lock poisoned")
             .clone()
     }
 
@@ -621,6 +639,10 @@ impl WorkerSession {
 
     pub(crate) fn apply_heartbeat(&self, heartbeat: Heartbeat) {
         self.touch();
+        *self
+            .host_snapshot
+            .lock()
+            .expect("mesh host snapshot lock poisoned") = heartbeat.host_snapshot;
         let mut resources = self
             .resources
             .lock()
@@ -718,6 +740,41 @@ mod tests {
     use crate::config::AvailabilitySchedule;
     use crate::mesh::protocol::{PROTOCOL_VERSION, SwitchableModelAdvertisement};
     use iroh::SecretKey;
+
+    #[test]
+    fn fleet_host_reports_clear_when_unavailable_stale_or_replaced() {
+        let registry = MeshRegistry::new(Duration::from_secs(30));
+        let endpoint = SecretKey::generate().public();
+        let advertisement = WorkerAdvertisement {
+            protocol_version: PROTOCOL_VERSION,
+            node_name: None,
+            agent_version: "test".into(),
+            resources: vec![],
+            model_switching: None,
+        };
+        let session = registry.register_test(endpoint, advertisement.clone());
+        session.apply_heartbeat(Heartbeat {
+            sequence: 1,
+            resources: vec![],
+            host_snapshot: Some(crate::dashboard_fleet_host::fixture()),
+        });
+        assert!(registry.host_snapshot(endpoint).is_some());
+        session.apply_heartbeat(Heartbeat {
+            sequence: 2,
+            resources: vec![],
+            host_snapshot: None,
+        });
+        assert!(registry.host_snapshot(endpoint).is_none());
+        session.apply_heartbeat(Heartbeat {
+            sequence: 3,
+            resources: vec![],
+            host_snapshot: Some(crate::dashboard_fleet_host::fixture()),
+        });
+        *session.last_seen.lock().unwrap() = Instant::now() - Duration::from_secs(31);
+        assert!(registry.host_snapshot(endpoint).is_none());
+        registry.register_test(endpoint, advertisement);
+        assert!(registry.host_snapshot(endpoint).is_none());
+    }
 
     #[test]
     fn authorization_predicate_runs_before_mesh_capacity_reservation() {

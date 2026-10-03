@@ -57,6 +57,8 @@ pub struct MeshNode {
     pub last_seen_at_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_switching: Option<MeshModelSwitching>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_snapshot: Option<crate::dashboard_fleet_host::FleetHostSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -186,8 +188,14 @@ pub async fn mesh_state(
                 .ok()
                 .and_then(|endpoint| registry.model_switching(endpoint))
                 .map(MeshModelSwitching::from);
+            let snapshot = record
+                .endpoint_id
+                .parse()
+                .ok()
+                .and_then(|endpoint| registry.host_snapshot(endpoint));
             let mut node = MeshNode::from(record);
             node.model_switching = switching;
+            node.host_snapshot = snapshot;
             node
         })
         .collect();
@@ -766,6 +774,7 @@ impl From<MeshNodeRecord> for MeshNode {
             join_key_id: value.join_key_id,
             last_seen_at_ms: value.last_seen_at_ms,
             model_switching: None,
+            host_snapshot: None,
         }
     }
 }

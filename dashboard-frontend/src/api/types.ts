@@ -1205,6 +1205,7 @@ export interface MeshNode {
   join_key_id?: string;
   last_seen_at_ms?: number;
   model_switching?: MeshModelSwitching;
+  host_snapshot?: FleetHostSnapshot;
 }
 
 export interface MeshModelSwitching {
@@ -2278,4 +2279,20 @@ export function isSnapshotFrame(v: unknown): v is SnapshotFrame {
  */
 export function assertNever(value: never): never {
   throw new Error(`Unhandled discriminated union member: ${JSON.stringify(value)}`);
+}
+
+/** Fleet reports null for unmeasured values (including GB10 dedicated VRAM). */
+export interface FleetHostSnapshot {
+  schema_version: number;
+  sampled_at: string;
+  hostname: string;
+  architecture: string;
+  uptime_seconds: number | null;
+  cpu: { logical_cores: number; utilization_percent: number | null; load_average: number[] } | null;
+  memory: { total_bytes: number; available_bytes: number; used_bytes: number } | null;
+  disk: { total_bytes: number; available_bytes: number; used_bytes: number } | null;
+  network: { name: string; rx_bytes: number; tx_bytes: number; rx_bytes_per_second: number | null; tx_bytes_per_second: number | null }[];
+  gpus: { index: number; uuid: string; name: string; unified_memory: boolean; memory_total_mib: number | null; memory_used_mib: number | null; utilization_percent: number | null; temperature_celsius: number | null; power_watts: number | null }[];
+  containers: { id: string; name: string; image: string; state: string; status: string; cpu_percent: number | null; memory_bytes: number | null; pids: number | null }[];
+  errors: string[];
 }

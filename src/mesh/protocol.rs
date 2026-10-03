@@ -90,10 +90,12 @@ pub struct ModelAdvertisement {
     pub context_limit: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Heartbeat {
     pub sequence: u64,
     pub resources: Vec<ResourceRuntimeState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_snapshot: Option<crate::dashboard_fleet_host::FleetHostSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -257,6 +259,13 @@ pub fn validate_model_switching(
 }
 
 pub fn validate_heartbeat(heartbeat: &Heartbeat) -> Result<(), ProtocolError> {
+    if heartbeat
+        .host_snapshot
+        .as_ref()
+        .is_some_and(|s| !s.validate())
+    {
+        return Err(ProtocolError::InvalidHostSnapshot);
+    }
     if heartbeat.resources.len() > MAX_RESOURCES_PER_NODE {
         return Err(ProtocolError::TooManyResources {
             count: heartbeat.resources.len(),
@@ -487,6 +496,8 @@ where
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ProtocolError {
+    #[error("invalid Fleet host snapshot")]
+    InvalidHostSnapshot,
     #[error("unsupported mesh protocol version {0}")]
     UnsupportedProtocolVersion(u16),
     #[error("node name must not be blank")]
