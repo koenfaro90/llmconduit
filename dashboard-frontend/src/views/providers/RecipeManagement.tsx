@@ -4,6 +4,7 @@ import { getConnection } from '../../api/connection';
 import type { MeshNode, SelectDeployment } from '../../api/types';
 import { Panel } from '../../components/ui/Panel';
 import { Button } from '../../components/ui/Button';
+import { RecipeImport } from './RecipeImport';
 const key = ['management'] as const;
 const input = 'rounded border border-line bg-bg px-2 py-1.5 text-xs text-text';
 export function RecipeManagement({ nodes, mutationsEnabled }: { nodes: MeshNode[]; mutationsEnabled: boolean }) {
@@ -12,6 +13,7 @@ export function RecipeManagement({ nodes, mutationsEnabled }: { nodes: MeshNode[
   const state = useQuery({ queryKey: key, queryFn: () => client.management(), retry: false, refetchInterval: 5_000 });
   const [recipeId, setRecipeId] = useState('');
   const [description, setDescription] = useState('');
+  const [format, setFormat] = useState<'fleet' | 'compose' | 'sparkrun'>('fleet');
   const [spec, setSpec] = useState('{\n  "image": ""\n}');
   const [deploymentId, setDeploymentId] = useState('');
   const [host, setHost] = useState('');
@@ -22,10 +24,16 @@ export function RecipeManagement({ nodes, mutationsEnabled }: { nodes: MeshNode[
   const select = useMutation({ mutationFn: ({ id, body }: { id: string; body: SelectDeployment }) => client.selectDeployment(id, body), onSuccess: refresh });
   const busy = create.isPending || select.isPending;
   const revisions = Object.entries(state.data?.recipes ?? {}).flatMap(([id, versions]) => versions.map((revision) => ({ id, revision })));
+  async function upload(file: File | undefined) {
+    if (!file) return;
+    if (file.size > 32 * 1024) { setFormError('Recipe files must be at most 32 KiB.'); return; }
+    try { setSpec(await file.text()); setFormError(''); }
+    catch { setFormError('The recipe file could not be read.'); }
+  }
   function save(event: FormEvent) {
     event.preventDefault();
     try {
-      const model: unknown = JSON.parse(spec);
+      const model: unknown = format === 'fleet' ? JSON.parse(spec) : { source_format: format, source_content: spec };
       if (!model || typeof model !== 'object' || Array.isArray(model)) throw new Error('Recipe specification must be an object.');
       setFormError('');
       create.mutate({ description, model_spec: model as Record<string, unknown> });
@@ -48,10 +56,16 @@ export function RecipeManagement({ nodes, mutationsEnabled }: { nodes: MeshNode[
           <input aria-label="Recipe ID" placeholder="Recipe ID" required pattern="[a-z0-9][a-z0-9_-]{0,39}" className={input} value={recipeId} onChange={(e) => setRecipeId(e.target.value)} />
           <input aria-label="Recipe description" placeholder="Description" required maxLength={256} className={input} value={description} onChange={(e) => setDescription(e.target.value)} />
         </div>
+        <label className="block">Recipe format <select aria-label="Recipe format" className={input} value={format} onChange={(e) => setFormat(e.target.value as typeof format)}><option value="fleet">Fleet JSON</option><option value="compose">Compose YAML</option><option value="sparkrun">Sparkrun YAML</option></select></label>
+        {format !== 'fleet' && <label className="block">Upload recipe YAML <input aria-label="Upload recipe YAML" type="file" accept=".yaml,.yml" onChange={(e) => { void upload(e.target.files?.[0]); }} /></label>}
         <textarea aria-label="Recipe specification" rows={7} className={`${input} w-full font-mono`} value={spec} onChange={(e) => setSpec(e.target.value)} />
-        <Button type="submit" disabled={!mutationsEnabled || busy}>Save revision</Button>
+        <Button type="submit" disabled={!mutationsEnabled || busy}>{format === 'fleet' ? 'Save revision' : 'Save source'}</Button>
       </form>
-      <div className="space-y-1">{revisions.map(({ id, revision }) => <div key={`${id}:${revision.digest}`}><strong>{id}</strong> · revision {revision.revision} · {String(revision.model_spec.image ?? revision.model_spec.source_format ?? '')}<span className="ml-2 text-text-muted">{revision.digest.slice(0, 12)}</span><Button onClick={() => { setRecipeId(id); setDescription(revision.description); setSpec(JSON.stringify(revision.model_spec, null, 2)); }}>Edit revision</Button></div>)}</div>
+      {format !== 'fleet' && <RecipeImport recipeId={recipeId} description={description} sourceFormat={format} sourceContent={spec} mutationsEnabled={mutationsEnabled} onSaved={refresh} />}
+      <div className="space-y-1">{revisions.map(({ id, revision }) => <div key={`${id}:${revision.digest}`}><strong>{id}</strong> · revision {revision.revision} · {String(revision.model_spec.image ?? revision.model_spec.source_format ?? '')}<span className="ml-2 text-text-muted">{revision.digest.slice(0, 12)}</span><Button onClick={() => { setRecipeId(id); setDescription(revision.description);
+        const source = revision.model_spec.source_format;
+        if ((source === 'compose' || source === 'sparkrun') && typeof revision.model_spec.source_content === 'string') { setFormat(source); setSpec(revision.model_spec.source_content); }
+        else { setFormat('fleet'); setSpec(JSON.stringify(revision.model_spec, null, 2)); } }}>Edit revision</Button></div>)}</div>
       <form onSubmit={deploy} className="flex flex-wrap gap-2">
         <input aria-label="Deployment ID" placeholder="Deployment ID" required pattern="[a-z0-9][a-z0-9_-]{0,39}" className={input} value={deploymentId} onChange={(e) => setDeploymentId(e.target.value)} />
         <select aria-label="Deployment host" required className={input} value={host} onChange={(e) => setHost(e.target.value)}><option value="">Select host</option>{nodes.filter((node) => node.enabled && node.managed_deployments).map((node) => <option key={node.endpoint_id} value={node.endpoint_id}>{node.label ?? node.host_snapshot?.hostname ?? node.endpoint_id.slice(0, 12)}</option>)}</select>

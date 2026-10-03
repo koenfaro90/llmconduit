@@ -9,6 +9,8 @@
  */
 import type {
   ManagementState,
+  ConvertRecipeRequest,
+  ConvertedRecipe,
   RecipeRevision,
   DesiredDeployment,
   SelectDeployment,
@@ -366,6 +368,17 @@ export class DashboardClient {
 
   management(): Promise<ManagementState> {
     return this.request('/management');
+  }
+  convertRecipe(body: ConvertRecipeRequest): Promise<ConvertedRecipe> {
+    return this.mutate('/management/recipes/convert', 'POST', body).then((value) => {
+      const result = value as ConvertedRecipe;
+      if (!result || !['compose', 'sparkrun'].includes(result.source_format) ||
+          !result.model_spec || typeof result.model_spec !== 'object' || Array.isArray(result.model_spec) ||
+          ![result.services, result.required_inputs, result.warnings].every((items) => Array.isArray(items) && items.every((item) => typeof item === 'string'))) {
+        throw new Error('Recipe conversion returned an invalid preview');
+      }
+      return result;
+    });
   }
   createRecipeRevision(id: string, body: { description: string; model_spec: Record<string, unknown> }): Promise<RecipeRevision> {
     return this.mutate(`/management/recipes/${encodeURIComponent(id)}/revisions`, 'POST', body) as Promise<RecipeRevision>;

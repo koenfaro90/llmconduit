@@ -1,0 +1,71 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { cleanup, fireEvent, screen, waitFor } from '@testing-library/react';
+import { renderWithQuery, resetWorld } from '../../components/testHarness';
+import { getConnection } from '../../api/connection';
+import { RecipeManagement } from './RecipeManagement';
+import { RecipeImport } from './RecipeImport';
+const source = 'services: {test: {image: ubuntu:latest}}';
+const spec = { image: 'test@sha256:' + 'a'.repeat(64), user: '1000:1000', memory_limit: '128m', command: ['python3', '-m', 'http.server', '8123'] };
+const preview = { source_format: 'compose' as const, services: ['test'], model_spec: spec, required_inputs: [], warnings: ['Host policy is checked by Fleet'] };
+beforeEach(() => resetWorld({ mock: true }));
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+describe('Recipe conversion', () => {
+  it('accepts raw YAML in the management editor and saves source and executable revisions explicitly', async () => {
+    const client = getConnection().client;
+    vi.spyOn(client, 'management').mockResolvedValue({ recipes: {}, deployments: {} });
+    const convert = vi.spyOn(client, 'convertRecipe').mockResolvedValue(preview);
+    const save = vi.spyOn(client, 'createRecipeRevision').mockResolvedValue({ digest: 'a'.repeat(64), revision: 1, description: 'test', model_spec: spec, created_at_ms: 1 });
+    renderWithQuery(<RecipeManagement nodes={[]} mutationsEnabled />);
+    fireEvent.change(screen.getByLabelText('Recipe ID'), { target: { value: 'compose-test' } });
+    fireEvent.change(screen.getByLabelText('Recipe description'), { target: { value: 'Compose source' } });
+    fireEvent.change(screen.getByLabelText('Recipe format'), { target: { value: 'compose' } });
+    fireEvent.change(screen.getByLabelText('Recipe specification'), { target: { value: source } });
+    fireEvent.change(screen.getByLabelText('RAM limit'), { target: { value: '128m' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Preview conversion' }));
+    await screen.findByLabelText('Converted Fleet specification');
+    expect(convert).toHaveBeenCalledWith({ source_format: 'compose', source_content: source, options: { memory_limit: '128m', variables: {}, environment: {} } });
+    expect(save).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Save converted revision' }));
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+    expect(save).toHaveBeenNthCalledWith(1, 'compose-test', { description: 'Compose source', model_spec: { source_format: 'compose', source_content: source } });
+    expect(save).toHaveBeenNthCalledWith(2, 'compose-test', { description: 'Compose source', model_spec: spec });
+    expect(await screen.findByRole('status')).toHaveTextContent('Select the executable revision and a host');
+  });
+  it('blocks saving incomplete previews and never deploys as a conversion side effect', async () => {
+    const client = getConnection().client;
+    vi.spyOn(client, 'convertRecipe').mockResolvedValue({ ...preview, required_inputs: ['Set memory_limit'], services: ['one', 'two'] });
+    const save = vi.spyOn(client, 'createRecipeRevision'); const deploy = vi.spyOn(client, 'selectDeployment');
+    renderWithQuery(<RecipeImport recipeId="test" description="test" sourceFormat="compose" sourceContent={source} mutationsEnabled onSaved={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Preview conversion' }));
+    await screen.findByText('Set memory_limit');
+    expect(screen.getByRole('button', { name: 'Save converted revision' })).toBeDisabled();
+    expect(screen.getByText(/Services in this file/)).toHaveTextContent('one, two');
+    expect(save).not.toHaveBeenCalled(); expect(deploy).not.toHaveBeenCalled();
+  });
+  it('invalidates a preview when settings or source change', async () => {
+    vi.spyOn(getConnection().client, 'convertRecipe').mockResolvedValue(preview);
+    renderWithQuery(<RecipeManagement nodes={[]} mutationsEnabled />);
+    fireEvent.change(screen.getByLabelText('Recipe ID'), { target: { value: 'test' } });
+    fireEvent.change(screen.getByLabelText('Recipe description'), { target: { value: 'test' } });
+    fireEvent.change(screen.getByLabelText('Recipe format'), { target: { value: 'compose' } });
+    fireEvent.change(screen.getByLabelText('Recipe specification'), { target: { value: source } });
+    fireEvent.click(screen.getByRole('button', { name: 'Preview conversion' }));
+    await screen.findByLabelText('Converted Fleet specification');
+    expect(screen.getByRole('button', { name: 'Save converted revision' })).toBeEnabled();
+    fireEvent.change(screen.getByLabelText('Recipe specification'), { target: { value: source + '\n# changed' } });
+    expect(screen.getByRole('button', { name: 'Save converted revision' })).toBeDisabled();
+    expect(screen.getByRole('status')).toHaveTextContent('Refresh the preview');
+  });
+  it('shows per-rank controls and rejects malformed variables without a request', () => {
+    const convert = vi.spyOn(getConnection().client, 'convertRecipe');
+    renderWithQuery(<RecipeImport recipeId="test" description="test" sourceFormat="sparkrun" sourceContent="recipe_version: 2" mutationsEnabled onSaved={() => {}} />);
+    expect(screen.getByLabelText('Distributed node rank')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Conversion variables'), { target: { value: '[1]' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Preview conversion' }));
+    expect(screen.getByRole('status')).toHaveTextContent('valid JSON objects'); expect(convert).not.toHaveBeenCalled();
+  });
+  it('keeps conversion controls disabled for sessions without mutation permission', () => {
+    renderWithQuery(<RecipeImport recipeId="test" description="test" sourceFormat="compose" sourceContent={source} mutationsEnabled={false} onSaved={() => {}} />);
+    expect(screen.getByRole('button', { name: 'Preview conversion' })).toBeDisabled();
+  });
+});

@@ -221,6 +221,10 @@ fn protected_routes(gateway: Arc<Gateway>, auth: Arc<DashboardAuth>) -> Router<A
     // the `no_store` map.
     let api_routes = Router::new()
         .route(
+            "/dashboard/api/management/recipes/convert",
+            post(crate::dashboard_management::convert_recipe),
+        )
+        .route(
             "/dashboard/api/management",
             get(crate::dashboard_management::management_state),
         )

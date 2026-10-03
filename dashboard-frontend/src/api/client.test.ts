@@ -246,3 +246,21 @@ describe('DashboardClient — central recipe management', () => {
     expect(fetchImpl.mock.calls[0]![1]?.method).toBe('POST');
   });
 });
+
+describe('DashboardClient — recipe conversion', () => {
+  it('sends bounded source/options with CSRF and validates the preview shape', async () => {
+    const calls: Array<{ path: string; init: RequestInit | undefined }> = [];
+    const response = { source_format: 'compose', services: ['model'], model_spec: { ports: [{ host_port: 8001, container_port: 8000 }] }, required_inputs: ['Set memory_limit'], warnings: [] };
+    const fetchPreview: typeof fetch = async (input, init) => { calls.push({ path: String(input), init }); return new Response(JSON.stringify(response), { status: 200, headers: { 'Content-Type': 'application/json' } }); };
+    const client = new DashboardClient({ fetchImpl: fetchPreview, getCsrfToken: () => 'test-csrf' });
+    const body = { source_format: 'compose' as const, source_content: 'services: {}', options: { service: 'model', image: 'image@sha256:' + 'a'.repeat(64), variables: { PORT: 8001 }, environment_files: ['/private/env'] } };
+    expect(await client.convertRecipe(body)).toEqual(response);
+    expect(calls[0]!.path).toContain('/management/recipes/convert');
+    expect(JSON.parse(String(calls[0]!.init?.body))).toEqual(body);
+    expect(new Headers(calls[0]!.init?.headers).get('X-CSRF-Token')).toBe('test-csrf');
+  });
+  it('rejects malformed conversion responses before treating them as deployable', async () => {
+    const client = new DashboardClient({ fetchImpl: async () => new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } }), getCsrfToken: () => 'test-csrf' });
+    await expect(client.convertRecipe({ source_format: 'compose', source_content: 'services: {}', options: {} })).rejects.toThrow('invalid preview');
+  });
+});

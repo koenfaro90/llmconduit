@@ -71,3 +71,59 @@ maximum). Literal credentials are rejected. They are immutable editable catalog
 revisions and cannot be selected for execution until rendered into a Fleet
 specification. The dashboard Edit revision control loads either form into the
 editor. Archived sources are retained without starting competing workloads.
+
+## Importing Compose and sparkrun
+
+The recipe editor accepts pasted or uploaded Compose and sparkrun YAML. Select the
+source format, enter a recipe ID and description, and choose **Preview conversion**.
+Provide any missing image digest, container user, RAM budget, GPU device IDs,
+target-host directories, template variables or private environment-file paths.
+The preview shows the complete Fleet specification, missing inputs and warnings.
+Changing the source or settings invalidates the preview. **Save converted revision**
+retains both the editable source and its executable result as immutable revisions
+under the same recipe ID. Select the executable revision and an enrolled host, then
+use **Deploy**; saving or previewing does not start containers or change live ports.
+
+`POST /dashboard/api/management/recipes/convert` accepts:
+
+```json
+{
+  "source_format": "compose",
+  "source_content": "services:\n  inference:\n    image: example:v1\n    ports: ['8001:8000']\n",
+  "options": {
+    "image": "example@sha256:<64 hexadecimal characters>",
+    "user": "1000:1000",
+    "memory_limit": "64g",
+    "gpus": "device=0",
+    "base_directory": "/home/koen/compose/inference",
+    "home_directory": "/home/koen"
+  }
+}
+```
+
+The response contains `source_format`, `services`, `model_spec`, `required_inputs`
+and `warnings`. Nonempty `required_inputs` prevents saving through the converted
+revision control. Invalid YAML, inline credentials and invalid option values return
+400 without echoing submitted content. This side-effect-free endpoint uses the
+same administrator/mutation/CSRF policy as recipe writes. Sources are bounded to
+32 KiB and options to 16 KiB; conversion reads no host files and runs no commands.
+
+Compose conversion supports one selected service, YAML anchors, data-only variable
+substitution, commands/entrypoints, environment, required host-local environment
+files, bind mounts, fixed published ports, explicit NVIDIA device reservations,
+memory/shm limits and common Docker execution settings. Container HTTP healthchecks
+are translated to published host ports (for example 8000 to 8001). Additional
+services must be converted and deployed separately. Build directives, named volumes,
+custom network orchestration and unsupported execution settings require explicit
+conversion; they are reported as blocking inputs rather than silently dropped.
+Labels, Compose names and dependencies are not applied to managed containers.
+
+Sparkrun v1/v2 conversion currently supports explicit vLLM command templates,
+recipe defaults/overrides, environment and supported executor settings. It shows
+Hugging Face and isolated runtime cache bind paths; `runtime_cache_directory` can
+select an existing approved cache. Distributed recipes require explicit node count,
+rank, head IP and this host's IP. Convert each rank separately and preserve the
+required NCCL/fabric environment and devices through `environment` and `devices`.
+Headless ranks use container liveness; verify inference on the head. Conversion
+does not run sparkrun transfers, prepare host directories, install secrets, modify
+Fleet policy, coordinate ranks atomically or create gateway model aliases.

@@ -19,7 +19,8 @@ describe('ProvidersView', () => {
     const row = (await screen.findByText('archived')).parentElement!;
     fireEvent.click(within(row).getByRole('button', { name: 'Edit revision' }));
     expect(screen.getByLabelText('Recipe ID')).toHaveValue('archived');
-    expect(JSON.parse((screen.getByLabelText('Recipe specification') as HTMLTextAreaElement).value)).toEqual(source);
+    expect(screen.getByLabelText('Recipe format')).toHaveValue('compose');
+    expect(screen.getByLabelText('Recipe specification')).toHaveValue(source.source_content);
     expect(within(screen.getByLabelText('Recipe revision')).queryByRole('option', { name: /archived/ })).toBeNull();
     expect(within(screen.getByLabelText('Recipe revision')).getByRole('option', { name: /executable/ })).toBeInTheDocument();
   });

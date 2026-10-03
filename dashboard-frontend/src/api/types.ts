@@ -2327,3 +2327,35 @@ export interface SelectDeployment {
   revision_digest: string;
   desired_state: 'ready' | 'unloaded';
 }
+
+export interface RecipeImportOptions {
+  service?: string;
+  image?: string;
+  user?: string;
+  memory_limit?: string;
+  gpus?: string;
+  base_directory?: string;
+  home_directory?: string;
+  runtime_cache_directory?: string;
+  devices?: string[];
+  environment_files?: string[];
+  variables?: Record<string, unknown>;
+  environment?: Record<string, string>;
+  readiness_url?: string;
+  num_nodes?: number;
+  node_rank?: number;
+  head_address?: string;
+  host_address?: string;
+}
+export interface ConvertRecipeRequest {
+  source_format: 'compose' | 'sparkrun';
+  source_content: string;
+  options: RecipeImportOptions;
+}
+export interface ConvertedRecipe {
+  source_format: 'compose' | 'sparkrun';
+  services: string[];
+  model_spec: Record<string, unknown>;
+  required_inputs: string[];
+  warnings: string[];
+}

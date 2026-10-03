@@ -36,6 +36,7 @@ pub mod persistent_history_api;
 pub mod provider_metrics;
 pub(crate) mod proxy_headers;
 pub mod raw;
+pub mod recipe_import;
 pub(crate) mod redaction;
 pub mod replay;
 pub mod request_log;

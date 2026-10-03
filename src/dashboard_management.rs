@@ -81,7 +81,7 @@ fn valid_id(id: &str) -> bool {
             b.is_ascii_lowercase() || b.is_ascii_digit() || (i > 0 && (b == b'-' || b == b'_'))
         })
 }
-fn credential_key(key: &str) -> bool {
+pub(crate) fn credential_key(key: &str) -> bool {
     let key = key.to_ascii_uppercase();
     key == "TOKEN"
         || key.ends_with("_TOKEN")
@@ -89,12 +89,16 @@ fn credential_key(key: &str) -> bool {
             .iter()
             .any(|part| key.contains(part))
 }
-fn source_has_credentials(value: &serde_yaml::Value) -> bool {
+pub(crate) fn source_has_credentials(value: &serde_yaml::Value) -> bool {
     fn literal(value: &serde_yaml::Value) -> bool {
         !value.is_null()
-            && !value
-                .as_str()
-                .is_some_and(|v| v.is_empty() || v.contains("${") || v == "[redacted]")
+            && !value.as_str().is_some_and(|v| {
+                v.is_empty()
+                    || v == "[redacted]"
+                    || regex::Regex::new(r"^\$\{[A-Za-z_][A-Za-z0-9_]*(?::?\?[^}]*)?(?::?-)?\}$")
+                        .unwrap()
+                        .is_match(v)
+            })
     }
     match value {
         serde_yaml::Value::Mapping(map) => map.iter().any(|(key, value)| {
@@ -103,6 +107,7 @@ fn source_has_credentials(value: &serde_yaml::Value) -> bool {
                 || source_has_credentials(value)
         }),
         serde_yaml::Value::Sequence(items) => items.iter().any(source_has_credentials),
+        serde_yaml::Value::Tagged(value) => source_has_credentials(&value.value),
         serde_yaml::Value::String(text) => text.split_once('=').is_some_and(|(key, value)| {
             credential_key(key) && literal(&serde_yaml::Value::String(value.to_string()))
         }),
@@ -272,6 +277,34 @@ fn validate_recipe(body: &CreateRecipeRevision) -> Result<String, &'static str> 
     }
     Ok(format!("{:x}", Sha256::digest(bytes)))
 }
+#[utoipa::path(post,path="/dashboard/api/management/recipes/convert",request_body=crate::recipe_import::ConvertRecipeRequest,responses((status=200,body=crate::recipe_import::ConvertedRecipe),(status=400),(status=401),(status=403)),tag="dashboard")]
+pub async fn convert_recipe(
+    Extension(auth): Extension<Arc<DashboardAuth>>,
+    Extension(session): Extension<AuthSession>,
+    headers: HeaderMap,
+    Json(body): Json<crate::recipe_import::ConvertRecipeRequest>,
+) -> Response {
+    // Preview is side-effect-free, but uses the same admin/CSRF boundary as imports.
+    if let Some(response) = authorize_mesh_mutation(&auth, &session, &headers).await {
+        return response;
+    }
+    match crate::recipe_import::convert(&body) {
+        Ok(mut preview) => {
+            if preview.required_inputs.is_empty() {
+                let revision = CreateRecipeRevision {
+                    description: String::new(),
+                    model_spec: preview.model_spec.clone(),
+                };
+                if let Err(message) = validate_recipe(&revision) {
+                    preview.required_inputs.push(message.to_string());
+                }
+            }
+            json_no_store(StatusCode::OK, &preview)
+        }
+        Err(message) => error(StatusCode::BAD_REQUEST, &message),
+    }
+}
+
 async fn read(store: &dyn PersistenceStore) -> Result<(Option<String>, ManagementState), String> {
     let raw = store.get_setting(KEY).await?;
     let state = match &raw {
@@ -719,5 +752,101 @@ mod tests {
             "services:\n  model:\n    environment:\n      HF_TOKEN: ${HF_TOKEN}\n".into(),
         );
         assert!(validate_recipe(&body).is_ok());
+    }
+    #[tokio::test]
+    async fn conversion_requires_admin_and_csrf_and_validates_the_preview() {
+        use crate::dashboard_auth::{AuthSessionKind, CSRF_COOKIE, CSRF_HEADER, DashboardEnv};
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        let auth = DashboardAuth::from_env(
+            "127.0.0.1:0".parse().unwrap(),
+            &DashboardEnv {
+                token: Some("preview-test".into()),
+                session_key_b64: Some(STANDARD.encode([7u8; 32])),
+                allow_mutations: true,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+        .auth;
+        let session = |is_admin| AuthSession {
+            exp: u64::MAX,
+            user: Some(crate::accounts::SessionUser {
+                id: "operator-id".into(),
+                username: "operator".into(),
+                is_admin,
+            }),
+            kind: AuthSessionKind::User,
+        };
+        let request = crate::recipe_import::ConvertRecipeRequest {
+            source_format: "compose".into(),
+            source_content: "services: {x: {image: tagged}}".into(),
+            options: Default::default(),
+        };
+        assert_eq!(
+            convert_recipe(
+                Extension(auth.clone()),
+                Extension(session(false)),
+                HeaderMap::new(),
+                Json(request.clone())
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            convert_recipe(
+                Extension(auth.clone()),
+                Extension(session(true)),
+                HeaderMap::new(),
+                Json(request.clone())
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+        let csrf = auth.issue_csrf_token();
+        let mut headers = HeaderMap::new();
+        headers.insert(CSRF_HEADER, csrf.parse().unwrap());
+        headers.insert(
+            axum::http::header::COOKIE,
+            format!("{CSRF_COOKIE}={csrf}").parse().unwrap(),
+        );
+        let response = convert_recipe(
+            Extension(auth.clone()),
+            Extension(session(true)),
+            headers.clone(),
+            Json(request.clone()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[axum::http::header::CACHE_CONTROL],
+            "no-store"
+        );
+        let value: Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 65536)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(value["required_inputs"].as_array().unwrap().len() >= 3);
+        let mut bad = request;
+        bad.source_content = "services: {x: {environment: {PASSWORD: literal-secret}}}".into();
+        let response = convert_recipe(
+            Extension(auth),
+            Extension(session(true)),
+            headers,
+            Json(bad),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let text = String::from_utf8(
+            axum::body::to_bytes(response.into_body(), 65536)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(!text.contains("literal-secret"));
     }
 }
