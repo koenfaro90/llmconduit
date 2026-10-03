@@ -716,20 +716,32 @@ async fn reconcile_deployment(
             tracing::warn!(%error,"could not store recipe readiness evidence");
         }
     }
-    for _ in 0..3 {
-        let Ok((raw, mut latest)) = read(store.as_ref()).await else {
+    // Four hosts reconcile concurrently against this one catalog row. Three
+    // CAS attempts can starve the fourth writer and leave healthy hosts stale.
+    persist_observation(store.as_ref(), id, deployment.generation, observed, message).await;
+}
+
+async fn persist_observation(
+    store: &dyn PersistenceStore,
+    id: &str,
+    generation: u64,
+    observed: Option<Value>,
+    message: Option<String>,
+) {
+    for _ in 0..8 {
+        let Ok((raw, mut latest)) = read(store).await else {
             break;
         };
         let Some(current) = latest.deployments.get_mut(id) else {
             break;
         };
-        if current.generation != deployment.generation {
+        if current.generation != generation {
             break;
         }
         current.observed = observed.clone();
         current.error = message.clone();
         current.observed_at_ms = Some(crate::mesh::store::now_ms());
-        match commit(store.as_ref(), raw.as_deref(), &latest).await {
+        match commit(store, raw.as_deref(), &latest).await {
             Ok(false) => continue,
             _ => break,
         }
@@ -788,6 +800,35 @@ mod tests {
         assert_ne!(one.unwrap(), two.unwrap());
         let current = store.get_setting(KEY).await.unwrap().unwrap();
         assert!(current == "second" || current == "third");
+    }
+    #[tokio::test]
+    async fn concurrent_observations_retain_every_host_and_ignore_old_generations() {
+        let store = crate::control_plane_store::SqlStore::connect_sqlite("sqlite::memory:")
+            .await
+            .unwrap();
+        let mut state = ManagementState::default();
+        for id in ["a", "b", "c", "d"] {
+            state.deployments.insert(
+                id.into(),
+                serde_json::from_value(serde_json::json!({
+                    "generation": 2, "endpoint_id": id, "recipe_id": "test",
+                    "revision_digest": "digest", "desired_state": "ready", "updated_at_ms": 1
+                }))
+                .unwrap(),
+            );
+        }
+        assert!(commit(&store, None, &state).await.unwrap());
+        futures::future::join_all(["a", "b", "c", "d"].into_iter().map(|id| {
+            persist_observation(&store, id, 2, Some(serde_json::json!({"host": id})), None)
+        }))
+        .await;
+        persist_observation(&store, "a", 1, None, Some("obsolete".into())).await;
+        let (_, state) = read(&store).await.unwrap();
+        for (id, deployment) in state.deployments {
+            assert_eq!(deployment.observed, Some(serde_json::json!({"host": id})));
+            assert!(deployment.observed_at_ms.is_some());
+            assert!(deployment.error.is_none());
+        }
     }
     #[test]
     fn recipe_digest_is_canonical_and_credentials_are_rejected() {
