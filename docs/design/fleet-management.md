@@ -20,6 +20,14 @@ readiness, and central disconnection leaves inference running.
 
 ## Controller updates
 
+Image delivery is provisioned alongside the production gateway: the rootless
+registry at `llmconduit.wielick.lan/fleet` serves an ARM64/AMD64 image index through
+Traefik's existing HTTPS endpoint (`/v2/`). All twelve model hosts have verified
+pull-only credentials. Publishing credentials remain on the deployment server;
+Git SSH deploy identities are separate. The control repo records the published
+source commit and immutable index in `gateway/production/fleet-image.json`.
+Controller handover remains to be implemented.
+
 llmconduit must be able to tell a selected host to start a new Fleet version.
 Fleet first starts the replacement in standby and verifies it, transfers local
 lifecycle ownership, then stops/removes the old controller. Updating Fleet must
