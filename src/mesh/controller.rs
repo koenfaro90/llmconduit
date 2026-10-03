@@ -282,6 +282,7 @@ async fn handle_connection(
                 },
             )
             .await?;
+            finish_enrollment_response(&mut send).await?;
             tracing::info!(endpoint_id = %endpoint_id, "mesh enrollment accepted");
             Ok(())
         }
@@ -293,9 +294,20 @@ async fn handle_connection(
                 },
             )
             .await?;
+            finish_enrollment_response(&mut send).await?;
             Err(AppError::bad_request("mesh enrollment rejected"))
         }
     }
+}
+
+async fn finish_enrollment_response(send: &mut iroh::endpoint::SendStream) -> AppResult<()> {
+    send.finish().map_err(|err| {
+        AppError::upstream(format!("failed to finish mesh enrollment response: {err}"))
+    })?;
+    // Dropping the last connection handle can discard queued response bytes.
+    // Keep it alive until acknowledged or the peer closes after reading the frame.
+    let _ = timeout(INITIAL_CONTROL_FRAME_TIMEOUT, send.stopped()).await;
+    Ok(())
 }
 
 async fn handle_worker_control(
@@ -550,6 +562,103 @@ mod tests {
     use crate::mesh::store::MeshStore;
     use iroh::SecretKey;
     use uuid::Uuid;
+
+    #[tokio::test]
+    async fn mesh_enrollment_delivers_acceptance_and_rejection_before_connection_drops() {
+        use iroh::{EndpointAddr, TransportAddr};
+        use std::net::{Ipv4Addr, SocketAddr};
+        let dir = tempfile::tempdir().unwrap();
+        let store = MeshStore::open(dir.path().join("mesh.sqlite3"))
+            .await
+            .unwrap();
+        let authorizer = Arc::new(MeshAuthorizer::new(store.clone()));
+        let registry = Arc::new(MeshRegistry::new(Duration::from_secs(30)));
+        let controller = Endpoint::builder(presets::Minimal)
+            .relay_mode(RelayMode::Disabled)
+            .alpns(vec![ENROLL_ALPN.to_vec()])
+            .bind_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .unwrap()
+            .bind()
+            .await
+            .unwrap();
+        let addr = EndpointAddr::from_parts(
+            controller.id(),
+            controller
+                .bound_sockets()
+                .into_iter()
+                .map(TransportAddr::Ip),
+        );
+        for accepted in [true, false, true, false] {
+            let worker = Endpoint::builder(presets::Minimal)
+                .relay_mode(RelayMode::Disabled)
+                .bind_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+                .unwrap()
+                .bind()
+                .await
+                .unwrap();
+            let accept = async {
+                controller
+                    .accept()
+                    .await
+                    .unwrap()
+                    .accept()
+                    .unwrap()
+                    .await
+                    .unwrap()
+            };
+            let (client, server) = tokio::join!(worker.connect(addr.clone(), ENROLL_ALPN), accept);
+            let client = client.unwrap();
+            let registry = Arc::clone(&registry);
+            let authorizer = Arc::clone(&authorizer);
+            let handler = tokio::spawn(async move {
+                handle_connection(
+                    registry,
+                    authorizer,
+                    Arc::new(BTreeMap::new()),
+                    server,
+                    ENROLL_ALPN,
+                )
+                .await
+            });
+            let key = if accepted {
+                store
+                    .create_join_key(None, None, Some(1))
+                    .await
+                    .unwrap()
+                    .token
+            } else {
+                "invalid-key".into()
+            };
+            let (mut send, mut recv) = client.open_bi().await.unwrap();
+            write_control(
+                &mut send,
+                &EnrollRequest {
+                    protocol_version: PROTOCOL_VERSION,
+                    join_key: key,
+                    node_name: None,
+                    agent_version: "test".into(),
+                },
+            )
+            .await
+            .unwrap();
+            let response: EnrollResponse = timeout(Duration::from_secs(5), read_control(&mut recv))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                matches!(response, EnrollResponse::Accepted { .. }),
+                accepted
+            );
+            client.close(0u32.into(), b"enrollment response received");
+            let result = timeout(Duration::from_secs(5), handler)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(result.is_ok(), accepted);
+            worker.close().await;
+        }
+        controller.close().await;
+    }
 
     fn advertisement() -> WorkerAdvertisement {
         WorkerAdvertisement {
