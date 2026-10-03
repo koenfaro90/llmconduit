@@ -14,5 +14,5 @@ export function JsonEditor({value,onChange,readOnly=false,label='Recipe specific
   },[label]);
   useEffect(()=>{if(instance.current&&instance.current.getValue()!==value)instance.current.setValue(value);},[value]);
   useEffect(()=>{instance.current?.updateOptions({readOnly});},[readOnly]);
-  return <div className="min-w-0 space-y-2"><div className="flex items-center justify-between text-xs"><label>{label}</label><Button variant="ghost" onClick={()=>void instance.current?.getAction('editor.action.formatDocument')?.run()}>Format JSON</Button></div>{error&&<p role="alert">{error}</p>}<div ref={container} aria-label={label} className="h-80 min-w-0 overflow-hidden rounded border border-line" /></div>;
+  return <div className="min-w-0 space-y-2"><div className="flex items-center justify-between text-xs"><label>{label}</label><Button type="button" variant="ghost" disabled={readOnly} onClick={()=>void instance.current?.getAction('editor.action.formatDocument')?.run()}>Format JSON</Button></div>{error&&<p role="alert">{error}</p>}<div ref={container} aria-label={label} className="h-80 min-w-0 overflow-hidden rounded border border-line" /></div>;
 }
