@@ -241,7 +241,12 @@ pub async fn create(
     else {
         return error(StatusCode::CONFLICT, "pinned recipe unavailable");
     };
-    if revision.model_spec["readiness"]["url"].as_str().is_none() {
+    let Ok(runtime) =
+        crate::dashboard_deployment_groups::render(&revision.model_spec, d.placement.as_ref())
+    else {
+        return error(StatusCode::CONFLICT, "invalid distributed placement");
+    };
+    if runtime["readiness"]["url"].as_str().is_none() {
         return error(
             StatusCode::CONFLICT,
             "headless workers cannot run an HTTP benchmark",

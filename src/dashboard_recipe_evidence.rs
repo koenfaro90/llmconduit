@@ -155,7 +155,7 @@ pub async fn record_smoke(
         endpoint_id: d.endpoint_id.clone(),
         kind: "smoke".into(),
         recorded_at_ms: chrono::Utc::now().timestamp_millis(),
-        data: json!({"deployment_id":body.deployment_id,"generation":d.generation,"passed_requests":body.passed_requests,"failed_requests":body.failed_requests,"note":body.note,"source":"operator_report"}),
+        data: json!({"deployment_id":body.deployment_id,"generation":d.generation,"placement":d.placement,"passed_requests":body.passed_requests,"failed_requests":body.failed_requests,"note":body.note,"source":"operator_report"}),
     };
     match store.record_recipe_evidence(record.clone()).await {
         Ok(()) => json_no_store(StatusCode::CREATED, &record),

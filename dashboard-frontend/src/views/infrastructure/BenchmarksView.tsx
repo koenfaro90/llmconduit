@@ -9,7 +9,7 @@ import { Panel } from "../../components/ui/Panel";
 import { StatChip } from "../../components/ui/StatChip";
 import { LineChart, ChartLegend, type ChartSeries } from "../../viz/LineChart";
 import { useManagement } from "./useManagement";
-import { deploymentRows } from "./managementModel";
+import { runtimeSpec, deploymentRows } from "./managementModel";
 import {
   PRESETS,
   METRICS,
@@ -72,7 +72,7 @@ export function BenchmarksView() {
     (r) =>
       r.deployment.desired_state === "ready" &&
       r.deployment.observed?.status?.phase === "ready" &&
-      r.revision?.model_spec.readiness != null &&
+      runtimeSpec(r).readiness != null &&
       !/embedding|rerank/i.test(r.model),
   );
   const hostName = (r: BenchmarkRun) =>

@@ -17,3 +17,8 @@ export function deploymentRows(state: ManagementState | undefined, nodes: MeshNo
     return {id, deployment, host: node?.host_snapshot?.hostname ?? node?.label ?? deployment.endpoint_id.slice(0,12), revision, model: servingModel(revision?.model_spec ?? {}, id)};
   });
 }
+
+export function runtimeSpec(row:DeploymentRow):Record<string,unknown>{
+  const spec=row.revision?.model_spec??{};
+  return Array.isArray(spec.distributed)?spec.distributed[row.deployment.placement?.rank??0] as Record<string,unknown>??{}:spec;
+}
