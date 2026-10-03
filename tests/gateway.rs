@@ -16090,3 +16090,359 @@ async fn proxies_rerank_endpoint_passthrough() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn media_json_generation_endpoints_keep_extensions() {
+    for endpoint in [
+        "/v1/images/generations",
+        "/v1/audio/speech",
+        "/v1/audio/generate",
+    ] {
+        assert_raw_endpoint_passthrough(endpoint, json!({"model":"media", "prompt":"a fox", "input":"hello", "extra_params":{"seed":42}, "response_format":"b64_json"}), json!({"model":"media", "data":[{"b64_json":"aW1hZ2U="}]})).await;
+    }
+}
+
+#[tokio::test]
+async fn media_binary_streams_are_forwarded_without_json_conversion() {
+    for endpoint in ["/v1/audio/speech", "/v1/audio/generate", "/v1/videos/sync"] {
+        let server = MockServer::start().await;
+        let output = vec![0, 255, 82, 73, 70, 70, 0, 128, 13, 10];
+        Mock::given(method("POST"))
+            .and(path(endpoint))
+            .and(body_json(json!({"model":"media","input":"hello"})))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "audio/wav")
+                    .set_body_bytes(output.clone()),
+            )
+            .expect(2)
+            .mount(&server)
+            .await;
+        let app = llmconduit::build_app(raw_passthrough_config(&server.uri()));
+        let requests = (0..2).map(|_| {
+            app.clone().oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(endpoint)
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"model":"media","input":"hello"}"#))
+                    .unwrap(),
+            )
+        });
+        for response in futures::future::join_all(requests).await {
+            let response = response.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()["content-type"], "audio/wav");
+            assert!(!response.headers().contains_key("x-llmconduit-upstream"));
+            assert_eq!(
+                axum::body::to_bytes(response.into_body(), 1024)
+                    .await
+                    .unwrap()
+                    .to_vec(),
+                output
+            );
+        }
+    }
+}
+
+fn media_multipart_body(model: &str) -> Vec<u8> {
+    let mut body=format!("--boundary\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n{model}\r\n--boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\n").into_bytes();
+    body.extend_from_slice(b"\x00\xff\x01RIFF\x00");
+    body.extend_from_slice(b"\r\n--boundary\r\nContent-Disposition: form-data; name=\"temperature\"\r\n\r\n0.3\r\n--boundary--\r\n");
+    body
+}
+
+#[tokio::test]
+async fn media_multipart_routes_aliases_and_preserves_uploaded_bytes() {
+    for endpoint in [
+        "/v1/audio/transcriptions",
+        "/v1/audio/translations",
+        "/v1/images/edits",
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"data":[{"id":"actual-media","object":"model"}]})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(endpoint))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"text":"hello"})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut config = raw_passthrough_config(&server.uri());
+        config.upstreams = vec![UpstreamConfig {
+            name: "alias".into(),
+            upstream_base_url: format!("{}/v1", server.uri()).parse().unwrap(),
+            upstream_api_key: Some("provider-key".into()),
+            upstream_model: Some("actual-media".into()),
+            upstream_chat_kwargs: JsonMap::new(),
+            upstream_request_log_path: None,
+            fallback_upstreams: vec![],
+        }];
+        let app = llmconduit::build_app(config);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(endpoint)
+                    .header("content-type", "multipart/form-data; boundary=boundary")
+                    .body(Body::from(media_multipart_body("actual-media")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let requests = server.received_requests().await.unwrap();
+        let request = requests.iter().find(|r| r.method == "POST").unwrap();
+        assert!(
+            request
+                .body
+                .windows(8)
+                .any(|b| b == b"\x00\xff\x01RIFF\x00")
+        );
+        assert!(request.body.windows(12).any(|b| b == b"actual-media"));
+        assert_eq!(request.headers["authorization"], "Bearer provider-key");
+    }
+}
+
+#[tokio::test]
+async fn media_unknown_model_is_rejected_before_any_generation() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data":[{"id":"chat-only"}]})),
+        )
+        .mount(&server)
+        .await;
+    let mut config = raw_passthrough_config(&server.uri());
+    config.upstreams = vec![UpstreamConfig {
+        name: "provider".into(),
+        upstream_base_url: format!("{}/v1", server.uri()).parse().unwrap(),
+        upstream_api_key: None,
+        upstream_model: None,
+        upstream_chat_kwargs: JsonMap::new(),
+        upstream_request_log_path: None,
+        fallback_upstreams: vec![],
+    }];
+    let response = llmconduit::build_app(config)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/images/generations")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"model":"unknown-media","prompt":"fox"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|r| r.method == "GET")
+    );
+}
+
+#[tokio::test]
+async fn media_video_jobs_survive_controller_restart_and_stay_private() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/videos"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"id":"backend-video","status":"queued"})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/videos/backend-video"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"id":"backend-video","status":"completed"})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/videos/backend-video/content"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "video/mp4")
+                .set_body_bytes(b"\x00\x00\x00\x18ftypmp42\xff".to_vec()),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/v1/videos/backend-video"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"id":"backend-video","deleted":true})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let store = Arc::new(
+        llmconduit::control_plane_store::SqlStore::connect_sqlite("sqlite::memory:")
+            .await
+            .unwrap(),
+    );
+    let build = || {
+        let (_, gateway) =
+            llmconduit::build_app_with_gateway(raw_passthrough_config(&server.uri()));
+        let keys = [("one", "secret-one"), ("two", "secret-two")].map(|(id, secret)| {
+            llmconduit::client_auth::VirtualKeySpec {
+                id: id.into(),
+                label: None,
+                owner_id: Some(id.into()),
+                secret_hash: llmconduit::client_auth::hash_secret(secret),
+                allowed_models: vec!["media".into()],
+            }
+        });
+        llmconduit::build_app_from_gateway(Arc::new(
+            gateway
+                .as_ref()
+                .clone()
+                .with_persistence_store(store.clone())
+                .with_client_auth(
+                    llmconduit::client_auth::ClientAuth::from_specs(false, keys).unwrap(),
+                ),
+        ))
+    };
+    let request = |method: &str, path: &str, secret: &str, body: &str| {
+        Request::builder()
+            .method(method)
+            .uri(path)
+            .header("authorization", format!("Bearer {secret}"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_owned()))
+            .unwrap()
+    };
+    let response = build()
+        .oneshot(request(
+            "POST",
+            "/v1/videos",
+            "secret-one",
+            r#"{"model":"media","prompt":"lake"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let value: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let id = value["id"].as_str().unwrap();
+    assert_ne!(id, "backend-video");
+    // A fresh controller uses the same SQL mapping; a different key cannot access it.
+    let app = build();
+    let status_path = format!("/v1/videos/{id}");
+    assert_eq!(
+        app.clone()
+            .oneshot(request("GET", &status_path, "secret-two", ""))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let response = app
+        .clone()
+        .oneshot(request("GET", &status_path, "secret-one", ""))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let job: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(job["id"], id);
+    assert_eq!(job["status"], "completed");
+    let content = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            &format!("{status_path}/content"),
+            "secret-one",
+            "",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(content.headers()["content-type"], "video/mp4");
+    assert_eq!(
+        axum::body::to_bytes(content.into_body(), 1024)
+            .await
+            .unwrap()
+            .as_ref(),
+        b"\x00\x00\x00\x18ftypmp42\xff"
+    );
+    let deleted = app
+        .clone()
+        .oneshot(request("DELETE", &status_path, "secret-one", ""))
+        .await
+        .unwrap();
+    assert_eq!(deleted.status(), StatusCode::OK);
+    assert_eq!(
+        app.oneshot(request("GET", &status_path, "secret-one", ""))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn media_async_video_creation_is_not_retried_on_another_backend() {
+    let server = MockServer::start().await;
+    let fallback = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/videos"))
+        .respond_with(ResponseTemplate::new(503).set_body_json(json!({"error":"busy"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut config = raw_passthrough_config(&server.uri());
+    config.fallback_upstreams = vec![FallbackUpstreamConfig {
+        name: "fallback".into(),
+        upstream_base_url: format!("{}/v1", fallback.uri()).parse().unwrap(),
+        upstream_api_key: None,
+        upstream_model: None,
+        exposed_model: None,
+        upstream_chat_kwargs: JsonMap::new(),
+        upstream_request_log_path: None,
+    }];
+    let (_, gateway) = llmconduit::build_app_with_gateway(config);
+    let store = Arc::new(
+        llmconduit::control_plane_store::SqlStore::connect_sqlite("sqlite::memory:")
+            .await
+            .unwrap(),
+    );
+    let app = llmconduit::build_app_from_gateway(Arc::new(
+        gateway.as_ref().clone().with_persistence_store(store),
+    ));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/videos")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"model":"media","prompt":"lake"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(fallback.received_requests().await.unwrap().is_empty());
+}

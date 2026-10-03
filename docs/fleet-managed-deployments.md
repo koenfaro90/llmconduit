@@ -127,3 +127,30 @@ required NCCL/fabric environment and devices through `environment` and `devices`
 Headless ranks use container liveness; verify inference on the head. Conversion
 does not run sparkrun transfers, prepare host directories, install secrets, modify
 Fleet policy, coordinate ranks atomically or create gateway model aliases.
+
+## Dashboard pages
+
+- **Hosts** (`#/hosts`): informational Fleet host inventory, desired workloads,
+  CPU/RAM/GPU and network graphs, per-interface and container details. Shared
+  `DataTable`, `LineChart`, `Panel` and `StatChip` components provide the presentation.
+  Charts retain up to 360 samples per host (30 minutes at five-second refresh) while
+  the page is open; gaps/unavailable measurements remain null, and old samples are
+  visibly stale. This adds no metrics-retention service.
+- **Recipes** (`#/recipes`): searchable/paginated immutable revision catalog and
+  source/Fleet editing and conversion controls.
+- **Models** (`#/models`): running/desired model containers, host, pinned recipe
+  revision, observed state and expandable complete launch configuration. Request
+  activity comes from SQL, not the bounded live FlowStore: last inference request
+  and counts for 1 minute, 15 minutes, 1 hour, 4 hours and 24 hours. Counts aggregate
+  by served model over its gateway backends and exclude health/catalog polling.
+  Requests sent directly to LiteLLM/backends are outside gateway observations.
+- **Deployment** (`#/deployment`): recipe/host selection and desired/observed
+  deployment controls. Recipe editing is separate from placement/lifecycle.
+- **Providers** retains upstream configuration, mesh enrollment/admin and legacy
+  Fleet integration controls, plus routing/authorization/provider inventory.
+
+`GET /dashboard/api/management/model-activity` returns a bounded body-free SQL
+aggregate of retained inference history. It is administrator-only, has a five-second
+query timeout, and returns unavailable on missing persistence or exceeded bounds.
+The last-request timestamp can be older than 24 hours. Window counts are not
+inferred from host heartbeats or a page's live event buffer.

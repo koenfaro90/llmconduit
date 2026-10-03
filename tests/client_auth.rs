@@ -325,3 +325,37 @@ async fn anthropic_head_and_options_probes_remain_open_when_client_auth_is_enabl
         );
     }
 }
+
+#[tokio::test]
+async fn scoped_keys_authorize_media_multipart_models_before_forwarding() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/audio/transcriptions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"text":"hello"})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let app = client_auth_app(&server, &["whisper"], Some("provider-secret"));
+    for (model, expected) in [
+        ("other", StatusCode::FORBIDDEN),
+        ("whisper", StatusCode::OK),
+    ] {
+        let body = format!(
+            "--b\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n{model}\r\n--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"sound.wav\"\r\n\r\nRIFF\r\n--b--\r\n"
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/audio/transcriptions")
+                    .header("authorization", format!("Bearer {CLIENT_SECRET}"))
+                    .header("content-type", "multipart/form-data; boundary=b")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected);
+    }
+}

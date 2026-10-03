@@ -75,6 +75,16 @@ pub struct HistoryClearCounts {
 /// high-entropy generated API keys and lets authentication remain deterministic.
 const API_KEY_HASH_PREFIX: &str = "sha256:";
 
+/// Body-free request activity for one winning model/backend.
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+pub struct ModelActivity {
+    pub model: String,
+    pub backend: Option<String>,
+    pub last_request_at_ms: i64,
+    /// Counts for 1 minute, 15 minutes, 1 hour, 4 hours and 24 hours.
+    pub requests: [i64; 5],
+}
+
 /// Lifecycle row created at the HTTP ingress seam. `id` is the stable
 /// `api_call_id`; the response id and actual winning backend are unknown here.
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
@@ -538,6 +548,11 @@ pub trait PersistenceWriter: Send + Sync {
 
 #[async_trait]
 pub trait PersistenceStore: PersistenceWriter {
+    /// Aggregate retained inference requests; health/catalog polling is excluded.
+    async fn model_activity(&self, _now_ms: i64) -> StoreResult<Vec<ModelActivity>> {
+        Err("model activity is unavailable".into())
+    }
+
     async fn get_request(&self, id: &str) -> StoreResult<Option<RequestSummary>>;
     async fn request_events(&self, request_id: &str) -> StoreResult<Vec<EventRow>>;
     /// Newest `limit` request events, returned in sequence order.
@@ -2285,6 +2300,66 @@ impl PersistenceStore for SqlStore {
             [request_id, limit],
             decode_event
         ))
+    }
+
+    async fn model_activity(&self, now_ms: i64) -> StoreResult<Vec<ModelActivity>> {
+        let param = |index| {
+            if self.postgres() {
+                format!("${index}")
+            } else {
+                format!("?{index}")
+            }
+        };
+        let counters = (1..=5)
+            .map(|index| {
+                format!(
+                    "SUM(CASE WHEN created_at_ms >= {} THEN 1 ELSE 0 END)",
+                    param(index)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT COALESCE(NULLIF(resolved_model, ''), client_model) AS model, backend, MAX(created_at_ms), {counters} FROM requests WHERE client_model <> '' AND client_protocol NOT IN ('heartbeat', 'health', 'models', 'count_tokens') AND created_at_ms <= {} GROUP BY COALESCE(NULLIF(resolved_model, ''), client_model), backend ORDER BY MAX(created_at_ms) DESC LIMIT 2049",
+            param(6)
+        );
+        macro_rules! read_activity {
+            ($pool:expr) => {{
+                let rows = sqlx::query(&sql)
+                    .bind(now_ms.saturating_sub(60_000))
+                    .bind(now_ms.saturating_sub(900_000))
+                    .bind(now_ms.saturating_sub(3_600_000))
+                    .bind(now_ms.saturating_sub(14_400_000))
+                    .bind(now_ms.saturating_sub(86_400_000))
+                    .bind(now_ms)
+                    .fetch_all($pool)
+                    .await
+                    .map_err(store_error)?;
+                if rows.len() > 2048 {
+                    return Err("model activity cardinality exceeds the supported bound".into());
+                }
+                rows.into_iter()
+                    .map(|row| {
+                        Ok(ModelActivity {
+                            model: row.try_get(0).map_err(store_error)?,
+                            backend: row.try_get(1).map_err(store_error)?,
+                            last_request_at_ms: row.try_get(2).map_err(store_error)?,
+                            requests: [
+                                row.try_get(3).map_err(store_error)?,
+                                row.try_get(4).map_err(store_error)?,
+                                row.try_get(5).map_err(store_error)?,
+                                row.try_get(6).map_err(store_error)?,
+                                row.try_get(7).map_err(store_error)?,
+                            ],
+                        })
+                    })
+                    .collect()
+            }};
+        }
+        match &self.pool {
+            SqlPool::Sqlite(pool) => read_activity!(pool),
+            SqlPool::Postgres(pool) => read_activity!(pool),
+        }
     }
 
     async fn list_requests(&self, limit: i64) -> StoreResult<Vec<RequestSummary>> {
@@ -4174,6 +4249,40 @@ mod tests {
             client_source: Some("key_hash".to_string()),
             ..RequestFinish::default()
         }
+    }
+
+    #[tokio::test]
+    async fn model_activity_uses_sql_windows_and_excludes_probes() {
+        let store = SqlStore::connect_sqlite("sqlite::memory:").await.unwrap();
+        let now = 100_000_000;
+        for (index, age) in [
+            0, 60_000, 60_001, 900_001, 3_600_001, 14_400_001, 86_400_001,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut row = request(&format!("activity-{index}"));
+            row.created_at_ms = now - age;
+            row.client_model = "alias".into();
+            row.resolved_model = Some("actual".into());
+            row.backend = Some("gpu01".into());
+            store.begin_request(row).await.unwrap();
+        }
+        let mut probe = request("probe");
+        probe.created_at_ms = now;
+        probe.client_protocol = "heartbeat".into();
+        probe.client_model = "probe".into();
+        store.begin_request(probe).await.unwrap();
+        let rows = store.model_activity(now).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].model, "actual");
+        assert_eq!(rows[0].requests, [2, 3, 4, 5, 6]);
+        assert_eq!(rows[0].last_request_at_ms, now);
+        assert_eq!(
+            serde_json::from_value::<ModelActivity>(serde_json::to_value(&rows[0]).unwrap())
+                .unwrap(),
+            rows[0]
+        );
     }
 
     #[tokio::test]

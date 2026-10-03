@@ -16,7 +16,7 @@ describe('ProvidersView', () => {
       executable: [{ digest: 'b'.repeat(64), revision: 1, description: 'Executable', model_spec: { image: 'image@sha256:' + 'b'.repeat(64) }, created_at_ms: 1 }],
     }, deployments: {} });
     renderWithQuery(<RecipeManagement nodes={[]} mutationsEnabled />);
-    const row = (await screen.findByText('archived')).parentElement!;
+    const row = (await screen.findByText('archived')).closest('tr')!;
     fireEvent.click(within(row).getByRole('button', { name: 'Edit revision' }));
     expect(screen.getByLabelText('Recipe ID')).toHaveValue('archived');
     expect(screen.getByLabelText('Recipe format')).toHaveValue('compose');

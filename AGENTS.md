@@ -4,7 +4,10 @@ Guidance for AI coding agents working in this repo.
 
 ## What this is
 
-Rust LLM API gateway. Accepts OpenAI Responses, OpenAI Chat Completions, and Anthropic Messages on the front; forwards to OpenAI-compatible `/v1/chat/completions` upstream, and proxies legacy `/v1/completions`. Adds server-side Brave web search, per-model defaults, nested failover/model routing across upstreams, replay caching, request-log analysis, and an optional debug UI.
+Rust LLM API gateway. Accepts OpenAI Responses, OpenAI Chat Completions, and Anthropic Messages on the front; forwards to OpenAI-compatible `/v1/chat/completions` upstream, and proxies legacy `/v1/completions`, embeddings/rerank and dedicated image/video/audio
+task APIs (JSON/multipart/binary streaming). Video handles persist owner/backend
+routing in SQL. See `docs/media-api.md`. Infrastructure pages separate Hosts, Recipes,
+Models and Deployment; Providers retains upstream/mesh administration. Adds server-side Brave web search, per-model defaults, nested failover/model routing across upstreams, replay caching, request-log analysis, and an optional debug UI.
 
 Use the code layout below as the architecture map when touching unfamiliar areas.
 

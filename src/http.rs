@@ -143,6 +143,34 @@ pub fn build_router(gateway: Arc<Gateway>, options: RouterOptions) -> Router {
         .route("/v1/completions", post(post_completions))
         .route("/v1/embeddings", post(post_embeddings))
         .route("/v1/rerank", post(post_rerank))
+        .route(
+            "/v1/images/generations",
+            post(crate::media_api::generate_images),
+        )
+        .route("/v1/images/edits", post(crate::media_api::edit_images))
+        .route("/v1/videos", post(crate::media_api::generate_videos))
+        .route(
+            "/v1/videos/sync",
+            post(crate::media_api::generate_video_sync),
+        )
+        .route(
+            "/v1/videos/{id}",
+            get(crate::media_api::get_video).delete(crate::media_api::delete_video),
+        )
+        .route(
+            "/v1/videos/{id}/content",
+            get(crate::media_api::download_video),
+        )
+        .route("/v1/audio/speech", post(crate::media_api::generate_speech))
+        .route("/v1/audio/generate", post(crate::media_api::generate_audio))
+        .route(
+            "/v1/audio/transcriptions",
+            post(crate::media_api::transcribe_audio),
+        )
+        .route(
+            "/v1/audio/translations",
+            post(crate::media_api::translate_audio),
+        )
         .route("/v1/models", get(get_models))
         .route_layer(middleware::from_fn_with_state(
             Arc::clone(&gateway),
@@ -220,6 +248,10 @@ fn protected_routes(gateway: Arc<Gateway>, auth: Arc<DashboardAuth>) -> Router<A
     // caller BEFORE any handler/extractor work AND its 401 also flows back through
     // the `no_store` map.
     let api_routes = Router::new()
+        .route(
+            "/dashboard/api/management/model-activity",
+            get(crate::dashboard_management::model_activity),
+        )
         .route(
             "/dashboard/api/management/recipes/convert",
             post(crate::dashboard_management::convert_recipe),
@@ -772,6 +804,13 @@ fn auth_endpoint(path: &str) -> &'static str {
         "/v1/embeddings" => "embeddings",
         "/v1/rerank" => "rerank",
         "/v1/models" => "models",
+        "/v1/images/generations" => "images",
+        "/v1/images/edits" => "image_edits",
+        "/v1/audio/speech" => "audio_speech",
+        "/v1/audio/generate" => "audio_generate",
+        "/v1/audio/transcriptions" => "audio_transcriptions",
+        "/v1/audio/translations" => "audio_translations",
+        path if path == "/v1/videos" || path.starts_with("/v1/videos/") => "videos",
         _ => "unknown",
     }
 }
@@ -1397,6 +1436,35 @@ async fn log_api_call(
         parts.headers.insert(header::CONTENT_LENGTH, len);
     }
 
+    let prepared_multipart = if crate::media_api::endpoint(uri.path()).is_some()
+        && method == axum::http::Method::POST
+        && parts
+            .headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.starts_with("multipart/form-data"))
+    {
+        match crate::media_api::prepare_multipart(&parts.headers, body_bytes.clone()).await {
+            Ok(prepared) => Some(prepared),
+            Err(error) => return error.into_response(),
+        }
+    } else {
+        None
+    };
+    let body_bytes = if let Some(prepared) = &prepared_multipart {
+        parts
+            .headers
+            .insert(header::CONTENT_TYPE, prepared.content_type.clone());
+        parts.headers.insert(
+            header::CONTENT_LENGTH,
+            HeaderValue::from_str(&prepared.body.len().to_string()).unwrap(),
+        );
+        parts.extensions.insert(prepared.clone());
+        prepared.body.clone()
+    } else {
+        body_bytes
+    };
+
     // Parse once for the existing authorization/logging surfaces. Large
     // inference bodies move this CPU-bound JSON walk to the blocking pool and
     // return a right-sized redacted copy for durable ingress, so persistence
@@ -1436,6 +1504,10 @@ async fn log_api_call(
                     .map(str::to_owned)
             }),
     };
+    let requested_model = prepared_multipart
+        .as_ref()
+        .map(|p| p.model.model.clone())
+        .or(requested_model);
     if method == axum::http::Method::POST
         && is_client_api_path_with_model(uri.path())
         && gateway
@@ -1669,7 +1741,10 @@ async fn log_api_call(
     }
     // Never dump the auth-endpoint body (it carries the token, and even its
     // length/digest are an oracle — handled above).
-    if !is_auth_path && body_bytes.len() <= API_LOG_PAYLOAD_DUMP_LIMIT_BYTES {
+    if !is_auth_path
+        && !crate::media_api::is_media_path(uri.path())
+        && body_bytes.len() <= API_LOG_PAYLOAD_DUMP_LIMIT_BYTES
+    {
         tracing::info!(
             api_call_id = %api_call_id,
             method = %method,
@@ -1835,6 +1910,14 @@ fn is_client_api_path_with_model(path: &str) -> bool {
             | "/v1/completions"
             | "/v1/embeddings"
             | "/v1/rerank"
+            | "/v1/images/generations"
+            | "/v1/images/edits"
+            | "/v1/videos"
+            | "/v1/videos/sync"
+            | "/v1/audio/speech"
+            | "/v1/audio/generate"
+            | "/v1/audio/transcriptions"
+            | "/v1/audio/translations"
     )
 }
 
@@ -3504,50 +3587,73 @@ async fn proxy_raw_endpoint(
     body: Bytes,
     endpoint: crate::upstream::InferenceEndpoint,
 ) -> AppResult<Response> {
-    let request_metadata = auth
-        .as_ref()
-        .map(|_| {
-            let value = serde_json::from_slice::<Value>(&body)
-                .map_err(|_| AppError::bad_request("request body must be valid JSON"))?;
-            let model = value
-                .get("model")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .ok_or_else(|| AppError::bad_request("request body must include a model"))?;
-            let streaming = value
-                .get("stream")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            Ok::<_, AppError>((model, streaming))
-        })
-        .transpose()?;
-    let authorization =
-        if let (Some(context), Some((model, _))) = (auth.as_ref(), request_metadata.as_ref()) {
-            authorize_inference(Some(&context.0), endpoint, model)?
-        } else {
-            crate::upstream::AuthorizationScope::unrestricted()
-        };
-    let auth = auth.map(|value| value.0);
-    let lease = acquire_inference_session(&gateway, auth.as_ref()).await?;
-    let response = gateway
-        .upstream_client()
-        .proxy_completions(
-            crate::upstream::ProxyCompletionsRequest::new(headers, body)
-                .with_authorization(authorization)
-                .with_endpoint(endpoint),
-        )
-        .await?;
-    let accounting = request_metadata.map(|(model, streaming)| {
-        RawCompletionAccounting::new(
-            Arc::clone(&gateway),
-            auth,
-            model,
-            streaming,
-            response.status().is_success(),
-            endpoint,
-        )
-    });
-    Ok(proxy_upstream_response(response, lease, accounting))
+    let request =
+        crate::upstream::ProxyCompletionsRequest::new(headers, body).with_endpoint(endpoint);
+    proxy_prepared_request(gateway, auth, request, None, true).await
+}
+
+pub(crate) async fn proxy_prepared_request(
+    gateway: Arc<Gateway>,
+    auth: Option<Extension<crate::authz::AuthContext>>,
+    mut request: crate::upstream::ProxyCompletionsRequest,
+    api_id: Option<String>,
+    count_request: bool,
+) -> AppResult<Response> {
+    let endpoint = request.endpoint;
+    let model = request.model().unwrap_or_default();
+    if model.is_empty() && (auth.is_some() || crate::media_api::is_media_endpoint(endpoint)) {
+        return Err(AppError::bad_request("request body must include a model"));
+    }
+    let streaming = serde_json::from_slice::<Value>(&request.body)
+        .ok()
+        .and_then(|v| v.get("stream").and_then(Value::as_bool))
+        .unwrap_or(false);
+    request.authorization = if let Some(context) = &auth {
+        authorize_inference(Some(&context.0), endpoint, &model)?
+    } else {
+        crate::upstream::AuthorizationScope::unrestricted()
+    };
+    let context = auth.map(|a| a.0);
+    let video_owner = crate::media_api::owner(context.as_ref(), &request.headers);
+    let lease = acquire_inference_session(&gateway, context.as_ref()).await?;
+    let mut accounting = RawCompletionAccounting::new(
+        gateway.clone(),
+        context.clone(),
+        model.clone(),
+        streaming,
+        false,
+        endpoint,
+    );
+    if count_request && !model.is_empty() {
+        accounting.begin_history(
+            api_id.unwrap_or_else(|| format!("api_raw_{}", uuid::Uuid::new_v4().simple())),
+        );
+    }
+    let response = match gateway.upstream_client().proxy_completions(request).await {
+        Ok(response) => response,
+        Err(error) => {
+            accounting.finish("failed");
+            return Err(error);
+        }
+    };
+    accounting.upstream_success = response.status().is_success();
+    accounting.served_model = response
+        .headers()
+        .get("x-llmconduit-model")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    accounting.backend = response
+        .headers()
+        .get("x-llmconduit-provider")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    if endpoint == crate::upstream::InferenceEndpoint::Videos && response.status().is_success() {
+        let out = crate::media_api::register_video(&gateway, response, &model, video_owner).await;
+        accounting.finish(if out.is_ok() { "completed" } else { "failed" });
+        drop(lease);
+        return out;
+    }
+    Ok(proxy_upstream_response(response, lease, Some(accounting)))
 }
 
 async fn handle_post_messages(
@@ -3940,6 +4046,10 @@ struct RawCompletionAccounting {
     parser: RawCompletionUsageParser,
     upstream_success: bool,
     endpoint: crate::upstream::InferenceEndpoint,
+    history: Option<(crate::control_plane_store::PersistenceQueue, String)>,
+    served_model: Option<String>,
+    backend: Option<String>,
+    finished: bool,
 }
 
 impl RawCompletionAccounting {
@@ -3958,6 +4068,39 @@ impl RawCompletionAccounting {
             parser: RawCompletionUsageParser::new(streaming),
             upstream_success,
             endpoint,
+            history: None,
+            served_model: None,
+            backend: None,
+            finished: false,
+        }
+    }
+    fn begin_history(&mut self, id: String) {
+        let Some(queue) = self.gateway.persistence_queue().cloned() else {
+            return;
+        };
+        let row = crate::control_plane_store::RequestRow {
+            id: id.clone(),
+            display_number: Some(self.gateway.display_numbers().next_request()),
+            client_protocol: auth_endpoint(&format!(
+                "/v1/{}",
+                crate::upstream::ProxyCompletionsRequest::new(HeaderMap::new(), Bytes::new())
+                    .with_endpoint(self.endpoint)
+                    .upstream_path()
+            ))
+            .to_owned(),
+            client_model: self.requested_model.clone(),
+            alias: self
+                .gateway
+                .operational_alias(&self.requested_model)
+                .map(str::to_owned),
+            virtual_key_id: self.context.as_ref().map(|c| c.key_id.clone()),
+            user_id: self.context.as_ref().map(|c| c.principal_id.clone()),
+            created_at_ms: crate::mesh::store::now_ms(),
+            status: "running".into(),
+            ..Default::default()
+        };
+        if queue.try_begin(row).is_ok() {
+            self.history = Some((queue, id));
         }
     }
 
@@ -3966,12 +4109,26 @@ impl RawCompletionAccounting {
     }
 
     fn finish(&mut self, status: &'static str) {
-        let Some(context) = self.context.take() else {
+        if self.finished {
             return;
-        };
-        let (served_model, usage) = self.parser.finish();
+        }
+        self.finished = true;
+        let (parsed_model, usage) = self.parser.finish();
+        let served_model = parsed_model.or(self.served_model.take());
+        if let Some((queue, id)) = self.history.take() {
+            let finish = crate::control_plane_store::RequestFinish {
+                status: status.into(),
+                completed_at_ms: crate::mesh::store::now_ms(),
+                backend: self.backend.take(),
+                resolved_model: served_model.clone(),
+                input_tokens: usage.as_ref().map(|u| u.prompt),
+                output_tokens: usage.as_ref().map(|u| u.completion),
+                ..Default::default()
+            };
+            let _ = queue.try_finish(id, finish);
+        }
         self.gateway.record_authenticated_usage_values(
-            Some(context),
+            self.context.take(),
             None,
             self.endpoint,
             self.requested_model.clone(),
@@ -4146,7 +4303,7 @@ fn completion_usage_from_value(
     (served_model, usage)
 }
 
-fn copy_proxy_response_headers(source: &HeaderMap, target: &mut HeaderMap) {
+pub(crate) fn copy_proxy_response_headers(source: &HeaderMap, target: &mut HeaderMap) {
     for (name, value) in source {
         if should_proxy_response_header(name) {
             target.append(name.clone(), value.clone());
@@ -4155,7 +4312,9 @@ fn copy_proxy_response_headers(source: &HeaderMap, target: &mut HeaderMap) {
 }
 
 fn should_proxy_response_header(name: &HeaderName) -> bool {
-    !is_hop_by_hop_header(name) && !header_name_eq(name, "content-length")
+    !is_hop_by_hop_header(name)
+        && !header_name_eq(name, "content-length")
+        && !header_name_eq(name, "x-llmconduit-upstream")
 }
 
 /// CR1.1: `engine.rs::created_event` stamps `estimated_input_tokens` onto the

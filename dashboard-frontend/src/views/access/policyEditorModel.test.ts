@@ -32,6 +32,7 @@ describe('policyEditorModel', () => {
       'messages',
       'completions',
       'embeddings',
+      'images', 'image_edits', 'videos', 'audio_speech', 'audio_generate', 'audio_transcriptions', 'audio_translations',
       'rerank',
       'models',
       'count_tokens',

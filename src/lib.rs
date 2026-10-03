@@ -26,6 +26,7 @@ pub mod harness;
 pub mod http;
 pub mod log_rotation;
 pub mod managed_providers;
+pub mod media_api;
 pub mod mesh;
 pub mod metrics;
 pub mod models;

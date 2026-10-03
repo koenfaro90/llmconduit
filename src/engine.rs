@@ -274,6 +274,15 @@ fn inference_endpoint_name(endpoint: crate::upstream::InferenceEndpoint) -> &'st
         crate::upstream::InferenceEndpoint::Completions => "completions",
         crate::upstream::InferenceEndpoint::Embeddings => "embeddings",
         crate::upstream::InferenceEndpoint::Rerank => "rerank",
+        crate::upstream::InferenceEndpoint::Images => "images",
+        crate::upstream::InferenceEndpoint::ImageEdits => "image_edits",
+        crate::upstream::InferenceEndpoint::Videos
+        | crate::upstream::InferenceEndpoint::VideoSync
+        | crate::upstream::InferenceEndpoint::VideoJob => "videos",
+        crate::upstream::InferenceEndpoint::AudioSpeech => "audio_speech",
+        crate::upstream::InferenceEndpoint::AudioGenerate => "audio_generate",
+        crate::upstream::InferenceEndpoint::AudioTranscriptions => "audio_transcriptions",
+        crate::upstream::InferenceEndpoint::AudioTranslations => "audio_translations",
     }
 }
 

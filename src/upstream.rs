@@ -16,6 +16,7 @@ use futures::Stream;
 use futures::StreamExt;
 use http::HeaderMap;
 use http::HeaderName;
+use http::HeaderValue;
 use regex::Regex;
 use reqwest::RequestBuilder;
 use reqwest::StatusCode;
@@ -392,6 +393,15 @@ pub enum InferenceEndpoint {
     /// Raw-proxied like `Completions`: `/v1/embeddings` and `/v1/rerank` bypass the engine.
     Embeddings,
     Rerank,
+    Images,
+    ImageEdits,
+    Videos,
+    VideoSync,
+    VideoJob,
+    AudioSpeech,
+    AudioGenerate,
+    AudioTranscriptions,
+    AudioTranslations,
 }
 
 type CandidatePredicate =
@@ -468,6 +478,10 @@ pub struct ProxyCompletionsRequest {
     /// upstream path and the endpoint authorization is checked against. Routing, model
     /// rewriting and failover are shared because all three are single-shot JSON passthroughs.
     pub endpoint: InferenceEndpoint,
+    pub multipart: Option<crate::media_api::MultipartModel>,
+    pub resource_path: Option<String>,
+    pub method: reqwest::Method,
+    pub pinned_base_url: Option<String>,
 }
 
 impl ProxyCompletionsRequest {
@@ -479,6 +493,10 @@ impl ProxyCompletionsRequest {
             authorization_route: None,
             authorization_provider: None,
             endpoint: InferenceEndpoint::Completions,
+            multipart: None,
+            resource_path: None,
+            method: reqwest::Method::POST,
+            pinned_base_url: None,
         }
     }
 
@@ -488,11 +506,42 @@ impl ProxyCompletionsRequest {
     }
 
     /// Upstream path (relative to the provider base URL) for this proxy endpoint.
-    pub fn upstream_path(&self) -> &'static str {
-        match self.endpoint {
-            InferenceEndpoint::Embeddings => "embeddings",
-            InferenceEndpoint::Rerank => "rerank",
-            _ => "completions",
+    pub fn upstream_path(&self) -> String {
+        self.resource_path.clone().unwrap_or_else(|| {
+            match self.endpoint {
+                InferenceEndpoint::Embeddings => "embeddings",
+                InferenceEndpoint::Rerank => "rerank",
+                InferenceEndpoint::Images => "images/generations",
+                InferenceEndpoint::ImageEdits => "images/edits",
+                InferenceEndpoint::Videos => "videos",
+                InferenceEndpoint::VideoSync => "videos/sync",
+                InferenceEndpoint::VideoJob => "videos",
+                InferenceEndpoint::AudioSpeech => "audio/speech",
+                InferenceEndpoint::AudioGenerate => "audio/generate",
+                InferenceEndpoint::AudioTranscriptions => "audio/transcriptions",
+                InferenceEndpoint::AudioTranslations => "audio/translations",
+                _ => "completions",
+            }
+            .to_string()
+        })
+    }
+    pub fn model(&self) -> Option<String> {
+        self.multipart
+            .as_ref()
+            .map(|m| m.model.clone())
+            .or_else(|| proxy_body_model(&self.body))
+    }
+    pub fn set_model(&mut self, model: &str) {
+        if let Some(multipart) = self.multipart.as_mut() {
+            let mut body = Vec::with_capacity(self.body.len() + model.len());
+            body.extend_from_slice(&self.body[..multipart.value_range.start]);
+            body.extend_from_slice(model.as_bytes());
+            body.extend_from_slice(&self.body[multipart.value_range.end..]);
+            multipart.value_range.end = multipart.value_range.start + model.len();
+            multipart.model = model.to_string();
+            self.body = Bytes::from(body);
+        } else {
+            self.body = proxy_body_with_model(self.body.clone(), model);
         }
     }
 
@@ -2103,7 +2152,7 @@ impl UpstreamClient for ReqwestUpstreamClient {
         &self,
         request: ProxyCompletionsRequest,
     ) -> AppResult<reqwest::Response> {
-        let model = proxy_body_model(&request.body).unwrap_or_default();
+        let model = request.model().unwrap_or_default();
         request.authorization.ensure_candidate(
             request
                 .authorization_provider
@@ -2114,13 +2163,47 @@ impl UpstreamClient for ReqwestUpstreamClient {
             request.endpoint,
         )?;
         let path = request.upstream_path();
-        let url = self.endpoint_url(path)?;
-        let outbound =
-            copy_proxy_request_headers(self.client.post(url), &request.headers).body(request.body);
-        self.with_auth(outbound)
-            .send()
-            .await
-            .map_err(|err| AppError::upstream(format!("upstream {path} request failed: {err}")))
+        if request
+            .pinned_base_url
+            .as_ref()
+            .is_some_and(|base| base != &self.base_url_string())
+        {
+            return Err(AppError::upstream(
+                "the video job's original backend is unavailable",
+            ));
+        }
+        let url = self.endpoint_url(&path)?;
+        let outbound = copy_proxy_request_headers(
+            self.client.request(request.method.clone(), url),
+            &request.headers,
+        );
+        let outbound = if request.method == reqwest::Method::POST {
+            outbound.body(request.body)
+        } else {
+            outbound
+        };
+        let mut response =
+            self.with_auth(outbound).send().await.map_err(|err| {
+                AppError::upstream(format!("upstream {path} request failed: {err}"))
+            })?;
+        for (name, value) in [
+            ("x-llmconduit-model", model),
+            ("x-llmconduit-upstream", self.base_url_string()),
+            (
+                "x-llmconduit-provider",
+                request
+                    .authorization_provider
+                    .or(request.authorization_route)
+                    .unwrap_or_else(|| "primary".into()),
+            ),
+        ] {
+            if let Ok(value) = HeaderValue::from_str(&value) {
+                response
+                    .headers_mut()
+                    .insert(HeaderName::from_static(name), value);
+            }
+        }
+        Ok(response)
     }
 
     fn provider_base_url(&self) -> String {
@@ -2801,8 +2884,11 @@ impl FailoverUpstreamClient {
             ));
         }
         let provider = &self.providers[provider_index];
-        let provider_body = proxy_body_for_provider(provider, &request.body);
-        let model = proxy_body_model(&provider_body).unwrap_or_default();
+        let mut provider_request = request.clone();
+        if let Some(model) = &provider.upstream_model {
+            provider_request.set_model(model);
+        }
+        let model = provider_request.model().unwrap_or_default();
         request.authorization.ensure_candidate(
             &provider.name,
             request.authorization_route.as_deref(),
@@ -2824,8 +2910,18 @@ impl FailoverUpstreamClient {
         let mut last_error = None;
         for provider_index in provider_indices {
             let provider = &self.providers[provider_index];
-            let provider_body = proxy_body_for_provider(provider, &request.body);
-            let model = proxy_body_model(&provider_body).unwrap_or_default();
+            if request
+                .pinned_base_url
+                .as_ref()
+                .is_some_and(|base| base != &provider.client.provider_base_url())
+            {
+                continue;
+            }
+            let mut provider_request = request.clone();
+            if let Some(model) = &provider.upstream_model {
+                provider_request.set_model(model);
+            }
+            let model = provider_request.model().unwrap_or_default();
             if !request.authorization.allows_candidate(
                 &provider.name,
                 request.authorization_route.as_deref(),
@@ -2834,14 +2930,7 @@ impl FailoverUpstreamClient {
             ) {
                 continue;
             }
-            let provider_request = ProxyCompletionsRequest {
-                headers: request.headers.clone(),
-                body: provider_body,
-                authorization: request.authorization.clone(),
-                authorization_route: request.authorization_route.clone(),
-                authorization_provider: Some(provider.name.clone()),
-                endpoint: request.endpoint,
-            };
+            provider_request.authorization_provider = Some(provider.name.clone());
             match self.providers[provider_index]
                 .client
                 .proxy_completions(provider_request)
@@ -2849,7 +2938,10 @@ impl FailoverUpstreamClient {
             {
                 Ok(response) => {
                     let status = response.status();
-                    if !status_is_failover_eligible(status) {
+                    if !status_is_failover_eligible(status)
+                        || request.endpoint == InferenceEndpoint::Videos
+                        || request.endpoint == InferenceEndpoint::VideoJob
+                    {
                         return Ok(response);
                     }
                     let body = read_capped_upstream_error_body(response).await;
@@ -2862,13 +2954,26 @@ impl FailoverUpstreamClient {
                     last_error = Some(err);
                 }
                 Err(err) => {
+                    if matches!(
+                        request.endpoint,
+                        InferenceEndpoint::Videos | InferenceEndpoint::VideoJob
+                    ) {
+                        return Err(err);
+                    }
                     self.mark_failure(provider_index, &err);
                     last_error = Some(err);
                 }
             }
         }
         Err(last_error.unwrap_or_else(|| {
-            AppError::forbidden("no authorized upstream candidate can proxy completions")
+            if request.pinned_base_url.is_some() {
+                AppError::upstream("the video job's original backend is unavailable")
+            } else {
+                AppError::forbidden(format!(
+                    "no authorized upstream candidate can proxy {}",
+                    request.upstream_path()
+                ))
+            }
         }))
     }
 }
@@ -3378,8 +3483,11 @@ impl UpstreamClient for FailoverUpstreamClient {
         request: ProxyCompletionsRequest,
     ) -> AppResult<reqwest::Response> {
         let any_authorized = self.providers.iter().any(|provider| {
-            let body = proxy_body_for_provider(provider, &request.body);
-            let model = proxy_body_model(&body).unwrap_or_default();
+            let mut candidate = request.clone();
+            if let Some(model) = &provider.upstream_model {
+                candidate.set_model(model);
+            }
+            let model = candidate.model().unwrap_or_default();
             request.authorization.allows_candidate(
                 &provider.name,
                 request.authorization_route.as_deref(),
@@ -3770,7 +3878,7 @@ impl UpstreamClient for RoutingUpstreamClient {
         request: ProxyCompletionsRequest,
     ) -> AppResult<reqwest::Response> {
         let catalog = self.load_catalog().await?;
-        let requested_model = proxy_body_model(&request.body).unwrap_or_default();
+        let requested_model = request.model().unwrap_or_default();
         let (resolution, match_kind) = catalog.resolve(&requested_model).ok_or_else(|| {
             tracing::warn!(
                 requested_model = %requested_model,
@@ -3778,6 +3886,13 @@ impl UpstreamClient for RoutingUpstreamClient {
             );
             AppError::upstream("no models are currently available from configured upstreams")
         })?;
+        if matches!(match_kind, MatchKind::Default)
+            && crate::media_api::is_media_endpoint(request.endpoint)
+        {
+            return Err(AppError::bad_request(
+                "the requested media model is not in the gateway catalog",
+            ));
+        }
         if let RoutingResolution::Route {
             route_provider_index,
             model_id,
@@ -3786,7 +3901,7 @@ impl UpstreamClient for RoutingUpstreamClient {
             let provider = self.route_provider(*route_provider_index)?;
             log_model_resolution(&requested_model, model_id, &provider.name, match_kind);
             let mut routed = request;
-            routed.body = proxy_body_with_model(routed.body, model_id);
+            routed.set_model(model_id);
             routed.authorization_route = Some(provider.name.clone());
             return provider.client.proxy_completions(routed).await;
         }
@@ -3806,7 +3921,7 @@ impl UpstreamClient for RoutingUpstreamClient {
             match_kind,
         );
         let mut routed = request;
-        routed.body = proxy_body_with_model(routed.body, &resolution.model_id);
+        routed.set_model(&resolution.model_id);
         routed.authorization_route = Some(provider.name.clone());
         match resolution.target {
             RoutingModelTarget::Primary => provider.client.proxy_completions(routed).await,
@@ -4904,13 +5019,6 @@ fn merge_json_value_preserve_destination(destination: &mut Value, source: &Value
                 }
             }
         }
-    }
-}
-
-fn proxy_body_for_provider(provider: &FailoverUpstreamProvider, body: &Bytes) -> Bytes {
-    match provider.upstream_model.as_deref() {
-        Some(model) => proxy_body_with_model(body.clone(), model),
-        None => body.clone(),
     }
 }
 

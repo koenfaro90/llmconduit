@@ -15,8 +15,6 @@ import type { DataTableColumn } from '../../components/ui/dataTableModel';
 import { useAuth, useDashboard } from '../../store/hooks';
 import { useTopologyQuery } from '../../store/useTopologyQuery';
 import { cn } from '../../lib/cn';
-import { HostTelemetry } from './HostTelemetry';
-import { RecipeManagement } from './RecipeManagement';
 import {
   buildProviderInventory,
   costQuality,
@@ -190,8 +188,6 @@ export function ProvidersView() {
           onSetModel={(endpointId, resourceId, model, disabled) => setModelDisabled.mutate({ endpointId, resourceId, model, disabled })}
           onSwitchModel={(endpointId, modelId) => switchMeshModel.mutate({ endpointId, modelId })}
         />
-        {meshQuery.data && <HostTelemetry nodes={meshQuery.data.nodes} />}
-        <RecipeManagement nodes={meshQuery.data?.nodes ?? []} mutationsEnabled={mutationsEnabled} />
         <FleetPanel
           fleet={fleetQuery.data ?? null}
           loading={fleetQuery.isLoading}

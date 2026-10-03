@@ -15,6 +15,11 @@ import { ProvidersView } from './providers/ProvidersView';
 import { AccessView } from './access/AccessView';
 import { ChatView } from './chat/ChatView';
 
+import { HostsView } from './infrastructure/HostsView';
+import { RecipesView } from './infrastructure/RecipesView';
+import { ModelsView } from './infrastructure/ModelsView';
+import { DeploymentView } from './infrastructure/DeploymentView';
+
 export const VIEW_BY_ROUTE: Record<RouteName, ComponentType> = {
   flows: FlowsView,
   requests: RequestsView,
@@ -28,5 +33,9 @@ export const VIEW_BY_ROUTE: Record<RouteName, ComponentType> = {
   theater: TheaterView,
   overview: OverviewView,
   providers: ProvidersView,
+  hosts: HostsView,
+  recipes: RecipesView,
+  models: ModelsView,
+  deployment: DeploymentView,
   access: AccessView,
 };

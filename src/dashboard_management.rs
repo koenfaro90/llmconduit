@@ -352,6 +352,36 @@ pub async fn management_state(
         }
     }
 }
+#[utoipa::path(get,path="/dashboard/api/management/model-activity",responses((status=200,body=Vec<crate::control_plane_store::ModelActivity>),(status=401),(status=403),(status=503)),tag="dashboard")]
+pub async fn model_activity(
+    State(gateway): State<Arc<Gateway>>,
+    Extension(auth): Extension<Arc<DashboardAuth>>,
+    Extension(session): Extension<AuthSession>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(response) = authorize_mesh_admin_read(&auth, &session, &headers) {
+        return response;
+    }
+    let Some(store) = gateway.persistence_store() else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "SQL persistence is required",
+        );
+    };
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        store.model_activity(crate::mesh::store::now_ms()),
+    )
+    .await
+    {
+        Ok(Ok(rows)) => json_no_store(StatusCode::OK, &rows),
+        _ => error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "model request activity unavailable",
+        ),
+    }
+}
+
 #[utoipa::path(post,path="/dashboard/api/management/recipes/{id}/revisions",params(("id"=String,Path)),request_body=CreateRecipeRevision,responses((status=201,body=RecipeRevision),(status=400),(status=401),(status=403),(status=409),(status=503)),tag="dashboard")]
 pub async fn create_revision(
     State(gateway): State<Arc<Gateway>>,

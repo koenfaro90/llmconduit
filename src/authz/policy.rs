@@ -42,6 +42,13 @@ pub enum Endpoint {
     Completions,
     Embeddings,
     Rerank,
+    Images,
+    ImageEdits,
+    Videos,
+    AudioSpeech,
+    AudioGenerate,
+    AudioTranscriptions,
+    AudioTranslations,
     Models,
 }
 
@@ -55,6 +62,13 @@ impl Endpoint {
             Self::Completions => "completions",
             Self::Embeddings => "embeddings",
             Self::Rerank => "rerank",
+            Self::Images => "images",
+            Self::ImageEdits => "image_edits",
+            Self::Videos => "videos",
+            Self::AudioSpeech => "audio_speech",
+            Self::AudioGenerate => "audio_generate",
+            Self::AudioTranscriptions => "audio_transcriptions",
+            Self::AudioTranslations => "audio_translations",
             Self::Models => "models",
         }
     }
@@ -68,6 +82,13 @@ impl Endpoint {
             "completions" => Some(Self::Completions),
             "embeddings" => Some(Self::Embeddings),
             "rerank" => Some(Self::Rerank),
+            "images" => Some(Self::Images),
+            "image_edits" => Some(Self::ImageEdits),
+            "videos" => Some(Self::Videos),
+            "audio_speech" => Some(Self::AudioSpeech),
+            "audio_generate" => Some(Self::AudioGenerate),
+            "audio_transcriptions" => Some(Self::AudioTranscriptions),
+            "audio_translations" => Some(Self::AudioTranslations),
             "models" => Some(Self::Models),
             _ => None,
         }
@@ -856,6 +877,13 @@ mod endpoint_tests {
             Endpoint::Completions,
             Endpoint::Embeddings,
             Endpoint::Rerank,
+            Endpoint::Images,
+            Endpoint::ImageEdits,
+            Endpoint::Videos,
+            Endpoint::AudioSpeech,
+            Endpoint::AudioGenerate,
+            Endpoint::AudioTranscriptions,
+            Endpoint::AudioTranslations,
             Endpoint::Models,
         ] {
             assert_eq!(Endpoint::parse(endpoint.as_str()), Some(endpoint));

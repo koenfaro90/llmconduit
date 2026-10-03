@@ -366,6 +366,9 @@ export class DashboardClient {
     return this.request('/mesh', undefined, isMeshAdminState);
   }
 
+  modelActivity(): Promise<import('./types').ModelActivity[]> {
+    return this.request('/management/model-activity', undefined, (v): v is import('./types').ModelActivity[] => Array.isArray(v) && v.every(row => row && typeof row.model === 'string' && (row.backend == null || typeof row.backend === 'string') && Number.isFinite(row.last_request_at_ms) && Array.isArray(row.requests) && row.requests.length === 5 && row.requests.every((n: unknown) => typeof n === 'number' && Number.isInteger(n) && n >= 0)));
+  }
   management(): Promise<ManagementState> {
     return this.request('/management');
   }

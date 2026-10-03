@@ -932,7 +932,7 @@ pub enum AuthFailure {
     Unavailable,
 }
 
-fn presented_key(headers: &HeaderMap) -> Option<&str> {
+pub(crate) fn presented_key(headers: &HeaderMap) -> Option<&str> {
     let authorization = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
@@ -960,6 +960,15 @@ fn inference_endpoint(endpoint: crate::upstream::InferenceEndpoint) -> Endpoint 
         crate::upstream::InferenceEndpoint::Completions => Endpoint::Completions,
         crate::upstream::InferenceEndpoint::Embeddings => Endpoint::Embeddings,
         crate::upstream::InferenceEndpoint::Rerank => Endpoint::Rerank,
+        crate::upstream::InferenceEndpoint::Images => Endpoint::Images,
+        crate::upstream::InferenceEndpoint::ImageEdits => Endpoint::ImageEdits,
+        crate::upstream::InferenceEndpoint::Videos
+        | crate::upstream::InferenceEndpoint::VideoSync
+        | crate::upstream::InferenceEndpoint::VideoJob => Endpoint::Videos,
+        crate::upstream::InferenceEndpoint::AudioSpeech => Endpoint::AudioSpeech,
+        crate::upstream::InferenceEndpoint::AudioGenerate => Endpoint::AudioGenerate,
+        crate::upstream::InferenceEndpoint::AudioTranscriptions => Endpoint::AudioTranscriptions,
+        crate::upstream::InferenceEndpoint::AudioTranslations => Endpoint::AudioTranslations,
     }
 }
 

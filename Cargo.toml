@@ -78,6 +78,7 @@ url = "2"
 zstd = "0.13"
 flate2 = "1"
 brotli = "8"
+multer = "3.1"
 uuid = { version = "1", features = ["serde", "v4"] }
 utoipa = { version = "5", features = ["axum_extras"] }
 

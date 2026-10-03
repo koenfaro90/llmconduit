@@ -2359,3 +2359,5 @@ export interface ConvertedRecipe {
   required_inputs: string[];
   warnings: string[];
 }
+
+export interface ModelActivity { model: string; backend: string | null; last_request_at_ms: number; requests: [number, number, number, number, number]; }
