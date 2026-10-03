@@ -75,6 +75,9 @@ export function BenchmarksView() {
       r.revision?.model_spec.readiness != null &&
       !/embedding|rerank/i.test(r.model),
   );
+  const hostName = (r: BenchmarkRun) =>
+    nodes.find((n) => n.endpoint_id === r.endpoint_id)?.host_snapshot
+      ?.hostname ?? r.host;
   const target = targets.find((r) => r.id === (deployment || targets[0]?.id));
   const run = detail.data;
   const report = run?.report;
@@ -351,12 +354,15 @@ export function BenchmarksView() {
                   </span>
                 </div>
                 <p className="mt-1 text-xs text-text-muted">
-                  {run.host} · {run.recipe_id} · revision{" "}
+                  {hostName(run)} · {run.recipe_id} · revision{" "}
                   {run.revision_digest.slice(0, 12)}
                 </p>
               </div>
               <div className="flex gap-2">
-                <Button variant="ghost" onClick={() => download(run)}>
+                <Button
+                  variant="ghost"
+                  onClick={() => download({ ...run, host: hostName(run) })}
+                >
                   Download JSON
                 </Button>
                 {active && (
@@ -430,7 +436,7 @@ export function BenchmarksView() {
                   : "Waiting / between cells"}
               </span>
             </div>
-            <LineChart series={liveSeries} height={135} unit=" tok/s" />
+            <LineChart series={liveSeries} width={1400} height={135} unit=" tok/s" />
             <p className="text-[10px] text-text-muted">
               Last 60 samples. Live rate is an estimate; the matrix contains
               finalized measurements.
@@ -542,6 +548,7 @@ export function BenchmarksView() {
                 height={220}
                 unit={` ${METRICS[metric].unit}`}
                 formatX={(n) => `C${n}`}
+                showPoints
               />
               <ChartLegend series={series} />
               <p className="text-[10px] text-text-muted">
@@ -710,7 +717,7 @@ export function BenchmarksView() {
                 </button>
               ),
             },
-            { id: "host", label: "Host", render: (r) => r.host },
+            { id: "host", label: "Host", render: (r) => hostName(r) },
             {
               id: "status",
               label: "Status",

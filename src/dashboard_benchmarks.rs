@@ -248,15 +248,9 @@ pub async fn create(
         );
     };
     let host = admin
-        .store()
-        .list_nodes()
-        .await
-        .ok()
-        .and_then(|ns| {
-            ns.into_iter()
-                .find(|n| n.endpoint_id == d.endpoint_id)
-                .and_then(|n| n.label)
-        })
+        .registry()
+        .host_snapshot(endpoint)
+        .map(|s| s.hostname)
         .unwrap_or_else(|| d.endpoint_id[..12.min(d.endpoint_id.len())].to_string());
     let run = BenchmarkRun {
         id: body.id.to_string(),

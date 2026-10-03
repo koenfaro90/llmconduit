@@ -24,6 +24,7 @@ export function LineChart({
   unit = '',
   testId,
   formatX,
+  showPoints = false,
   formatY = (v) => (Math.abs(v) >= 1000 ? `${(v / 1000).toFixed(1)}k` : v.toFixed(v < 10 ? 1 : 0)),
 }: {
   series: ChartSeries[];
@@ -32,6 +33,7 @@ export function LineChart({
   unit?: string;
   testId?: string;
   formatX?: (v: number) => string;
+  showPoints?: boolean;
   formatY?: (v: number) => string;
 }) {
   const pad = { l: 44, r: 8, t: 8, b: 20 };
@@ -41,6 +43,7 @@ export function LineChart({
   const xMin = hasData ? Math.min(...xs) : 0;
   const xMax = hasData ? Math.max(...xs) : 1;
   const yMax = hasData ? Math.max(...ys, 0) : 1;
+  pad.l = Math.max(44, (formatY(yMax) + unit).length * 6 + 12, (formatY(0) + unit).length * 6 + 12);
   const innerW = width - pad.l - pad.r;
   const innerH = height - pad.t - pad.b;
   const sx = (x: number) => pad.l + (xMax === xMin ? innerW / 2 : ((x - xMin) / (xMax - xMin)) * innerW);
@@ -89,7 +92,7 @@ export function LineChart({
           d += `${pen ? 'L' : 'M'}${sx(x).toFixed(1)},${sy(y).toFixed(1)} `;
           pen = true;
         }
-        return <path key={s.key} d={d} fill="none" stroke={stroke} strokeWidth={1.5} data-series={s.key} />;
+        return <g key={s.key}><path d={d} fill="none" stroke={stroke} strokeWidth={1.5} data-series={s.key} />{showPoints && s.points.map(([x,y],index)=>y==null?null:<circle key={index} cx={sx(x)} cy={sy(y)} r={2.5} fill={stroke} />)}</g>;
       })}
     </svg>
   );
