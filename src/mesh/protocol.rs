@@ -56,6 +56,8 @@ pub struct WorkerAdvertisement {
     pub agent_version: String,
     pub resources: Vec<ResourceAdvertisement>,
     pub model_switching: Option<ModelSwitchingAdvertisement>,
+    #[serde(default)]
+    pub managed_deployments: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,6 +143,7 @@ pub struct RequestOpen {
 pub enum StreamOpen {
     Inference(RequestOpen),
     SwitchModel(SwitchModelRequest),
+    ManageFleet { request_id: Uuid },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -562,6 +565,23 @@ mod tests {
     use tokio::io::duplex;
 
     #[test]
+    fn managed_capability_and_stream_round_trip() {
+        let legacy = serde_json::json!({"protocol_version":PROTOCOL_VERSION,"node_name":null,"agent_version":"legacy","resources":[],"model_switching":null});
+        let mut worker: WorkerAdvertisement = serde_json::from_value(legacy).unwrap();
+        assert!(!worker.managed_deployments);
+        worker.managed_deployments = true;
+        let decoded: WorkerAdvertisement =
+            serde_json::from_value(serde_json::to_value(&worker).unwrap()).unwrap();
+        assert_eq!(decoded, worker);
+        let open = StreamOpen::ManageFleet {
+            request_id: Uuid::new_v4(),
+        };
+        assert_eq!(
+            serde_json::from_value::<StreamOpen>(serde_json::to_value(&open).unwrap()).unwrap(),
+            open
+        );
+    }
+    #[test]
     fn framed_json_round_trips_and_enforces_limit() {
         let request = RequestOpen {
             protocol_version: PROTOCOL_VERSION,
@@ -618,6 +638,7 @@ mod tests {
     #[test]
     fn advertisement_validation_enforces_limits() {
         let mut advertisement = WorkerAdvertisement {
+            managed_deployments: false,
             protocol_version: PROTOCOL_VERSION,
             node_name: Some("node-a".to_string()),
             agent_version: "test".to_string(),
@@ -678,6 +699,7 @@ mod tests {
     #[test]
     fn advertisement_validation_rejects_log_injection_and_oversized_model_ids() {
         let mut advertisement = WorkerAdvertisement {
+            managed_deployments: false,
             protocol_version: PROTOCOL_VERSION,
             node_name: Some("node-a\nforged-log".to_string()),
             agent_version: "test".to_string(),

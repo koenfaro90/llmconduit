@@ -777,6 +777,7 @@ mod tests {
         registry.register_test(
             endpoint,
             WorkerAdvertisement {
+                managed_deployments: false,
                 protocol_version: PROTOCOL_VERSION,
                 node_name: Some("workstation".into()),
                 agent_version: "test".into(),
@@ -1078,6 +1079,7 @@ mod tests {
             worker_id,
             controller_connection,
             WorkerAdvertisement {
+                managed_deployments: false,
                 protocol_version: PROTOCOL_VERSION,
                 node_name: None,
                 agent_version: "test".to_string(),

@@ -38,6 +38,7 @@ mod tests {
 
     fn advertisement(model: &str, capacity: u32) -> WorkerAdvertisement {
         WorkerAdvertisement {
+            managed_deployments: false,
             protocol_version: crate::mesh::protocol::PROTOCOL_VERSION,
             node_name: None,
             agent_version: "test".to_string(),

@@ -1198,6 +1198,7 @@ export interface MeshJoinKey {
 }
 
 export interface MeshNode {
+  managed_deployments?: boolean;
   endpoint_id: string;
   label?: string;
   enabled: boolean;
@@ -2295,4 +2296,34 @@ export interface FleetHostSnapshot {
   gpus: { index: number; uuid: string; name: string; unified_memory: boolean; memory_total_mib: number | null; memory_used_mib: number | null; utilization_percent: number | null; temperature_celsius: number | null; power_watts: number | null }[];
   containers: { id: string; name: string; image: string; state: string; status: string; cpu_percent: number | null; memory_bytes: number | null; pids: number | null }[];
   errors: string[];
+}
+
+export interface RecipeRevision {
+  digest: string;
+  revision: number;
+  description: string;
+  model_spec: Record<string, unknown>;
+  created_at_ms: number;
+}
+export interface DesiredDeployment {
+  generation: number;
+  endpoint_id: string;
+  recipe_id: string;
+  revision_digest: string;
+  desired_state: 'ready' | 'unloaded';
+  updated_at_ms: number;
+  observed_at_ms: number | null;
+  observed: { status?: { phase?: string; last_error?: string }; error?: string } | null;
+  error: string | null;
+}
+export interface ManagementState {
+  recipes: Record<string, RecipeRevision[]>;
+  deployments: Record<string, DesiredDeployment>;
+}
+export interface SelectDeployment {
+  expected_generation: number;
+  endpoint_id: string;
+  recipe_id: string;
+  revision_digest: string;
+  desired_state: 'ready' | 'unloaded';
 }

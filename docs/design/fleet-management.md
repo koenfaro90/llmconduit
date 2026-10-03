@@ -50,9 +50,11 @@ each machine. Central orchestration never becomes a second local Docker lifecycl
 owner. Fleet's own update supervisor is part of Fleet's local authority.
 
 Recipe management and applying resolved recipes over the control protocol are
-not implemented yet. Current Fleet accepts a strict machine-local manifest and
-the mesh forwards selection of an already configured model; both need extending
-to support centrally managed recipe revisions.
+partially implemented. Central immutable recipes, desired single-host deployments,
+managed recipe acceptance, local durable state and host policy are implemented.
+See [managed deployment API](../fleet-managed-deployments.md). Standalone Fleet accepts a strict machine-local manifest and
+legacy mesh model switching remains supported. Further work covers imports, GPU
+admission, distributed placement and route reconciliation.
 
 ## Controller updates
 

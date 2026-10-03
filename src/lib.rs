@@ -14,6 +14,7 @@ pub mod dashboard_auth;
 pub mod dashboard_fleet;
 pub mod dashboard_fleet_host;
 pub mod dashboard_flow;
+pub mod dashboard_management;
 pub mod dashboard_mesh;
 pub mod dashboard_ui;
 pub mod dashboard_ws;
@@ -695,6 +696,7 @@ pub fn build_app_with_gateway_control_plane_runtime(
         with_debug_ui: options.with_debug_ui,
         register_protected_routes,
     };
+    crate::dashboard_management::start_reconciler(Arc::clone(&gateway));
     let app = build_router(Arc::clone(&gateway), router_options);
     Ok((app, gateway))
 }

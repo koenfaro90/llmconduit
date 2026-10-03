@@ -8,6 +8,10 @@
  * a `csrfToken` getter so the mock backend + tests can inject their own.
  */
 import type {
+  ManagementState,
+  RecipeRevision,
+  DesiredDeployment,
+  SelectDeployment,
   ActivityResponse,
   ActiveSessionsResponse,
   ApiKeyRecord,
@@ -201,7 +205,7 @@ export class DashboardClient {
   }
 
   /** A CSRF-carrying mutation under /dashboard/api. */
-  private mutate<T>(path: string, method: 'POST' | 'PATCH' | 'DELETE', body?: unknown): Promise<T> {
+  private mutate<T>(path: string, method: 'POST' | 'PUT' | 'PATCH' | 'DELETE', body?: unknown): Promise<T> {
     const csrf = this.getCsrfToken();
     const headers: Record<string, string> = {};
     if (csrf) headers['X-CSRF-Token'] = csrf;
@@ -358,6 +362,16 @@ export class DashboardClient {
 
   mesh(): Promise<MeshAdminState> {
     return this.request('/mesh', undefined, isMeshAdminState);
+  }
+
+  management(): Promise<ManagementState> {
+    return this.request('/management');
+  }
+  createRecipeRevision(id: string, body: { description: string; model_spec: Record<string, unknown> }): Promise<RecipeRevision> {
+    return this.mutate(`/management/recipes/${encodeURIComponent(id)}/revisions`, 'POST', body) as Promise<RecipeRevision>;
+  }
+  selectDeployment(id: string, body: SelectDeployment): Promise<DesiredDeployment> {
+    return this.mutate(`/management/deployments/${encodeURIComponent(id)}`, 'PUT', body) as Promise<DesiredDeployment>;
   }
 
   createMeshJoinKey(body: CreateMeshJoinKeyRequest): Promise<CreateMeshJoinKeyResponse> {

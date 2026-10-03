@@ -220,6 +220,18 @@ fn protected_routes(gateway: Arc<Gateway>, auth: Arc<DashboardAuth>) -> Router<A
     // caller BEFORE any handler/extractor work AND its 401 also flows back through
     // the `no_store` map.
     let api_routes = Router::new()
+        .route(
+            "/dashboard/api/management",
+            get(crate::dashboard_management::management_state),
+        )
+        .route(
+            "/dashboard/api/management/recipes/{id}/revisions",
+            post(crate::dashboard_management::create_revision),
+        )
+        .route(
+            "/dashboard/api/management/deployments/{id}",
+            axum::routing::put(crate::dashboard_management::select_deployment),
+        )
         .route("/dashboard/api/flows", get(dashboard_flows))
         .route(
             "/dashboard/api/sessions/active",

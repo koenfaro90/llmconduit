@@ -662,6 +662,7 @@ mod tests {
 
     fn advertisement() -> WorkerAdvertisement {
         WorkerAdvertisement {
+            managed_deployments: false,
             protocol_version: PROTOCOL_VERSION,
             node_name: None,
             agent_version: "test".to_string(),
@@ -815,6 +816,7 @@ mod tests {
         registry.register_test(
             endpoint,
             WorkerAdvertisement {
+                managed_deployments: false,
                 protocol_version: PROTOCOL_VERSION,
                 node_name: None,
                 agent_version: "test".into(),

@@ -221,3 +221,28 @@ describe('readCsrfCookie', () => {
     expect(readCsrfCookie()).toBe('abc123');
   });
 });
+
+describe('DashboardClient — central recipe management', () => {
+  it('selects a revision with an optimistic generation and CSRF protection', async () => {
+    const sent: Array<{ url: string; init?: RequestInit }> = [];
+    const fetchImpl: typeof fetch = async (url, init) => {
+      sent.push({ url: String(url), init });
+      return new Response('{}', { status: 202 });
+    };
+    const client = new DashboardClient({ fetchImpl, getCsrfToken: () => 'test-csrf' });
+    const selection = { expected_generation: 3, endpoint_id: 'host', recipe_id: 'fixture', revision_digest: 'digest', desired_state: 'unloaded' as const };
+    await client.selectDeployment('test-deployment', selection);
+    expect(sent[0]!.url).toBe('/dashboard/api/management/deployments/test-deployment');
+    expect(sent[0]!.init?.method).toBe('PUT');
+    expect(new Headers(sent[0]!.init?.headers).get('X-CSRF-Token')).toBe('test-csrf');
+    expect(JSON.parse(String(sent[0]!.init?.body))).toEqual(selection);
+  });
+  it('saves a new recipe revision without issuing a deployment command', async () => {
+    const fetchImpl = vi.fn<typeof fetch>(async () => new Response('{}', { status: 201 }));
+    const client = new DashboardClient({ fetchImpl, getCsrfToken: () => 'test-csrf' });
+    await client.createRecipeRevision('fixture', { description: 'fixture', model_spec: { image: 'fixture@sha256:digest' } });
+    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(fetchImpl.mock.calls[0]![0]).toBe('/dashboard/api/management/recipes/fixture/revisions');
+    expect(fetchImpl.mock.calls[0]![1]?.method).toBe('POST');
+  });
+});

@@ -34,6 +34,7 @@ pub(crate) struct WorkerSession {
     pub(crate) endpoint_id: EndpointId,
     pub(crate) connection: Option<Connection>,
     pub(crate) generation: u64,
+    managed_deployments: bool,
     connected_at: Instant,
     last_seen: Mutex<Instant>,
     resources: Mutex<HashMap<String, ResourceState>>,
@@ -88,6 +89,7 @@ impl MeshRegistry {
             endpoint_id,
             connection: Some(connection),
             generation,
+            managed_deployments: advertisement.managed_deployments,
             connected_at: Instant::now(),
             last_seen: Mutex::new(Instant::now()),
             host_snapshot: Mutex::new(None),
@@ -117,6 +119,7 @@ impl MeshRegistry {
             endpoint_id,
             connection: None,
             generation,
+            managed_deployments: advertisement.managed_deployments,
             connected_at: Instant::now(),
             last_seen: Mutex::new(Instant::now()),
             host_snapshot: Mutex::new(None),
@@ -314,6 +317,56 @@ impl MeshRegistry {
             .lock()
             .expect("mesh host snapshot lock poisoned")
             .clone()
+    }
+
+    pub(crate) fn managed_deployments_available(&self, endpoint_id: EndpointId) -> bool {
+        self.current_session_any_generation(endpoint_id)
+            .is_some_and(|session| {
+                session.managed_deployments
+                    && !session.is_stale(Instant::now(), self.heartbeat_timeout)
+            })
+    }
+
+    pub(crate) async fn manage_fleet(
+        &self,
+        endpoint_id: EndpointId,
+        command: crate::dashboard_management::ManagedCommand,
+    ) -> crate::error::AppResult<crate::dashboard_management::ManagedReply> {
+        let session = self
+            .current_session_any_generation(endpoint_id)
+            .ok_or_else(|| crate::error::AppError::upstream("mesh worker disconnected"))?;
+        if !session.managed_deployments || session.is_stale(Instant::now(), self.heartbeat_timeout)
+        {
+            return Err(crate::error::AppError::upstream(
+                "worker management unavailable",
+            ));
+        }
+        let connection = session
+            .connection
+            .as_ref()
+            .ok_or_else(|| crate::error::AppError::upstream("worker connection unavailable"))?;
+        let request_id = uuid::Uuid::new_v4();
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let (mut send, mut recv) = connection
+                .open_bi()
+                .await
+                .map_err(|_| crate::error::AppError::upstream("managed stream unavailable"))?;
+            crate::mesh::io::write_stream_open(&mut send, &StreamOpen::ManageFleet { request_id })
+                .await?;
+            crate::mesh::protocol::write_control(&mut send, &command).await?;
+            send.finish()
+                .map_err(|_| crate::error::AppError::upstream("finish managed command"))?;
+            let reply: crate::dashboard_management::ManagedReply =
+                crate::mesh::protocol::read_control(&mut recv).await?;
+            if reply.request_id != request_id {
+                return Err(crate::error::AppError::upstream(
+                    "managed response mismatch",
+                ));
+            }
+            Ok(reply)
+        })
+        .await
+        .map_err(|_| crate::error::AppError::upstream("managed command timed out"))?
     }
 
     pub(crate) async fn switch_model(
@@ -746,6 +799,7 @@ mod tests {
         let registry = MeshRegistry::new(Duration::from_secs(30));
         let endpoint = SecretKey::generate().public();
         let advertisement = WorkerAdvertisement {
+            managed_deployments: false,
             protocol_version: PROTOCOL_VERSION,
             node_name: None,
             agent_version: "test".into(),
@@ -783,6 +837,7 @@ mod tests {
         registry.register_test(
             endpoint,
             WorkerAdvertisement {
+                managed_deployments: false,
                 protocol_version: PROTOCOL_VERSION,
                 node_name: None,
                 agent_version: "test".into(),
@@ -839,6 +894,7 @@ mod tests {
         registry.register_test(
             endpoint,
             WorkerAdvertisement {
+                managed_deployments: false,
                 protocol_version: PROTOCOL_VERSION,
                 node_name: Some("workstation".into()),
                 agent_version: "test".into(),
@@ -879,6 +935,7 @@ mod tests {
         registry.register_test(
             endpoint,
             WorkerAdvertisement {
+                managed_deployments: false,
                 protocol_version: PROTOCOL_VERSION,
                 node_name: None,
                 agent_version: "test".into(),
@@ -933,6 +990,7 @@ mod tests {
         let session = registry.register_test(
             endpoint,
             WorkerAdvertisement {
+                managed_deployments: false,
                 protocol_version: PROTOCOL_VERSION,
                 node_name: None,
                 agent_version: "test".into(),
@@ -979,6 +1037,7 @@ mod tests {
         let session = registry.register_test(
             endpoint,
             WorkerAdvertisement {
+                managed_deployments: false,
                 protocol_version: PROTOCOL_VERSION,
                 node_name: None,
                 agent_version: "test".into(),

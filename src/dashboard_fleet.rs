@@ -205,23 +205,89 @@ impl FleetClient {
         path: &str,
         timeout: Duration,
     ) -> Result<T, FleetProxyError> {
+        self.request_body(method, path, timeout, None).await
+    }
+
+    pub async fn managed_report(&self) -> Result<serde_json::Value, FleetProxyError> {
+        let mut value: serde_json::Value = self
+            .request(reqwest::Method::GET, "/v1/managed/deployments")
+            .await?;
+        if let Some(entries) = value
+            .get_mut("deployments")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for entry in entries {
+                if let Some(desired) = entry
+                    .get_mut("desired")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    desired.remove("model");
+                }
+            }
+        }
+        Ok(value)
+    }
+
+    pub async fn apply_managed(
+        &self,
+        id: &str,
+        desired: &serde_json::Value,
+    ) -> Result<serde_json::Value, FleetProxyError> {
+        if id.is_empty()
+            || id.len() > 40
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+        {
+            return Err(FleetProxyError::new(
+                StatusCode::BAD_REQUEST,
+                "invalid deployment id",
+            ));
+        }
+        let mut value: serde_json::Value = self
+            .request_body(
+                reqwest::Method::PUT,
+                &format!("/v1/managed/deployments/{id}"),
+                FLEET_REQUEST_TIMEOUT,
+                Some(desired),
+            )
+            .await?;
+        if let Some(desired) = value
+            .get_mut("desired")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            desired.remove("model");
+        }
+        Ok(value)
+    }
+
+    async fn request_body<T: DeserializeOwned>(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        timeout: Duration,
+        body: Option<&serde_json::Value>,
+    ) -> Result<T, FleetProxyError> {
         let token = self.token().await?;
         let mut url = self.base_url.clone();
         url.set_path(path);
-        let response = self
+        let request = self
             .client
             .request(method, url)
             .bearer_auth(token)
-            .timeout(timeout)
-            .send()
-            .await
-            .map_err(|error| {
-                if error.is_timeout() {
-                    FleetProxyError::new(StatusCode::GATEWAY_TIMEOUT, "Fleet request timed out")
-                } else {
-                    FleetProxyError::new(StatusCode::BAD_GATEWAY, "Fleet request failed")
-                }
-            })?;
+            .timeout(timeout);
+        let request = if let Some(body) = body {
+            request.json(body)
+        } else {
+            request
+        };
+        let response = request.send().await.map_err(|error| {
+            if error.is_timeout() {
+                FleetProxyError::new(StatusCode::GATEWAY_TIMEOUT, "Fleet request timed out")
+            } else {
+                FleetProxyError::new(StatusCode::BAD_GATEWAY, "Fleet request failed")
+            }
+        })?;
         let upstream_status = response.status();
         if response
             .content_length()
@@ -294,7 +360,7 @@ pub struct FleetProxyError {
 }
 
 impl FleetProxyError {
-    fn new(status: StatusCode, message: &'static str) -> Self {
+    pub(crate) fn new(status: StatusCode, message: &'static str) -> Self {
         Self { status, message }
     }
 

@@ -46,6 +46,7 @@ pub struct MeshJoinKey {
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct MeshNode {
+    pub managed_deployments: bool,
     pub endpoint_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
@@ -193,7 +194,13 @@ pub async fn mesh_state(
                 .parse()
                 .ok()
                 .and_then(|endpoint| registry.host_snapshot(endpoint));
+            let capable = record
+                .endpoint_id
+                .parse()
+                .ok()
+                .is_some_and(|endpoint| registry.managed_deployments_available(endpoint));
             let mut node = MeshNode::from(record);
+            node.managed_deployments = capable;
             node.model_switching = switching;
             node.host_snapshot = snapshot;
             node
@@ -775,6 +782,7 @@ impl From<MeshNodeRecord> for MeshNode {
             last_seen_at_ms: value.last_seen_at_ms,
             model_switching: None,
             host_snapshot: None,
+            managed_deployments: false,
         }
     }
 }

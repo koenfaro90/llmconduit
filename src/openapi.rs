@@ -135,6 +135,9 @@ impl utoipa::Modify for SecuritySchemes {
         (name = "ui", description = "Dashboard SPA and debug UI assets, plus their WebSocket feeds."),
     ),
     paths(
+crate::dashboard_management::management_state,
+crate::dashboard_management::create_revision,
+crate::dashboard_management::select_deployment,
         crate::http::get_root,
         crate::http::get_health,
         crate::http::get_openapi,
@@ -207,6 +210,11 @@ impl utoipa::Modify for SecuritySchemes {
         crate::dashboard_ws::dashboard_ws,
     ),
     components(schemas(
+crate::dashboard_management::ManagementState,
+crate::dashboard_management::RecipeRevision,
+crate::dashboard_management::CreateRecipeRevision,
+crate::dashboard_management::DesiredDeployment,
+crate::dashboard_management::SelectDeployment,
         ApiError,
         ApiErrorPayload,
         AnthropicError,

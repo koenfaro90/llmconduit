@@ -632,6 +632,15 @@ pub trait PersistenceStore: PersistenceWriter {
 
     async fn get_setting(&self, key: &str) -> StoreResult<Option<String>>;
     async fn set_setting(&self, key: &str, value: &str) -> StoreResult<()>;
+    /// Compare-and-swap a bounded central management document across controllers.
+    async fn compare_exchange_setting(
+        &self,
+        _key: &str,
+        _expected: Option<&str>,
+        _value: &str,
+    ) -> StoreResult<bool> {
+        Err("atomic settings updates are unsupported by this store".into())
+    }
     async fn delete_setting(&self, key: &str) -> StoreResult<()>;
 
     async fn record_backend_metrics(&self, sample: MetricSample) -> StoreResult<()>;
@@ -3413,6 +3422,58 @@ impl PersistenceStore for SqlStore {
         );
         execute!(self, &sql, key, value);
         Ok(())
+    }
+
+    async fn compare_exchange_setting(
+        &self,
+        key: &str,
+        expected: Option<&str>,
+        value: &str,
+    ) -> StoreResult<bool> {
+        let pg = self.postgres();
+        let sql = if expected.is_some() {
+            format!(
+                "UPDATE settings SET value = {} WHERE key = {} AND value = {}",
+                if pg { "$2" } else { "?2" },
+                if pg { "$1" } else { "?1" },
+                if pg { "$3" } else { "?3" }
+            )
+        } else {
+            format!(
+                "INSERT INTO settings (key, value) VALUES ({}, {}) ON CONFLICT (key) DO NOTHING",
+                placeholder(pg, 1),
+                placeholder(pg, 2)
+            )
+        };
+        let affected = match &self.pool {
+            SqlPool::Sqlite(pool) => {
+                let query = sqlx::query(&sql).bind(key).bind(value);
+                let query = if let Some(old) = expected {
+                    query.bind(old)
+                } else {
+                    query
+                };
+                query
+                    .execute(pool)
+                    .await
+                    .map_err(store_error)?
+                    .rows_affected()
+            }
+            SqlPool::Postgres(pool) => {
+                let query = sqlx::query(&sql).bind(key).bind(value);
+                let query = if let Some(old) = expected {
+                    query.bind(old)
+                } else {
+                    query
+                };
+                query
+                    .execute(pool)
+                    .await
+                    .map_err(store_error)?
+                    .rows_affected()
+            }
+        };
+        Ok(affected == 1)
     }
 
     async fn delete_setting(&self, key: &str) -> StoreResult<()> {

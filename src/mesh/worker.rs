@@ -104,6 +104,11 @@ impl WorkerRuntime {
             resources.push(resource.advertisement().await);
         }
         WorkerAdvertisement {
+            managed_deployments: if let Some(fleet) = &self.fleet {
+                fleet.managed_report().await.is_ok()
+            } else {
+                false
+            },
             protocol_version: PROTOCOL_VERSION,
             node_name: None,
             agent_version: crate::VERSION.to_string(),
@@ -452,13 +457,49 @@ async fn request_task(
 }
 
 pub(super) async fn handle_stream(
-    send: iroh::endpoint::SendStream,
+    mut send: iroh::endpoint::SendStream,
     mut recv: iroh::endpoint::RecvStream,
     runtime: Arc<WorkerRuntime>,
 ) -> AppResult<()> {
     match read_stream_open(&mut recv).await? {
         StreamOpen::Inference(open) => handle_request(send, recv, runtime, open).await,
         StreamOpen::SwitchModel(request) => handle_switch_model(send, runtime, request).await,
+        StreamOpen::ManageFleet { request_id } => {
+            let command: crate::dashboard_management::ManagedCommand = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                crate::mesh::protocol::read_control(&mut recv),
+            )
+            .await
+            .map_err(|_| AppError::bad_request("managed command timed out"))??;
+            let mut reply = crate::dashboard_management::ManagedReply {
+                request_id,
+                result: None,
+                error: None,
+            };
+            if let Some(fleet) = &runtime.fleet {
+                let result = match (command.deployment_id, command.desired) {
+                    (Some(id), Some(desired)) => fleet.apply_managed(&id, &desired).await,
+                    (None, None) => fleet.managed_report().await,
+                    _ => Err(crate::dashboard_fleet::FleetProxyError::new(
+                        axum::http::StatusCode::BAD_REQUEST,
+                        "invalid managed command",
+                    )),
+                };
+                match result {
+                    Ok(result) => reply.result = Some(result),
+                    Err(_) => reply.error = Some(
+                        "Fleet rejected the managed command; inspect host policy and local state"
+                            .into(),
+                    ),
+                }
+            } else {
+                reply.error = Some("Fleet is not configured".into());
+            }
+            crate::mesh::protocol::write_control(&mut send, &reply).await?;
+            send.finish()
+                .map_err(|err| AppError::upstream(format!("finish managed reply: {err}")))?;
+            Ok(())
+        }
     }
 }
 

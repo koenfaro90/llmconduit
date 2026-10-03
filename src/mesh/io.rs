@@ -33,7 +33,9 @@ where
 {
     match read_stream_open(reader).await? {
         StreamOpen::Inference(open) => Ok(open),
-        StreamOpen::SwitchModel(_) => Err(AppError::bad_request("expected mesh inference stream")),
+        StreamOpen::SwitchModel(_) | StreamOpen::ManageFleet { .. } => {
+            Err(AppError::bad_request("expected mesh inference stream"))
+        }
     }
 }
 
