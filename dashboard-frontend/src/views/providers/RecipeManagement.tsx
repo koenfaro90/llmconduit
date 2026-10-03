@@ -51,11 +51,11 @@ export function RecipeManagement({ nodes, mutationsEnabled }: { nodes: MeshNode[
         <textarea aria-label="Recipe specification" rows={7} className={`${input} w-full font-mono`} value={spec} onChange={(e) => setSpec(e.target.value)} />
         <Button type="submit" disabled={!mutationsEnabled || busy}>Save revision</Button>
       </form>
-      <div className="space-y-1">{revisions.map(({ id, revision }) => <div key={`${id}:${revision.digest}`}><strong>{id}</strong> · revision {revision.revision} · {String(revision.model_spec.image ?? '')}<span className="ml-2 text-text-muted">{revision.digest.slice(0, 12)}</span></div>)}</div>
+      <div className="space-y-1">{revisions.map(({ id, revision }) => <div key={`${id}:${revision.digest}`}><strong>{id}</strong> · revision {revision.revision} · {String(revision.model_spec.image ?? revision.model_spec.source_format ?? '')}<span className="ml-2 text-text-muted">{revision.digest.slice(0, 12)}</span><Button onClick={() => { setRecipeId(id); setDescription(revision.description); setSpec(JSON.stringify(revision.model_spec, null, 2)); }}>Edit revision</Button></div>)}</div>
       <form onSubmit={deploy} className="flex flex-wrap gap-2">
         <input aria-label="Deployment ID" placeholder="Deployment ID" required pattern="[a-z0-9][a-z0-9_-]{0,39}" className={input} value={deploymentId} onChange={(e) => setDeploymentId(e.target.value)} />
         <select aria-label="Deployment host" required className={input} value={host} onChange={(e) => setHost(e.target.value)}><option value="">Select host</option>{nodes.filter((node) => node.enabled && node.managed_deployments).map((node) => <option key={node.endpoint_id} value={node.endpoint_id}>{node.label ?? node.host_snapshot?.hostname ?? node.endpoint_id.slice(0, 12)}</option>)}</select>
-        <select aria-label="Recipe revision" required className={input} value={revisionKey} onChange={(e) => setRevisionKey(e.target.value)}><option value="">Select revision</option>{revisions.map(({ id, revision }) => <option key={`${id}:${revision.digest}`} value={`${id}:${revision.digest}`}>{id} · revision {revision.revision}</option>)}</select>
+        <select aria-label="Recipe revision" required className={input} value={revisionKey} onChange={(e) => setRevisionKey(e.target.value)}><option value="">Select revision</option>{revisions.filter(({ revision }) => revision.model_spec.image).map(({ id, revision }) => <option key={`${id}:${revision.digest}`} value={`${id}:${revision.digest}`}>{id} · revision {revision.revision}</option>)}</select>
         <Button type="submit" disabled={!mutationsEnabled || busy}>Deploy</Button>
       </form>
       {Object.entries(state.data?.deployments ?? {}).map(([id, deployment]) => {

@@ -81,6 +81,34 @@ fn valid_id(id: &str) -> bool {
             b.is_ascii_lowercase() || b.is_ascii_digit() || (i > 0 && (b == b'-' || b == b'_'))
         })
 }
+fn credential_key(key: &str) -> bool {
+    let key = key.to_ascii_uppercase();
+    key == "TOKEN"
+        || key.ends_with("_TOKEN")
+        || ["SECRET", "PASSWORD", "API_KEY"]
+            .iter()
+            .any(|part| key.contains(part))
+}
+fn source_has_credentials(value: &serde_yaml::Value) -> bool {
+    fn literal(value: &serde_yaml::Value) -> bool {
+        !value.is_null()
+            && !value
+                .as_str()
+                .is_some_and(|v| v.is_empty() || v.contains("${") || v == "[redacted]")
+    }
+    match value {
+        serde_yaml::Value::Mapping(map) => map.iter().any(|(key, value)| {
+            key.as_str()
+                .is_some_and(|key| credential_key(key) && literal(value))
+                || source_has_credentials(value)
+        }),
+        serde_yaml::Value::Sequence(items) => items.iter().any(source_has_credentials),
+        serde_yaml::Value::String(text) => text.split_once('=').is_some_and(|(key, value)| {
+            credential_key(key) && literal(&serde_yaml::Value::String(value.to_string()))
+        }),
+        _ => false,
+    }
+}
 fn validate_recipe(body: &CreateRecipeRevision) -> Result<String, &'static str> {
     if body.description.len() > 256 {
         return Err("description exceeds 256 bytes");
@@ -88,6 +116,31 @@ fn validate_recipe(body: &CreateRecipeRevision) -> Result<String, &'static str> 
     let Some(spec) = body.model_spec.as_object() else {
         return Err("model_spec must be an object");
     };
+    // Historical sources stay editable centrally without pretending that an
+    // unrendered Compose/RDMA recipe is an executable deployment.
+    if let Some(format) = spec.get("source_format") {
+        if !matches!(format.as_str(), Some("compose" | "sparkrun"))
+            || spec.len() != 2
+            || !spec
+                .get("source_content")
+                .and_then(Value::as_str)
+                .is_some_and(|content| !content.is_empty() && content.len() <= 32 * 1024)
+        {
+            return Err("source recipes require a format and bounded source_content");
+        }
+        let content = spec["source_content"].as_str().unwrap();
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(content).map_err(|_| "source content must be valid YAML")?;
+        if source_has_credentials(&yaml)
+            || regex::Regex::new(r"hf_[A-Za-z0-9]{16,}")
+                .unwrap()
+                .is_match(content)
+        {
+            return Err("source credentials must be replaced by host-local references");
+        }
+        let bytes = serde_json::to_vec(spec).map_err(|_| "invalid source recipe")?;
+        return Ok(format!("{:x}", Sha256::digest(bytes)));
+    }
     let allowed = [
         "description",
         "image",
@@ -143,15 +196,10 @@ fn validate_recipe(body: &CreateRecipeRevision) -> Result<String, &'static str> 
         let Some(env) = env.as_object() else {
             return Err("environment must be an object");
         };
-        if env.iter().any(|(key, value)| {
-            let upper = key.to_ascii_uppercase();
-            !value.is_string()
-                || upper == "TOKEN"
-                || upper.ends_with("_TOKEN")
-                || ["SECRET", "PASSWORD", "API_KEY"]
-                    .iter()
-                    .any(|s| upper.contains(s))
-        }) {
+        if env
+            .iter()
+            .any(|(key, value)| !value.is_string() || credential_key(key))
+        {
             return Err("inline credentials are not permitted; use a host-local mount");
         }
     }
@@ -306,7 +354,7 @@ pub async fn create_revision(
                 );
             }
         };
-        if state.recipes.len() >= 64 && !state.recipes.contains_key(&id) {
+        if state.recipes.len() >= 256 && !state.recipes.contains_key(&id) {
             return error(StatusCode::CONFLICT, "recipe limit reached");
         }
         let revisions = state.recipes.entry(id.clone()).or_default();
@@ -397,6 +445,16 @@ pub async fn select_deployment(
             .is_some_and(|revisions| revisions.iter().any(|r| r.digest == body.revision_digest))
         {
             return error(StatusCode::BAD_REQUEST, "recipe revision does not exist");
+        }
+        if !state.recipes[&body.recipe_id]
+            .iter()
+            .find(|r| r.digest == body.revision_digest)
+            .is_some_and(|r| r.model_spec.get("image").is_some())
+        {
+            return error(
+                StatusCode::BAD_REQUEST,
+                "render the source recipe into an executable revision before deployment",
+            );
         }
         if state.deployments.len() >= 64 && !state.deployments.contains_key(&id) {
             return error(StatusCode::CONFLICT, "deployment limit reached");
@@ -639,5 +697,27 @@ mod tests {
         let restored: CreateRecipeRevision =
             serde_json::from_value(serde_json::to_value(&body).unwrap()).unwrap();
         assert_eq!(validate_recipe(&restored).unwrap(), digest);
+    }
+
+    #[test]
+    fn source_catalog_is_bounded_and_round_trips() {
+        let mut body = CreateRecipeRevision {
+            description: "Archived Compose".into(),
+            model_spec: serde_json::json!({"source_format":"compose","source_content":"services: {}\n"}),
+        };
+        let digest = validate_recipe(&body).unwrap();
+        let restored: CreateRecipeRevision =
+            serde_json::from_value(serde_json::to_value(&body).unwrap()).unwrap();
+        assert_eq!(validate_recipe(&restored).unwrap(), digest);
+        body.model_spec["source_content"] = Value::String("x".repeat(32769));
+        assert!(validate_recipe(&body).is_err());
+        body.model_spec["source_content"] = Value::String(
+            "services:\n  model:\n    environment:\n      HF_TOKEN: private\n".into(),
+        );
+        assert!(validate_recipe(&body).is_err());
+        body.model_spec["source_content"] = Value::String(
+            "services:\n  model:\n    environment:\n      HF_TOKEN: ${HF_TOKEN}\n".into(),
+        );
+        assert!(validate_recipe(&body).is_ok());
     }
 }
