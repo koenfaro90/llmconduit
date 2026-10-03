@@ -2,6 +2,12 @@
 
 LLM API gateway for local and OpenAI-compatible chat-completions backends.
 
+The planned [Fleet machine-management integration](docs/design/fleet-management.md)
+puts local execution/reporting on each host and central placement, orchestration
+and monitoring in llmconduit. It includes replacing Fleet controllers by starting
+and verifying the new version before retiring the old container. This management
+extension is not implemented yet.
+
 It accepts OpenAI Responses, OpenAI Chat Completions, and Anthropic Messages
 requests, normalizes them, and forwards them to an upstream
 `/v1/chat/completions` server. It can also run server-side tools such as Brave
