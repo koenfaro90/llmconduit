@@ -3168,12 +3168,24 @@ impl RoutingUpstreamClient {
         requested: &str,
     ) -> Option<FailoverUpstreamClient> {
         let replicas = self.traffic.replicas(requested)?;
-        let (RoutingResolution::Catalog(resolution), _) = catalog.resolve(requested)? else {
-            return None;
+        let (resolution, _) = catalog.resolve(requested)?;
+        let model_id = match resolution {
+            RoutingResolution::Catalog(candidate) => match candidate.target {
+                RoutingModelTarget::Primary => candidate.model_id.clone(),
+                RoutingModelTarget::Fallback {
+                    failover_provider_index,
+                } => self
+                    .providers
+                    .get(candidate.provider_index)?
+                    .client
+                    .providers
+                    .get(failover_provider_index)?
+                    .upstream_model
+                    .clone()
+                    .unwrap_or_else(|| candidate.model_id.clone()),
+            },
+            RoutingResolution::Route { model_id, .. } => model_id,
         };
-        if !matches!(resolution.target, RoutingModelTarget::Primary) {
-            return None;
-        }
         let mut providers = Vec::new();
         for (i, entry) in catalog.provider_catalogs.iter().enumerate() {
             let provider = &self.providers[i];
@@ -3185,11 +3197,13 @@ impl RoutingUpstreamClient {
             {
                 continue;
             }
-            if entry.candidates.iter().any(|c| {
-                c.model_id == resolution.model_id && matches!(c.target, RoutingModelTarget::Primary)
-            }) {
+            if entry
+                .candidates
+                .iter()
+                .any(|c| c.model_id == model_id && matches!(c.target, RoutingModelTarget::Primary))
+            {
                 let mut leg = provider.client.providers[0].clone();
-                leg.upstream_model = Some(resolution.model_id.clone());
+                leg.upstream_model = Some(model_id.clone());
                 providers.push(leg);
             }
         }
@@ -3198,7 +3212,7 @@ impl RoutingUpstreamClient {
         }
         let key = format!(
             "{}:{}",
-            resolution.model_id,
+            model_id,
             providers
                 .iter()
                 .map(|p| p.name.as_str())

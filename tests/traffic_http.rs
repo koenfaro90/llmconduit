@@ -137,6 +137,12 @@ async fn ordinary_providers_stay_independent_until_an_explicit_replica_pool_is_e
             fallback_upstreams: vec![],
         })
         .collect();
+    config.model_routes = vec![llmconduit::config::ModelRoute {
+        name: "public-alias".into(),
+        glob: None,
+        upstream_base_url: format!("{}/v1", a.uri()).parse().unwrap(),
+        upstream_model: Some("same-model".into()),
+    }];
     let (app, gateway) = llmconduit::build_app_with_gateway_and_options(
         config,
         None,
@@ -161,7 +167,7 @@ async fn ordinary_providers_stay_independent_until_an_explicit_replica_pool_is_e
         ..Default::default()
     };
     policy.models.insert(
-        "same-model".into(),
+        "public-alias".into(),
         ModelPolicy {
             replicas: vec!["a".into(), "b".into()],
             balance: true,
@@ -169,7 +175,8 @@ async fn ordinary_providers_stay_independent_until_an_explicit_replica_pool_is_e
         },
     );
     gateway.traffic().install(policy, 1).unwrap();
-    let response = app.oneshot(request()).await.unwrap();
+    let alias_request=axum::http::Request::builder().method("POST").uri("/v1/chat/completions").header("content-type","application/json").body(Body::from(r#"{"model":"public-alias","messages":[{"role":"user","content":"hi"}],"stream":false,"max_tokens":32}"#)).unwrap();
+    let response = app.oneshot(alias_request).await.unwrap();
     assert!(response.status().is_success(), "{}", response.status());
     let body = axum::body::to_bytes(response.into_body(), 10000)
         .await
