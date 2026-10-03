@@ -18,6 +18,15 @@ describe('HostTelemetry', () => {
     expect(panel).not.toHaveTextContent('0.0 GiB');
     expect(panel.querySelector('[data-quality="measured"]')).not.toBeNull();
   });
+  it('shows small nonzero container memory without rounding it to zero', () => {
+    const measured: MeshNode = { ...node, host_snapshot: { ...node.host_snapshot!, network:[{name:'eth0',rx_bytes:1,tx_bytes:1,rx_bytes_per_second:0.5,tx_bytes_per_second:100}], containers: [{
+      id:'container', name:'inference', image:'vllm:test', state:'running', status:'Up',
+      cpu_percent:null, memory_bytes:20 * 1024 ** 2, pids:8,
+    }] } };
+    render(<HostTelemetry nodes={[measured]} now={now} />);
+    expect(screen.getByTestId('host-telemetry')).toHaveTextContent('20.0 MiB');
+    expect(screen.getByTestId('host-telemetry')).toHaveTextContent('0.5 B/s');
+  });
   it('marks old measurements as stale and disconnected hosts unavailable', () => {
     render(<HostTelemetry nodes={[node, { ...node, endpoint_id:'node-2', host_snapshot:undefined }]} now={now + 21_000} />);
     expect(screen.getByText(/stale sample/)).toBeInTheDocument();

@@ -5,7 +5,9 @@ const DASH = '—';
 function percent(n: number | null | undefined) { return n == null ? DASH : `${n.toFixed(1)}%`; }
 function bytes(n: number | null | undefined) {
   if (n == null) return DASH;
-  return `${(n / 1024 ** 3).toFixed(1)} GiB`;
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+  const index = n > 0 ? Math.max(0, Math.min(4, Math.floor(Math.log(n) / Math.log(1024)))) : 0;
+  return `${(n / 1024 ** index).toFixed(index === 0 && n >= 1 ? 0 : 1)} ${units[index]}`;
 }
 export function HostTelemetry({ nodes, now = Date.now() }: { nodes: MeshNode[]; now?: number }) {
   return <Panel className="p-4" data-testid="host-telemetry">
@@ -25,7 +27,7 @@ export function HostTelemetry({ nodes, now = Date.now() }: { nodes: MeshNode[]; 
             <div><dt>Memory used / total</dt><dd>{bytes(host.memory?.used_bytes)} / {bytes(host.memory?.total_bytes)}</dd></div>
             <div><dt>Disk available / total</dt><dd>{bytes(host.disk?.available_bytes)} / {bytes(host.disk?.total_bytes)}</dd></div>
           </dl>
-          <div className="mt-2 space-y-1 text-xs">{host.network.map(net => <p key={net.name}>{net.name} · RX {net.rx_bytes_per_second == null ? DASH : `${(net.rx_bytes_per_second / 1024 ** 2).toFixed(2)} MiB/s`} · TX {net.tx_bytes_per_second == null ? DASH : `${(net.tx_bytes_per_second / 1024 ** 2).toFixed(2)} MiB/s`}</p>)}</div>
+          <div className="mt-2 space-y-1 text-xs">{host.network.map(net => <p key={net.name}>{net.name} · RX {net.rx_bytes_per_second == null ? DASH : `${bytes(net.rx_bytes_per_second)}/s`} · TX {net.tx_bytes_per_second == null ? DASH : `${bytes(net.tx_bytes_per_second)}/s`}</p>)}</div>
           <div className="mt-2 space-y-1 text-xs">{host.gpus.map(gpu => <p key={gpu.uuid}>GPU {gpu.index} · {gpu.name} · {percent(gpu.utilization_percent)} · {gpu.unified_memory ? 'unified memory (host RAM)' : `VRAM ${bytes(gpu.memory_used_mib == null ? null : gpu.memory_used_mib * 1024 ** 2)} / ${bytes(gpu.memory_total_mib == null ? null : gpu.memory_total_mib * 1024 ** 2)}`} · {gpu.temperature_celsius == null ? DASH : `${gpu.temperature_celsius} °C`} · {gpu.power_watts == null ? DASH : `${gpu.power_watts} W`}</p>)}</div>
           <div className="mt-3 text-xs">{host.containers.map(container => <div key={container.id} className="mt-1 break-words">
             <span className="font-mono">{container.name}</span> · {container.status || container.state} · CPU {percent(container.cpu_percent)} · RAM {bytes(container.memory_bytes)}
