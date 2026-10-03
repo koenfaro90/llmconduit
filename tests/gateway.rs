@@ -16182,7 +16182,15 @@ async fn media_multipart_routes_aliases_and_preserves_uploaded_bytes() {
             upstream_model: Some("actual-media".into()),
             upstream_chat_kwargs: JsonMap::new(),
             upstream_request_log_path: None,
-            fallback_upstreams: vec![],
+            fallback_upstreams: vec![FallbackUpstreamConfig {
+                name: "media-fallback".into(),
+                upstream_base_url: format!("{}/v1", server.uri()).parse().unwrap(),
+                upstream_api_key: Some("provider-key".into()),
+                upstream_model: Some("actual-media".into()),
+                exposed_model: Some("friendly-media".into()),
+                upstream_chat_kwargs: JsonMap::new(),
+                upstream_request_log_path: None,
+            }],
         }];
         let app = llmconduit::build_app(config);
         let response = app
@@ -16191,7 +16199,7 @@ async fn media_multipart_routes_aliases_and_preserves_uploaded_bytes() {
                     .method("POST")
                     .uri(endpoint)
                     .header("content-type", "multipart/form-data; boundary=boundary")
-                    .body(Body::from(media_multipart_body("actual-media")))
+                    .body(Body::from(media_multipart_body("friendly-media")))
                     .unwrap(),
             )
             .await
