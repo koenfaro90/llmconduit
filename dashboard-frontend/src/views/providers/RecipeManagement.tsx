@@ -62,7 +62,7 @@ export function RecipeManagement({ nodes, mutationsEnabled }: { nodes: MeshNode[
         const observed = deployment.observed?.status?.phase ?? 'Awaiting host';
         const stale = deployment.observed_at_ms == null || Date.now() - deployment.observed_at_ms > 20_000;
         return <div key={id} className="rounded border border-line p-3 space-y-2">
-          <div><strong>{id}</strong> · {nodes.find((node) => node.endpoint_id === deployment.endpoint_id)?.label ?? deployment.endpoint_id.slice(0, 12)} · {deployment.recipe_id} · {deployment.revision_digest.slice(0, 12)}</div>
+          <div><strong>{id}</strong> · {nodes.find((node) => node.endpoint_id === deployment.endpoint_id)?.label ?? nodes.find((node) => node.endpoint_id === deployment.endpoint_id)?.host_snapshot?.hostname ?? deployment.endpoint_id.slice(0, 12)} · {deployment.recipe_id} · {deployment.revision_digest.slice(0, 12)}</div>
           <div>Desired: {deployment.desired_state} · Observed: {observed}{stale ? ' (stale)' : ''} · generation {deployment.generation}</div>
           {(deployment.error || deployment.observed?.error || deployment.observed?.status?.last_error) && <p role="alert">{deployment.error ?? deployment.observed?.error ?? deployment.observed?.status?.last_error}</p>}
           <Button disabled={!mutationsEnabled || busy} onClick={() => select.mutate({ id, body: { endpoint_id: deployment.endpoint_id, recipe_id: deployment.recipe_id, revision_digest: deployment.revision_digest, expected_generation: deployment.generation, desired_state: deployment.desired_state === 'ready' ? 'unloaded' : 'ready' } })}>{deployment.desired_state === 'ready' ? 'Stop' : 'Start'}</Button>

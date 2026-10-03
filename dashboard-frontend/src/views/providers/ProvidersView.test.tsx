@@ -1,12 +1,28 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { renderWithQuery, resetWorld } from '../../components/testHarness';
 import { ProvidersView } from './ProvidersView';
+import { RecipeManagement } from './RecipeManagement';
+import { getConnection } from '../../api/connection';
 
 beforeEach(() => resetWorld({ mock: true }));
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 describe('ProvidersView', () => {
+  it('edits archived source revisions without offering them for deployment', async () => {
+    const source = { source_format: 'compose', source_content: 'services: {}\n' };
+    vi.spyOn(getConnection().client, 'management').mockResolvedValue({ recipes: {
+      archived: [{ digest: 'a'.repeat(64), revision: 1, description: 'Archived Compose', model_spec: source, created_at_ms: 1 }],
+      executable: [{ digest: 'b'.repeat(64), revision: 1, description: 'Executable', model_spec: { image: 'image@sha256:' + 'b'.repeat(64) }, created_at_ms: 1 }],
+    }, deployments: {} });
+    renderWithQuery(<RecipeManagement nodes={[]} mutationsEnabled />);
+    const row = (await screen.findByText('archived')).parentElement!;
+    fireEvent.click(within(row).getByRole('button', { name: 'Edit revision' }));
+    expect(screen.getByLabelText('Recipe ID')).toHaveValue('archived');
+    expect(JSON.parse((screen.getByLabelText('Recipe specification') as HTMLTextAreaElement).value)).toEqual(source);
+    expect(within(screen.getByLabelText('Recipe revision')).queryByRole('option', { name: /archived/ })).toBeNull();
+    expect(within(screen.getByLabelText('Recipe revision')).getByRole('option', { name: /executable/ })).toBeInTheDocument();
+  });
   it('renders exact advertised models, operational capacity, access limits, and cache metrics', async () => {
     renderWithQuery(<ProvidersView />);
 
