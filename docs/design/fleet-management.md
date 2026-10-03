@@ -6,17 +6,53 @@ on `development` in both GitLab repositories under
 
 Fleet runs on each model host and reports local hardware, CPU, memory, network,
 GPU/UMA resources, inference processes, containers, readiness and inference
-metrics. It validates reservations and executes local instructions. llmconduit
-owns desired deployments, host/GPU placement, distributed ranks, recovery,
+metrics. It is the local authority for pulling images and creating, starting,
+stopping and replacing containers, validating reservations and reporting conflicts.
+llmconduit owns the recipe catalog and recipe versions, desired deployments,
+host/GPU placement, distributed ranks, recovery,
 aliases/routing and the monitoring/dashboard views. Multi-node operations have
 one central operation and per-host rank progress; no Fleet agent instructs
 another host. Keep RTX deployments based on the existing `~/compose` recipes.
 
 Measurements go directly to llmconduit. Reuse the existing PostgreSQL store where
 durability is needed; no Prometheus dependency. Retention and downsampling are
-out of scope. Git holds profiles; central durable state holds placement intent;
+out of scope. llmconduit manages recipes and durable placement intent;
 live reports describe actual state. Routes are published after inference
 readiness, and central disconnection leaves inference running.
+
+## Recipe management and execution
+
+Recipes are managed through llmconduit's API and dashboard: import, create, edit,
+validate, version and select them for deployment. Persist the catalog and revisions
+centrally. Git may supply imports and receive exports; it does not require operators
+to edit machine-local manifests to manage recipes. A deployment references an
+immutable recipe revision, so editing a recipe does not silently change running
+containers. Applying a new revision is an explicit deployment operation.
+
+Recipes describe the model/checkpoint revision, image, engine arguments and
+environment, ports/mounts, resource requirements, readiness and distributed
+topology. This includes context/batch/sequence limits, prefix caching, prompt-token
+details and backend/kernel selection. Keep credentials as references resolved on
+the host; plaintext secrets must not enter recipe exports or dashboard responses.
+
+llmconduit resolves a selected revision against host capabilities and placement,
+then sends each host an instruction containing the recipe ID/revision, resolved
+local launch specification, deployment/operation ID and assigned GPUs/rank.
+Fleet validates it against local policy/resources, durably records acceptance,
+pulls the image and performs local container lifecycle actions. Fleet reports
+the applied revision and actual state. Its cached configuration supports restart
+and disconnected operation; the authoritative recipe catalog remains in llmconduit.
+
+Import the existing Spark recipes and GPU Compose recipes without dropping their
+tested settings. Preserve GPU execution paths under `~/compose` as local execution
+material. Reuse sparkrun rendering/fabric knowledge while Fleet owns execution on
+each machine. Central orchestration never becomes a second local Docker lifecycle
+owner. Fleet's own update supervisor is part of Fleet's local authority.
+
+Recipe management and applying resolved recipes over the control protocol are
+not implemented yet. Current Fleet accepts a strict machine-local manifest and
+the mesh forwards selection of an already configured model; both need extending
+to support centrally managed recipe revisions.
 
 ## Controller updates
 
@@ -61,12 +97,14 @@ implementing the protocol. Unsupported workers should show a capability error.
 `src/dashboard_fleet.rs` contains the loopback-only `FleetClient` and local model
 controls. `src/mesh/worker.rs` forwards a model switch to that client;
 `src/mesh/protocol.rs` currently supports inference and switch-model streams.
-Host telemetry, central placement and controller update messages are still to
-be built. No self-update endpoint exists in current Fleet either.
+Host telemetry, recipe management/distribution, central placement and controller
+update messages are still to be built. No self-update endpoint exists in current
+Fleet either.
 
 1. Read-only inventory and direct reporting on one Spark and one RTX host;
    surface observed host/process/inference state in llmconduit.
-2. Durable central desired-state tracking and Fleet local state/adoption,
+2. Central recipe catalog/API/dashboard and immutable recipe revisions; durable
+   desired-state tracking and Fleet local recipe acceptance/state/adoption,
    reservations and lifecycle operations. Handle GB10 unified memory rather
    than expecting numeric dedicated VRAM readings.
 3. Controller standby, supervisor handover and central update operations, with
