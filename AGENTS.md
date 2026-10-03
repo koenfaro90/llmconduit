@@ -7,7 +7,7 @@ Guidance for AI coding agents working in this repo.
 Rust LLM API gateway. Accepts OpenAI Responses, OpenAI Chat Completions, and Anthropic Messages on the front; forwards to OpenAI-compatible `/v1/chat/completions` upstream, and proxies legacy `/v1/completions`, embeddings/rerank and dedicated image/video/audio
 task APIs (JSON/multipart/binary streaming). Video handles persist owner/backend
 routing in SQL. See `docs/media-api.md`. Infrastructure pages separate Hosts, Recipes,
-Models, Deployment and Benchmarks; Providers retains upstream/mesh administration. Adds server-side Brave web search, per-model defaults, nested failover/model routing across upstreams, replay caching, request-log analysis, and an optional debug UI.
+Models, Deployment, Benchmarks and opt-in Traffic policies; Providers retains upstream/mesh administration. Host history is collected into SQL independently of browsers; recipes use Monaco JSON editing and portable distributed placement. See `docs/fleet-dashboard-management.md` and `docs/production-traffic.md`. Adds server-side Brave web search, per-model defaults, nested failover/model routing across upstreams, replay caching, request-log analysis, and an optional debug UI.
 
 Use the code layout below as the architecture map when touching unfamiliar areas.
 
@@ -109,7 +109,7 @@ These are intentional and load-bearing. Do not change without strong reason + ma
 - **`OPENAI_MAX_STOP_SEQUENCES = 4`** in `chat.rs:81`. Returns 400 — do not silently truncate.
 - **`API_LOG_BODY_LIMIT_BYTES` / `API_LOG_PAYLOAD_DUMP_LIMIT_BYTES`** in `http.rs:51-52`. Don't bypass.
 - **Failover only pre-first-chunk** (`upstream.rs:407-419`). Mid-stream provider failure surfaces as error — never retry, never duplicate tokens.
-- **Routing providers are not failure fallbacks.** With explicit `upstreams`, only the selected upstream's nested `fallback_upstreams` are failover candidates. Never fail over to the next routing upstream just because the selected provider failed.
+- **Routing providers are not failure fallbacks.** With explicit `upstreams`, only the selected upstream's nested `fallback_upstreams` are failover candidates. Never fail over to the next routing upstream just because the selected provider failed. The opt-in enforced Traffic replica pool is an explicit exception: only named compatible providers advertising the same resolved model ID participate; default routing remains independent. Keep pre-output-only failover, live authorization checks and attempt-owned admission leases intact.
 - **`web_search` tool stripped from request when `brave_api_key` is unset.** Engine also relaxes `tool_choice` to `"auto"` when the only tool was stripped (`engine.rs:1536-1558`).
 - **Provider-side `web_search` is single-purpose.** Runtime execution supports search/query actions only; `open_page`, `find_in_page`, and unknown actions are rejected. Failed/timed-out Brave calls are injected as model-visible text so the turn can complete.
 - **Mixed provider-side and client-side tool calls are rejected.** A turn cannot hand off client tools and run Brave search in the same upstream tool-call batch (`engine.rs:1290-1357`).

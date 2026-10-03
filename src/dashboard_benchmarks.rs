@@ -305,11 +305,43 @@ pub async fn create(
             };
             catalog.runs.remove(&old);
         };
+        if let Err(e) = gateway
+            .traffic()
+            .reserve_deployment(&run.id, &run.deployment_id, false)
+        {
+            return error(StatusCode::CONFLICT, &e.client_message);
+        }
+        struct ReservationGuard {
+            traffic: crate::traffic::TrafficController,
+            id: String,
+            committed: bool,
+        }
+        impl Drop for ReservationGuard {
+            fn drop(&mut self) {
+                if !self.committed {
+                    self.traffic.unreserve(&self.id);
+                }
+            }
+        }
+        let mut guard = ReservationGuard {
+            traffic: gateway.traffic(),
+            id: run.id.clone(),
+            committed: false,
+        };
         catalog.runs.insert(run.id.clone(), run.clone());
         match commit(store.as_ref(), raw.as_deref(), &catalog).await {
-            Ok(true) => return json_no_store(StatusCode::ACCEPTED, &run),
-            Ok(false) => continue,
-            Err(_) => return error(StatusCode::SERVICE_UNAVAILABLE, "cannot persist benchmark"),
+            Ok(true) => {
+                guard.committed = true;
+                return json_no_store(StatusCode::ACCEPTED, &run);
+            }
+            Ok(false) => {
+                gateway.traffic().unreserve(&run.id);
+                continue;
+            }
+            Err(_) => {
+                gateway.traffic().unreserve(&run.id);
+                return error(StatusCode::SERVICE_UNAVAILABLE, "cannot persist benchmark");
+            }
         }
     }
     error(StatusCode::CONFLICT, "benchmark catalog changed; retry")
@@ -372,11 +404,24 @@ async fn reconcile(gateway: &Gateway) {
     let Ok((_, catalog)) = read(store.as_ref()).await else {
         return;
     };
+    for run in catalog.runs.values() {
+        if terminal(run) {
+            crate::dashboard_recipe_evidence::record_benchmark(gateway, run).await;
+            gateway.traffic().unreserve(&run.id);
+        }
+    }
     futures::stream::iter(catalog.runs.values().filter(|r| !terminal(r)))
         .for_each_concurrent(Some(4), |run| reconcile_run(gateway, run))
         .await;
 }
 async fn reconcile_run(gateway: &Gateway, run: &BenchmarkRun) {
+    if gateway
+        .traffic()
+        .reserve_deployment(&run.id, &run.deployment_id, run.report.is_some())
+        .is_err()
+    {
+        return;
+    }
     let Some(admin) = gateway.mesh_admin() else {
         return;
     };

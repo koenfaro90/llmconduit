@@ -16,6 +16,8 @@ pub struct FleetHostSnapshot {
     pub gpus: Vec<HostGpu>,
     pub containers: Vec<HostContainer>,
     pub errors: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub engine_observations: Vec<EngineObservation>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
 pub struct HostCpu {
@@ -48,6 +50,10 @@ pub struct HostGpu {
     pub utilization_percent: Option<f64>,
     pub temperature_celsius: Option<f64>,
     pub power_watts: Option<f64>,
+    #[serde(default)]
+    pub clock_mhz: Option<f64>,
+    #[serde(default)]
+    pub memory_clock_mhz: Option<f64>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
 pub struct HostContainer {
@@ -60,12 +66,71 @@ pub struct HostContainer {
     pub memory_bytes: Option<f64>,
     pub pids: Option<f64>,
 }
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
+pub struct EngineObservation {
+    pub instance: String,
+    pub model: String,
+    pub engine: String,
+    pub source: String,
+    pub sampled_at: String,
+    pub received_at: String,
+    pub running: u32,
+    pub waiting: u32,
+    pub requests: Vec<EngineRequest>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
+pub struct EngineRequest {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_request_id: Option<String>,
+    pub state: String,
+    pub prompt_tokens: u64,
+    pub computed_tokens: u64,
+    pub output_tokens: u64,
+    pub preemptions: u64,
+}
+impl EngineObservation {
+    fn validate(&self) -> bool {
+        let text = |s: &str, max: usize| {
+            !s.is_empty() && s.len() <= max && !s.chars().any(char::is_control)
+        };
+        text(&self.instance, 64)
+            && text(&self.model, 256)
+            && self.engine == "vllm"
+            && self.source == "scheduler"
+            && chrono::DateTime::parse_from_rfc3339(&self.sampled_at).is_ok()
+            && chrono::DateTime::parse_from_rfc3339(&self.received_at).is_ok()
+            && self.running <= 1_000_000
+            && self.waiting <= 1_000_000
+            && self.requests.len() <= 8
+            && self.requests.iter().all(|r| {
+                r.id.len() == 32
+                    && r.id.bytes().all(|b| b.is_ascii_hexdigit())
+                    && r.gateway_request_id
+                        .as_ref()
+                        .is_none_or(|id| uuid::Uuid::parse_str(id).is_ok())
+                    && matches!(
+                        r.state.as_str(),
+                        "queued" | "prefilling" | "decoding" | "recomputing" | "preempted"
+                    )
+                    && [
+                        r.prompt_tokens,
+                        r.computed_tokens,
+                        r.output_tokens,
+                        r.preemptions,
+                    ]
+                    .iter()
+                    .all(|v| *v <= 1_000_000_000)
+            })
+    }
+}
 impl FleetHostSnapshot {
     pub fn validate(&self) -> bool {
         let text = |s: &str, max| s.len() <= max && !s.chars().any(char::is_control);
         let metric = |v: Option<f64>| v.is_none_or(|v| v.is_finite() && v >= 0.0);
         let percent = |v: Option<f64>| metric(v) && v.is_none_or(|v| v <= 100.0);
-        self.schema_version == 1
+        self.engine_observations.len()<=4 && self.engine_observations.iter().all(EngineObservation::validate)
+            && self.schema_version == 1
             && chrono::DateTime::parse_from_rfc3339(&self.sampled_at).is_ok()
             && !self.hostname.is_empty() && text(&self.hostname, 128)
             && text(&self.architecture, 32) && metric(self.uptime_seconds)
@@ -78,7 +143,7 @@ impl FleetHostSnapshot {
                 && metric(n.rx_bytes_per_second) && metric(n.tx_bytes_per_second))
             && self.gpus.len() <= 16 && self.gpus.iter().all(|g| text(&g.uuid, 128) && text(&g.name, 256)
                 && metric(g.memory_total_mib) && metric(g.memory_used_mib)
-                && percent(g.utilization_percent) && metric(g.temperature_celsius) && metric(g.power_watts))
+                && percent(g.utilization_percent) && metric(g.temperature_celsius) && metric(g.power_watts) && metric(g.clock_mhz) && metric(g.memory_clock_mhz))
             && self.containers.len() <= 64 && self.containers.iter().all(|c|
                 text(&c.id, 128) && text(&c.name, 256) && text(&c.image, 512)
                 && text(&c.state, 64) && text(&c.status, 256)
@@ -104,6 +169,20 @@ pub(crate) fn fixture() -> FleetHostSnapshot {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn engine_observations_and_gpu_clocks_survive_wire_round_trip() {
+        let mut value = serde_json::to_value(fixture()).unwrap();
+        value["gpus"][0]["clock_mhz"] = serde_json::json!(1500.0);
+        value["gpus"][0]["memory_clock_mhz"] = serde_json::json!(1200.0);
+        value["engine_observations"] = serde_json::json!([{"instance":"gemma","model":"gemma","engine":"vllm","source":"scheduler","sampled_at":"2026-10-03T12:00:00Z","received_at":"2026-10-03T12:00:00Z","running":1,"waiting":0,"requests":[{"id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","gateway_request_id":"550e8400-e29b-41d4-a716-446655440000","state":"decoding","prompt_tokens":10,"computed_tokens":11,"output_tokens":1,"preemptions":0}]}]);
+        let sample: super::FleetHostSnapshot = serde_json::from_value(value).unwrap();
+        assert!(sample.validate());
+        assert_eq!(
+            sample,
+            serde_json::from_slice(&serde_json::to_vec(&sample).unwrap()).unwrap()
+        );
+    }
+
     use super::*;
     #[test]
     fn fleet_host_round_trip_preserves_unavailable_unified_memory() {

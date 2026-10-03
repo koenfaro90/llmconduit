@@ -46,7 +46,7 @@ export function RecipeImport({ recipeId, description, sourceFormat, sourceConten
     // Keep the editable source and executable result under the same immutable recipe history.
     await client.createRecipeRevision(recipeId, { description, model_spec: { source_format: preview.request.source_format, source_content: preview.request.source_content } });
     return client.createRecipeRevision(recipeId, { description, model_spec: preview.response.model_spec });
-  }, onSuccess: () => { onSaved(); setMessage('Source and converted revision saved. Select the executable revision and a host below to deploy.'); } });
+  }, onSuccess: () => { onSaved(); setMessage('Source and portable revision saved. Select the recipe and ordered hosts on the Deployment page.'); } });
   const busy = convert.isPending || save.isPending;
   function change(key: string) { return (event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => { setOptions((old) => ({ ...old, [key]: event.target.value })); setMessage(''); }; }
   function previewSource() {
@@ -63,7 +63,7 @@ export function RecipeImport({ recipeId, description, sourceFormat, sourceConten
     ['home_directory', 'Host home directory', 'e.g. /home/koen'],
     ['readiness_url', 'Readiness URL', 'Optional host-loopback HTTP probe'],
   ];
-  if (sourceFormat === 'sparkrun') fields.push(['runtime_cache_directory', 'Runtime cache directory', 'Optional existing approved cache path'], ['num_nodes', 'Distributed node count', 'Defaults to the recipe minimum'], ['node_rank', 'Distributed node rank', '0 for head; 1, 2, … for workers'], ['head_address', 'Distributed head address', 'Head fabric IP'], ['host_address', 'Distributed host address', 'This rank’s fabric IP']);
+  if (sourceFormat === 'sparkrun') fields.push(['runtime_cache_directory', 'Runtime cache directory', 'Optional existing approved cache path'], ['num_nodes', 'Distributed node count', 'Defaults to the recipe minimum'], ['node_rank', 'Distributed node rank', 'Leave blank to convert all ranks into one portable recipe'], ['head_address', 'Distributed head address', 'Head fabric IP'], ['host_address', 'Distributed host address', 'This rank’s fabric IP']);
   return <div className="space-y-2" data-testid="recipe-import">
     <p className="text-text-muted">Convert YAML to a Fleet recipe. Preview preserves commands, environment, bind paths and ports. Missing settings and unsupported features block saving a deployable revision.</p>
     <div className="grid gap-2 md:grid-cols-2">{fields.filter(([key]) => key !== 'service' || sourceFormat === 'compose').map(([key, label, placeholder]) => <label key={key} className="space-y-1"><span>{label}</span><input aria-label={label} className={`${input} block w-full`} placeholder={placeholder} value={options[key] ?? ''} onChange={change(key)} /></label>)}</div>

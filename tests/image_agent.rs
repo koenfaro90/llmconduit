@@ -713,6 +713,7 @@ async fn image_agent_rejects_mixed_client_and_analyze_image() {
     let upstream = MockUpstream::default();
     upstream
         .push_response(vec![Ok(ChatCompletionChunk {
+            metrics: None,
             id: "chat-1".to_string(),
             choices: vec![ChatChunkChoice {
                 index: 0,
@@ -777,6 +778,7 @@ async fn image_agent_runs_analyze_and_web_search_sequentially() {
     let upstream = MockUpstream::default();
     upstream
         .push_response(vec![Ok(ChatCompletionChunk {
+            metrics: None,
             id: "chat-1".to_string(),
             choices: vec![ChatChunkChoice {
                 index: 0,
@@ -894,6 +896,7 @@ async fn image_agent_hides_analyze_deltas_when_args_precede_name_chat() {
         .push_response(vec![
             // Chunk 1: arguments only, no name, no id.
             Ok(ChatCompletionChunk {
+                metrics: None,
                 id: "chat-1".to_string(),
                 choices: vec![ChatChunkChoice {
                     index: 0,
@@ -922,6 +925,7 @@ async fn image_agent_hides_analyze_deltas_when_args_precede_name_chat() {
             }),
             // Chunk 2: name (+ id) arrives with the rest of the arguments.
             Ok(ChatCompletionChunk {
+                metrics: None,
                 id: "chat-1".to_string(),
                 choices: vec![ChatChunkChoice {
                     index: 0,
@@ -981,6 +985,7 @@ async fn image_agent_hides_analyze_deltas_when_args_precede_name_anthropic() {
     upstream
         .push_response(vec![
             Ok(ChatCompletionChunk {
+                metrics: None,
                 id: "chat-1".to_string(),
                 choices: vec![ChatChunkChoice {
                     index: 0,
@@ -1008,6 +1013,7 @@ async fn image_agent_hides_analyze_deltas_when_args_precede_name_anthropic() {
                 usage: None,
             }),
             Ok(ChatCompletionChunk {
+                metrics: None,
                 id: "chat-1".to_string(),
                 choices: vec![ChatChunkChoice {
                     index: 0,
@@ -1252,6 +1258,7 @@ async fn image_agent_oversized_unresolved_tool_buffer_fails_cleanly() {
     let mut chunks = Vec::new();
     for i in 0..192 {
         chunks.push(Ok(ChatCompletionChunk {
+            metrics: None,
             id: "chat-1".to_string(),
             choices: vec![ChatChunkChoice {
                 index: 0,
@@ -1305,6 +1312,7 @@ async fn image_agent_client_tool_args_before_name_still_emits_all_deltas() {
         .push_response(vec![
             // Chunk 1: client tool args only, no name, no id.
             Ok(ChatCompletionChunk {
+                metrics: None,
                 id: "chat-1".to_string(),
                 choices: vec![ChatChunkChoice {
                     index: 0,
@@ -1334,6 +1342,7 @@ async fn image_agent_client_tool_args_before_name_still_emits_all_deltas() {
             // Chunk 2: NAME-ONLY (+ id) — no arguments, so no delta is produced
             // by the resolution path; the post-stream flush must emit chunk 1.
             Ok(ChatCompletionChunk {
+                metrics: None,
                 id: "chat-1".to_string(),
                 choices: vec![ChatChunkChoice {
                     index: 0,
@@ -1360,6 +1369,7 @@ async fn image_agent_client_tool_args_before_name_still_emits_all_deltas() {
             }),
             // Chunk 3: remaining client args (resolved → emitted live).
             Ok(ChatCompletionChunk {
+                metrics: None,
                 id: "chat-1".to_string(),
                 choices: vec![ChatChunkChoice {
                     index: 0,

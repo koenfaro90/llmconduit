@@ -12,11 +12,15 @@ pub mod dashboard_access;
 pub mod dashboard_api;
 pub mod dashboard_auth;
 pub mod dashboard_benchmarks;
+pub mod dashboard_deployment_groups;
 pub mod dashboard_fleet;
 pub mod dashboard_fleet_host;
 pub mod dashboard_flow;
+pub mod dashboard_host_history;
 pub mod dashboard_management;
 pub mod dashboard_mesh;
+pub mod dashboard_recipe_evidence;
+pub mod dashboard_traffic;
 pub mod dashboard_ui;
 pub mod dashboard_ws;
 pub mod debug_ui;
@@ -53,6 +57,7 @@ pub(crate) mod sse_guard;
 pub(crate) mod test_alloc_probe;
 pub(crate) mod tool_delta_gate;
 pub mod tool_repair;
+pub mod traffic;
 pub mod turn_capture;
 pub mod upstream;
 pub mod upstream_metrics;
@@ -319,6 +324,11 @@ pub fn build_app_with_gateway_control_plane_runtime(
     } else {
         crate::session_hub::SessionHub::disabled()
     };
+    let traffic = if runtime.persistence_store.is_some() {
+        crate::traffic::TrafficController::loading()
+    } else {
+        crate::traffic::TrafficController::new()
+    };
     let provider_metrics = crate::provider_metrics::ProviderMetricsRegistry::default();
     let provider_metrics_targets = if options.with_debug_ui {
         config.provider_metrics_targets.clone()
@@ -375,6 +385,7 @@ pub fn build_app_with_gateway_control_plane_runtime(
             // of the inner `Arc<Mutex>`; `disabled()` no-ops when the debug UI is
             // off) so the single point that sees the on-wire body can capture it.
             .with_flow_store(flow_store.clone())
+            .with_traffic(traffic.clone())
         };
     let base_upstream: Arc<dyn crate::upstream::UpstreamClient> = if routing_mode {
         let mut providers = Vec::new();
@@ -387,7 +398,8 @@ pub fn build_app_with_gateway_control_plane_runtime(
                     flatten_content,
                     max_sse_frame_bytes,
                     flow_store.clone(),
-                ),
+                )
+                .with_traffic(traffic.clone()),
                 None,
                 serde_json::Map::new(),
                 Vec::new(),
@@ -517,11 +529,10 @@ pub fn build_app_with_gateway_control_plane_runtime(
             )?);
             route_specs.push(ModelRouteSpec::advertised_exact(route.name.clone(), index));
         }
-        Arc::new(RoutingUpstreamClient::with_routes(
-            providers,
-            route_providers,
-            route_specs,
-        ))
+        Arc::new(
+            RoutingUpstreamClient::with_routes(providers, route_providers, route_specs)
+                .with_traffic(traffic.clone()),
+        )
     } else {
         let primary_upstream = make_upstream_client(
             config.upstream_base_url.clone(),
@@ -554,10 +565,13 @@ pub fn build_app_with_gateway_control_plane_runtime(
                     provider.upstream_chat_kwargs.clone(),
                 )
             }));
-            Arc::new(FailoverUpstreamClient::new(
-                providers,
-                Duration::from_secs(config.upstream_failure_cooldown_secs),
-            ))
+            Arc::new(
+                FailoverUpstreamClient::new(
+                    providers,
+                    Duration::from_secs(config.upstream_failure_cooldown_secs),
+                )
+                .with_traffic(traffic.clone()),
+            )
         }
     };
     let managed_providers = runtime.persistence_store.as_ref().map(|store| {
@@ -570,6 +584,7 @@ pub fn build_app_with_gateway_control_plane_runtime(
                 max_sse_frame_bytes,
                 finalization_policies: finalization_policies.clone(),
                 flow_store: flow_store.clone(),
+                traffic: traffic.clone(),
             },
         )
     });
@@ -647,6 +662,7 @@ pub fn build_app_with_gateway_control_plane_runtime(
     )
     .with_dashboard_auth(dashboard_auth)
     .with_authz(authz)
+    .with_traffic(traffic)
     .with_metrics(metrics)
     .with_session_hub(session_hub)
     .with_provider_metrics(provider_metrics.clone())
@@ -701,6 +717,8 @@ pub fn build_app_with_gateway_control_plane_runtime(
     };
     crate::dashboard_management::start_reconciler(Arc::clone(&gateway));
     crate::dashboard_benchmarks::start_reconciler(Arc::clone(&gateway));
+    crate::dashboard_traffic::start(Arc::clone(&gateway));
+    crate::dashboard_host_history::start(Arc::clone(&gateway));
     let app = build_router(Arc::clone(&gateway), router_options);
     Ok((app, gateway))
 }

@@ -2,6 +2,26 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Compact mobile is an explicit preference; desktop layout and column choices
+   keep their existing behavior. Shared tables expose the same details below rows. */
+.compact-mobile-only, .compact-mobile-details { display: none; }
+@media (max-width: 639px) {
+  .dashboard-compact .compact-mobile-only { display: inline-flex; }
+  .dashboard-compact .compact-mobile-details { display: table-row; }
+  .dashboard-compact .dashboard-global-stats { display: none; }
+  .dashboard-compact nav[aria-label="Dashboard"] { padding: 8px; gap: 8px; }
+  .dashboard-compact nav [aria-label="Dashboard sections"],
+  .dashboard-compact nav [aria-label$=" views"] { display: none; }
+  .dashboard-compact nav select.compact-mobile-only { order: 3; width: 100%; }
+  .dashboard-compact [data-responsive-table] { min-width: 0 !important; table-layout: auto; }
+  .dashboard-compact [data-responsive-table] th[data-mobile-essential="false"],
+  .dashboard-compact [data-responsive-table] td[data-mobile-essential="false"] { display: none; }
+  .dashboard-compact [data-responsive-table] th,
+  .dashboard-compact [data-responsive-table] td { overflow-wrap: anywhere; }
+  .dashboard-compact button, .dashboard-compact input, .dashboard-compact select { min-height: 36px; }
+  .dashboard-compact [data-testid$="-pagination"] { flex-wrap: wrap; gap: 8px; }
+}
+
 /*
  * The palette + font LITERALS live ONLY in src/design/palette.ts (finding 8).
  * `applyTokensToRoot` (tokens.ts) writes every `--color-*`/`--font-*` CSS var onto :root

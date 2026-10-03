@@ -3,6 +3,7 @@ import { Button } from './ui/Button';
 import { cn } from '../lib/cn';
 
 const LABELS: Record<RouteName, string> = {
+  traffic: 'Traffic',
   flows: 'Flows',
   requests: 'Requests',
   sessions: 'Sessions',
@@ -25,7 +26,7 @@ const LABELS: Record<RouteName, string> = {
 
 const SECTIONS: Array<{ label: string; landing: RouteName; routes: RouteName[] }> = [
   { label: 'Chat', landing: 'chat', routes: ['chat'] },
-  { label: 'Observe', landing: 'overview', routes: ['overview', 'flows', 'requests', 'sessions', 'throughput', 'activity'] },
+  { label: 'Observe', landing: 'overview', routes: ['overview', 'traffic', 'flows', 'requests', 'sessions', 'throughput', 'activity'] },
   { label: 'Infrastructure', landing: 'hosts', routes: ['hosts', 'recipes', 'models', 'deployment', 'benchmarks', 'providers', 'topology', 'sankey', 'theater'] },
   { label: 'Admin', landing: 'access', routes: ['access', 'account'] },
 ];
@@ -46,7 +47,7 @@ function ArgusEye({ className }: { className?: string }) {
   );
 }
 
-export function NavTabs({ active, onLogout }: { active: RouteName; onLogout: () => void }) {
+export function NavTabs({ active, onLogout, compact = false, onToggleCompact }: { active: RouteName; onLogout: () => void; compact?: boolean; onToggleCompact?: () => void }) {
   const activeSection = SECTIONS.find((section) => section.routes.includes(active)) ?? SECTIONS[0]!;
   return (
     <nav className="flex flex-wrap items-center gap-x-6 gap-y-2 border-b border-line bg-panel px-5 py-2.5" aria-label="Dashboard">
@@ -77,7 +78,9 @@ export function NavTabs({ active, onLogout }: { active: RouteName; onLogout: () 
           </button>
         ))}
       </div>
-      <Button variant="ghost" className="ml-auto shrink-0" onClick={onLogout}>
+      <select aria-label="Mobile dashboard page" className="compact-mobile-only min-w-0 rounded border border-line bg-panel p-2 text-xs" value={active} onChange={e => navigate(e.target.value as RouteName)}>{SECTIONS.map(section => <optgroup label={section.label} key={section.label}>{section.routes.map(route => <option key={route} value={route}>{LABELS[route]}</option>)}</optgroup>)}</select>
+      {onToggleCompact && <Button variant="ghost" aria-pressed={compact} className="ml-auto shrink-0 text-xs" onClick={onToggleCompact}>Compact mobile</Button>}
+      <Button variant="ghost" className="shrink-0" onClick={onLogout}>
         Logout
       </Button>
       {activeSection.routes.length > 1 && (

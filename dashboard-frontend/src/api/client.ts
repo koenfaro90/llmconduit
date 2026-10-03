@@ -1,4 +1,5 @@
 import { isBenchmarkRun, type BenchmarkRun, type BenchmarkOptions } from '../views/infrastructure/benchmarkModel';
+import { isTrafficResponse, type TrafficResponse, type TrafficConfig, type Backend, type EngineSample } from '../views/traffic/trafficModel';
 /**
  * Typed REST client for the D13 endpoints. Cross-cutting behavior:
  *  - All reads carry the session cookie automatically (`credentials: 'include'`).
@@ -10,6 +11,7 @@ import { isBenchmarkRun, type BenchmarkRun, type BenchmarkOptions } from '../vie
  */
 import type {
   ManagementState,
+  FleetHostSnapshot,
   ConvertRecipeRequest,
   ConvertedRecipe,
   RecipeRevision,
@@ -174,6 +176,10 @@ export class DashboardClient {
       throw new UnauthorizedError();
     }
     if (!res.ok) {
+      if (path.startsWith('/traffic')) {
+        const detail = await res.json().catch(() => null) as { error?: unknown } | null;
+        if (typeof detail?.error === 'string') throw new Error(detail.error);
+      }
       throw new Error(`${init?.method ?? 'GET'} ${path} failed: ${res.status}`);
     }
     // 204/empty bodies decode to `undefined as T` at the call sites that allow it.
@@ -368,6 +374,20 @@ export class DashboardClient {
   }
 
   benchmarks(): Promise<BenchmarkRun[]> {return this.request('/benchmarks',undefined,(v):v is BenchmarkRun[]=>Array.isArray(v)&&v.every(isBenchmarkRun));}
+  recipeEvidence(): Promise<Array<{id:string;recipe_id:string;revision_digest:string;endpoint_id:string;kind:string;recorded_at_ms:number;data:Record<string,unknown>}>> {return this.request('/management/recipe-evidence');}
+  deployGroup(body:{group_id?:string;recipe_id:string;revision_digest:string;hosts:Array<{endpoint_id:string;address:string}>;expected_generations?:Record<string,number>;desired_state:'ready'|'unloaded'}):Promise<{group_id:string;deployments:Record<string,DesiredDeployment>}> {return this.mutate('/management/deployment-groups','POST',body);}
+
+  hostHistory(id: string, since: number, until?: number): Promise<{samples: FleetHostSnapshot[]; bucket_ms:number}> {
+    return this.request(`/hosts/${encodeURIComponent(id)}/history?since_ms=${since}${until ? `&until_ms=${until}` : ''}`);
+  }
+
+  traffic(): Promise<TrafficResponse> { return this.request('/traffic', undefined, isTrafficResponse); }
+  trafficLayout(): Promise<{ mobile_compact: boolean }> { return this.request('/traffic/layout'); }
+  trafficBackends(): Promise<Backend[]> { return this.request('/traffic/backends'); }
+  trafficEngines(): Promise<EngineSample[]> { return this.request('/traffic/engines'); }
+  saveTraffic(revision: number, config: TrafficConfig): Promise<{ revision: number; config: TrafficConfig }> { return this.mutate('/traffic', 'POST', { revision, config }); }
+  cancelTrafficRequest(id: string): Promise<{ cancelled: boolean }> { return this.mutate(`/traffic/requests/${encodeURIComponent(id)}/cancel`, 'POST'); }
+  previewTraffic(body: { key_id: string; model: string; backend: string; at: string | null }): Promise<{ priority: number; max_wait_ms: number; budget: string; limits: Array<[string, number]> }> { return this.mutate('/traffic/preview', 'POST', body); }
   benchmark(id:string):Promise<BenchmarkRun> {return this.request(`/benchmarks/${encodeURIComponent(id)}`,undefined,isBenchmarkRun);}
   startBenchmark(body:{id:string;deployment_id:string;model:string;options:BenchmarkOptions}):Promise<BenchmarkRun> {return this.mutate<BenchmarkRun>('/benchmarks','POST',body).then(v=>{if(!isBenchmarkRun(v))throw Error('Invalid benchmark response');return v;});}
   cancelBenchmark(id:string):Promise<BenchmarkRun> {return this.mutate<BenchmarkRun>(`/benchmarks/${encodeURIComponent(id)}/cancel`,'POST').then(v=>{if(!isBenchmarkRun(v))throw Error('Invalid benchmark response');return v;});}

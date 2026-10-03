@@ -21,6 +21,8 @@ pub use store::{ApiKeySummary, CreatedApiKey};
 
 #[derive(Debug, Clone)]
 pub struct AuthContext {
+    pub traffic_session: Option<String>,
+    live_service: Option<AuthzService>,
     pub auth_request_id: String,
     pub key_id: String,
     pub principal_id: String,
@@ -30,6 +32,13 @@ pub struct AuthContext {
 }
 
 impl AuthContext {
+    pub fn traffic_identity(&self) -> crate::traffic::Identity {
+        crate::traffic::Identity {
+            key: self.key_id.clone(),
+            user: self.principal_id.clone(),
+            groups: self.policy.groups_for(&self.principal_id),
+        }
+    }
     pub fn management_actor(&self) -> crate::dashboard_access::ManagementActor {
         if self.key_id == "key_bootstrap" {
             return crate::dashboard_access::ManagementActor::Bootstrap;
@@ -75,10 +84,38 @@ impl AuthContext {
             Some(requested_model),
             chrono::Utc::now(),
         )?;
+        let service = self.live_service.clone();
+        let identity = self.identity.clone();
+        let requested = requested_model.to_owned();
         Ok(crate::upstream::AuthorizationScope::restricted(
             move |provider_id, route_id, served_model, candidate_endpoint| {
-                inference_endpoint(candidate_endpoint) == policy_endpoint
-                    && scope.allows_candidate(Some(provider_id), route_id, Some(served_model))
+                if inference_endpoint(candidate_endpoint) != policy_endpoint {
+                    return false;
+                }
+                if let Some(inner) = service.as_ref().and_then(|s| s.inner.as_ref()) {
+                    let Ok(authority) = inner.authority.read() else {
+                        return false;
+                    };
+                    if !authority.credentials.iter().any(|key| {
+                        key.id == identity.key_id && key.principal_id == identity.principal_id
+                    }) {
+                        return false;
+                    }
+                    let mut current = identity.clone();
+                    current.policy_epoch = authority.epoch;
+                    return authority
+                        .policy
+                        .authorize(
+                            &current,
+                            policy_endpoint,
+                            Some(&requested),
+                            chrono::Utc::now(),
+                        )
+                        .is_ok_and(|scope| {
+                            scope.allows_candidate(Some(provider_id), route_id, Some(served_model))
+                        });
+                }
+                scope.allows_candidate(Some(provider_id), route_id, Some(served_model))
             },
         ))
     }
@@ -301,6 +338,16 @@ impl std::fmt::Debug for AuthzService {
 }
 
 impl AuthzService {
+    pub fn traffic_identity_for_key(&self, key: &str) -> Option<crate::traffic::Identity> {
+        let inner = self.inner.as_ref()?;
+        let authority = inner.authority.read().ok()?;
+        let credential = authority.credentials.iter().find(|c| c.id == key)?;
+        Some(crate::traffic::Identity {
+            key: key.to_owned(),
+            user: credential.principal_id.clone(),
+            groups: authority.policy.groups_for(&credential.principal_id),
+        })
+    }
     pub fn from_config(config: &AuthConfig) -> Result<Self, String> {
         if config.mode == AuthMode::Disabled {
             return Ok(Self::default());
@@ -393,6 +440,16 @@ impl AuthzService {
             policy_epoch: authority.epoch,
         };
         Ok(Some(AuthContext {
+            live_service: Some(self.clone()),
+            traffic_session: headers
+                .get("x-llm-session-id")
+                .or_else(|| headers.get("x-llmconduit-session-id"))
+                .and_then(|v| v.to_str().ok())
+                .filter(|v| !v.is_empty() && v.len() <= 256)
+                .map(|v| {
+                    use sha2::{Digest, Sha256};
+                    format!("{:x}", Sha256::digest(v.as_bytes()))
+                }),
             auth_request_id: request_id.as_str().to_string(),
             key_id: identity.key_id.clone(),
             principal_id: identity.principal_id.clone(),
@@ -597,6 +654,8 @@ impl AuthzService {
             .admit()
             .map_err(|_| AuthError::PolicyUnavailable)?;
         Ok(Some(AuthContext {
+            live_service: Some(self.clone()),
+            traffic_session: None,
             auth_request_id: identity.request_id.as_str().to_string(),
             key_id: identity.key_id.clone(),
             principal_id: identity.principal_id.clone(),
@@ -1134,6 +1193,8 @@ mod tests {
             HashMap::new(),
         ));
         let context = AuthContext {
+            live_service: None,
+            traffic_session: None,
             auth_request_id: identity.request_id.as_str().to_string(),
             key_id: identity.key_id.clone(),
             principal_id: identity.principal_id.clone(),

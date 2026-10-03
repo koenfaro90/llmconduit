@@ -667,6 +667,32 @@ pub trait PersistenceStore: PersistenceWriter {
         since_ms: i64,
         limit: usize,
     ) -> StoreResult<Vec<MetricSample>>;
+    async fn record_recipe_evidence(
+        &self,
+        _record: crate::dashboard_recipe_evidence::Record,
+    ) -> StoreResult<()> {
+        Err("recipe evidence unsupported".into())
+    }
+    async fn recipe_evidence_history(
+        &self,
+        _recipe: Option<&str>,
+        _digest: Option<&str>,
+    ) -> StoreResult<Vec<MetricSample>> {
+        Err("recipe evidence unsupported".into())
+    }
+    async fn record_host_metrics(&self, _sample: MetricSample) -> StoreResult<()> {
+        Err("host history is unsupported by this store".into())
+    }
+    async fn host_metrics_history(
+        &self,
+        _endpoint: &str,
+        _since_ms: i64,
+        _until_ms: i64,
+        _bucket_ms: i64,
+    ) -> StoreResult<Vec<MetricSample>> {
+        Err("host history is unsupported by this store".into())
+    }
+
     async fn prune_backend_metrics(&self, before_ms: i64) -> StoreResult<()>;
 
     async fn list_users(&self) -> StoreResult<Vec<UserRecord>>;
@@ -3610,6 +3636,86 @@ impl PersistenceStore for SqlStore {
         ))
     }
 
+    async fn record_recipe_evidence(
+        &self,
+        record: crate::dashboard_recipe_evidence::Record,
+    ) -> StoreResult<()> {
+        let data = serde_json::to_string(&record).map_err(store_error)?;
+        if data.len() > 32768 {
+            return Err("recipe evidence exceeds bounds".into());
+        }
+        let sql = format!(
+            "INSERT INTO recipe_evidence (id,recipe_id,revision_digest,endpoint_id,kind,ts_ms,data) VALUES ({}) ON CONFLICT (id) DO NOTHING",
+            placeholders(self.postgres(), 7)
+        );
+        execute!(
+            self,
+            &sql,
+            record.id,
+            record.recipe_id,
+            record.revision_digest,
+            record.endpoint_id,
+            record.kind,
+            record.recorded_at_ms,
+            data
+        );
+        Ok(())
+    }
+    async fn recipe_evidence_history(
+        &self,
+        recipe: Option<&str>,
+        digest: Option<&str>,
+    ) -> StoreResult<Vec<MetricSample>> {
+        let p = self.postgres();
+        let sql = format!(
+            "SELECT recipe_id,ts_ms,data FROM (SELECT recipe_id,ts_ms,data,ROW_NUMBER() OVER (PARTITION BY recipe_id,revision_digest,endpoint_id,kind ORDER BY ts_ms DESC,id DESC) AS rank FROM recipe_evidence WHERE (recipe_id={} OR {}='') AND (revision_digest={} OR {}='')) AS evidence WHERE rank=1 ORDER BY ts_ms DESC LIMIT 1024",
+            placeholder(p, 1),
+            placeholder(p, 2),
+            placeholder(p, 3),
+            placeholder(p, 4)
+        );
+        let recipe = recipe.unwrap_or("");
+        let digest = digest.unwrap_or("");
+        Ok(fetch_all_decoded!(
+            self,
+            &sql,
+            [recipe, recipe, digest, digest],
+            decode_metric
+        ))
+    }
+    async fn record_host_metrics(&self, sample: MetricSample) -> StoreResult<()> {
+        let sql = format!(
+            "INSERT INTO host_metrics (backend, ts_ms, data) VALUES ({}) ON CONFLICT (backend, ts_ms) DO NOTHING",
+            placeholders(self.postgres(), 3)
+        );
+        execute!(self, &sql, sample.backend, sample.ts_ms, sample.data);
+        Ok(())
+    }
+    async fn host_metrics_history(
+        &self,
+        endpoint: &str,
+        since_ms: i64,
+        until_ms: i64,
+        bucket_ms: i64,
+    ) -> StoreResult<Vec<MetricSample>> {
+        let pg = self.postgres();
+        // Sampling is a presentation query: keep original observations on disk,
+        // choose one actual sample per chart pixel bucket, never invent averages.
+        let sql = format!(
+            "SELECT backend, ts_ms, data FROM (SELECT backend, ts_ms, data, ROW_NUMBER() OVER (PARTITION BY ts_ms / {} ORDER BY ts_ms DESC) AS rank FROM host_metrics WHERE backend = {} AND ts_ms >= {} AND ts_ms <= {}) AS samples WHERE rank = 1 ORDER BY ts_ms LIMIT 2000",
+            placeholder(pg, 1),
+            placeholder(pg, 2),
+            placeholder(pg, 3),
+            placeholder(pg, 4)
+        );
+        Ok(fetch_all_decoded!(
+            self,
+            &sql,
+            [bucket_ms.max(15_000), endpoint, since_ms, until_ms],
+            decode_metric
+        ))
+    }
+
     async fn prune_backend_metrics(&self, before_ms: i64) -> StoreResult<()> {
         let sql = format!(
             "DELETE FROM backend_metrics WHERE ts_ms < {}",
@@ -4209,6 +4315,88 @@ impl PersistenceQueue {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn stored_host_history_is_deduplicated_bounded_and_endpoint_isolated() {
+        use super::{MetricSample, PersistenceStore, SqlStore};
+        let store = SqlStore::connect_sqlite("sqlite::memory:").await.unwrap();
+        for (endpoint, ts) in [
+            ("a", 16000),
+            ("a", 20000),
+            ("a", 31000),
+            ("b", 22000),
+            ("a", 20000),
+        ] {
+            store
+                .record_host_metrics(MetricSample {
+                    backend: endpoint.into(),
+                    ts_ms: ts,
+                    data: format!("sample-{ts}"),
+                })
+                .await
+                .unwrap();
+        }
+        let samples = store
+            .host_metrics_history("a", 0, 60000, 15000)
+            .await
+            .unwrap();
+        assert_eq!(
+            samples.iter().map(|s| s.ts_ms).collect::<Vec<_>>(),
+            vec![20000, 31000]
+        );
+        assert_eq!(
+            store
+                .host_metrics_history("a", 21000, 60000, 15000)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            store
+                .host_metrics_history("missing", 0, 60000, 15000)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+    #[tokio::test]
+    async fn revision_evidence_is_immutable_and_preserves_old_revisions() {
+        use super::{PersistenceStore, SqlStore};
+        let store = SqlStore::connect_sqlite("sqlite::memory:").await.unwrap();
+        let mut record = crate::dashboard_recipe_evidence::Record {
+            id: "test".into(),
+            recipe_id: "model".into(),
+            revision_digest: "old".into(),
+            endpoint_id: "host".into(),
+            kind: "smoke".into(),
+            recorded_at_ms: 1,
+            data: serde_json::json!({"passed_requests":2}),
+        };
+        store.record_recipe_evidence(record.clone()).await.unwrap();
+        record.data = serde_json::json!({"passed_requests":0});
+        store.record_recipe_evidence(record.clone()).await.unwrap();
+        record.id = "test2".into();
+        record.revision_digest = "new".into();
+        store.record_recipe_evidence(record).await.unwrap();
+        let samples = store
+            .recipe_evidence_history(Some("model"), Some("old"))
+            .await
+            .unwrap();
+        assert_eq!(samples.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&samples[0].data).unwrap()["data"]["passed_requests"],
+            2
+        );
+        assert_eq!(
+            store
+                .recipe_evidence_history(Some("model"), None)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
     use super::*;
     use std::sync::Mutex;
     use tokio::sync::Notify;
@@ -4349,7 +4537,7 @@ mod tests {
         };
         assert_eq!(
             migration_versions,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
         );
         let request_indexes: Vec<String> = match &store.pool {
             SqlPool::Sqlite(pool) => sqlx::query(

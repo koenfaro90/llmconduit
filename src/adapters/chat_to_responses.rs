@@ -636,6 +636,7 @@ mod tests {
     use crate::models::chat::*;
     fn content_chunk(id: &str, text: &str) -> ChatCompletionChunk {
         ChatCompletionChunk {
+            metrics: None,
             id: id.to_string(),
             choices: vec![ChatChunkChoice {
                 index: 0,
@@ -656,6 +657,7 @@ mod tests {
 
     fn reasoning_chunk(id: &str, text: &str) -> ChatCompletionChunk {
         ChatCompletionChunk {
+            metrics: None,
             id: id.to_string(),
             choices: vec![ChatChunkChoice {
                 index: 0,
@@ -682,6 +684,7 @@ mod tests {
         arguments: Option<&str>,
     ) -> ChatCompletionChunk {
         ChatCompletionChunk {
+            metrics: None,
             id: id.to_string(),
             choices: vec![ChatChunkChoice {
                 index: 0,
@@ -714,6 +717,7 @@ mod tests {
         arguments: Option<&str>,
     ) -> ChatCompletionChunk {
         ChatCompletionChunk {
+            metrics: None,
             id: id.to_string(),
             choices: vec![ChatChunkChoice {
                 index: 0,
@@ -1312,6 +1316,7 @@ mod tests {
     fn test_reasoning_delta_alias_emitted() {
         let mut state = StreamState::default();
         let chunk = ChatCompletionChunk {
+            metrics: None,
             id: "c1".to_string(),
             choices: vec![ChatChunkChoice {
                 index: 0,
@@ -1345,6 +1350,7 @@ mod tests {
     fn nested_thinking_object_emits_reasoning_and_signature_delta() {
         let mut state = StreamState::default();
         let chunk = ChatCompletionChunk {
+            metrics: None,
             id: "c1".to_string(),
             choices: vec![ChatChunkChoice {
                 index: 0,
@@ -1401,6 +1407,7 @@ mod tests {
     fn test_refusal_delta_emitted() {
         let mut state = StreamState::default();
         let chunk = ChatCompletionChunk {
+            metrics: None,
             id: "c1".to_string(),
             choices: vec![ChatChunkChoice {
                 index: 0,
@@ -1427,6 +1434,7 @@ mod tests {
     fn test_finish_reason_captured() {
         let mut state = StreamState::default();
         let chunk = ChatCompletionChunk {
+            metrics: None,
             id: "c1".to_string(),
             choices: vec![ChatChunkChoice {
                 index: 0,
@@ -1453,6 +1461,7 @@ mod tests {
     fn test_stop_sequence_captured_from_string_stop_reason() {
         let mut state = StreamState::default();
         let chunk = ChatCompletionChunk {
+            metrics: None,
             id: "c1".to_string(),
             choices: vec![ChatChunkChoice {
                 index: 0,
@@ -1479,6 +1488,7 @@ mod tests {
     fn test_integer_stop_reason_does_not_become_stop_sequence() {
         let mut state = StreamState::default();
         let chunk = ChatCompletionChunk {
+            metrics: None,
             id: "c1".to_string(),
             choices: vec![ChatChunkChoice {
                 index: 0,

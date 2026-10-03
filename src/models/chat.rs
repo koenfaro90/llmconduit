@@ -186,10 +186,47 @@ pub struct ChatFunctionCall {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChatCompletionChunk {
+    #[serde(default, deserialize_with = "optional_engine_metrics")]
+    pub metrics: Option<EngineRequestMetrics>,
     pub id: String,
     pub choices: Vec<ChatChunkChoice>,
     #[serde(default)]
     pub usage: Option<ChunkUsage>,
+}
+
+// Provider telemetry must never break an otherwise valid response chunk.
+fn optional_engine_metrics<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<EngineRequestMetrics>, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value::<EngineRequestMetrics>(value)
+        .ok()
+        .filter(EngineRequestMetrics::valid))
+}
+/// Completed engine timing data; absent does not mean zero.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EngineRequestMetrics {
+    pub time_to_first_token_ms: Option<f64>,
+    pub generation_time_ms: Option<f64>,
+    pub queue_time_ms: Option<f64>,
+    pub mean_itl_ms: Option<f64>,
+    pub tokens_per_second: Option<f64>,
+}
+impl EngineRequestMetrics {
+    pub fn valid(&self) -> bool {
+        let values = [
+            self.time_to_first_token_ms,
+            self.generation_time_ms,
+            self.queue_time_ms,
+            self.mean_itl_ms,
+            self.tokens_per_second,
+        ];
+        values.iter().any(Option::is_some)
+            && values
+                .iter()
+                .all(|v| v.is_none_or(|v| v.is_finite() && v >= 0.0))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -342,6 +379,22 @@ pub struct ChatResponseMessage {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn engine_metrics_round_trip_and_malformed_metrics_do_not_break_chunks() {
+        let value = serde_json::json!({"queue_time_ms":12.0,"tokens_per_second":42.0});
+        let metrics: super::EngineRequestMetrics = serde_json::from_value(value).unwrap();
+        assert!(metrics.valid());
+        let decoded: super::EngineRequestMetrics =
+            serde_json::from_value(serde_json::to_value(&metrics).unwrap()).unwrap();
+        assert_eq!(decoded.queue_time_ms, Some(12.0));
+        assert_eq!(decoded.tokens_per_second, Some(42.0));
+        let chunk: super::ChatCompletionChunk = serde_json::from_value(
+            serde_json::json!({"id":"x","choices":[],"metrics":{"queue_time_ms":"unknown"}}),
+        )
+        .unwrap();
+        assert!(chunk.metrics.is_none());
+    }
+
     use super::*;
     use serde_json::Value;
 

@@ -49,6 +49,26 @@ pub struct AppError {
 }
 
 impl AppError {
+    pub(crate) fn affinity_spillover() -> Self {
+        Self {
+            failover: FailoverDisposition::FailoverNoCooldown,
+            ..Self::traffic(false, "preferred replica is busy")
+        }
+    }
+    pub fn traffic(caller_limit: bool, message: impl Into<String>) -> Self {
+        let message = message.into();
+        Self {
+            status: if caller_limit {
+                StatusCode::TOO_MANY_REQUESTS
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
+            },
+            client_message: message.clone(),
+            message,
+            code: Some("admission_rejected".into()),
+            failover: FailoverDisposition::Terminal,
+        }
+    }
     pub fn bad_request(message: impl Into<String>) -> Self {
         let msg = message.into();
         Self {
@@ -207,7 +227,13 @@ impl IntoResponse for AppError {
                 message: &self.client_message,
             },
         };
-        (status, Json(body)).into_response()
+        let mut response = (status, Json(body)).into_response();
+        if self.code.as_deref() == Some("admission_rejected") {
+            response
+                .headers_mut()
+                .insert("retry-after", axum::http::HeaderValue::from_static("1"));
+        }
+        response
     }
 }
 

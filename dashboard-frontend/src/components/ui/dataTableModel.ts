@@ -13,6 +13,7 @@ export interface DataTableColumn<Row> {
   required?: boolean;
   defaultHidden?: boolean;
   sortable?: boolean;
+  value?: (row: Row) => string | number | null | undefined;
 }
 
 export interface DataTableFilter<Row> {

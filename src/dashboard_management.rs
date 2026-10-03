@@ -22,6 +22,8 @@ const KEY: &str = "fleet_management_v1";
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 pub struct ManagementState {
     pub recipes: BTreeMap<String, Vec<RecipeRevision>>,
+    #[serde(default)]
+    pub archived_recipes: Vec<String>,
     pub deployments: BTreeMap<String, DesiredDeployment>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -50,6 +52,8 @@ pub struct SelectDeployment {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct DesiredDeployment {
     pub generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<crate::dashboard_deployment_groups::Placement>,
     pub endpoint_id: String,
     pub recipe_id: String,
     pub revision_digest: String,
@@ -78,7 +82,7 @@ pub struct ManagedReply {
 fn error(status: StatusCode, message: &str) -> Response {
     json_no_store(status, &serde_json::json!({"error":message}))
 }
-fn valid_id(id: &str) -> bool {
+pub(crate) fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 40
         && id.bytes().enumerate().all(|(i, b)| {
@@ -118,13 +122,34 @@ pub(crate) fn source_has_credentials(value: &serde_yaml::Value) -> bool {
         _ => false,
     }
 }
-fn validate_recipe(body: &CreateRecipeRevision) -> Result<String, &'static str> {
+pub(crate) fn validate_recipe(body: &CreateRecipeRevision) -> Result<String, &'static str> {
     if body.description.len() > 256 {
         return Err("description exceeds 256 bytes");
     }
     let Some(spec) = body.model_spec.as_object() else {
         return Err("model_spec must be an object");
     };
+    if let Some(ranks) = spec.get("distributed") {
+        let Some(ranks) = ranks.as_array() else {
+            return Err("distributed must be an array of rank specifications");
+        };
+        if spec.len() != 1
+            || !(2..=8).contains(&ranks.len())
+            || ranks
+                .iter()
+                .any(|r| r.get("distributed").is_some() || r.get("source_format").is_some())
+        {
+            return Err("distributed recipes require 2..8 executable ranks");
+        }
+        for rank in ranks {
+            validate_recipe(&CreateRecipeRevision {
+                description: String::new(),
+                model_spec: rank.clone(),
+            })?;
+        }
+        let bytes = serde_json::to_vec(spec).map_err(|_| "invalid distributed recipe")?;
+        return Ok(format!("{:x}", Sha256::digest(bytes)));
+    }
     // Historical sources stay editable centrally without pretending that an
     // unrendered Compose/RDMA recipe is an executable deployment.
     if let Some(format) = spec.get("source_format") {
@@ -292,7 +317,7 @@ pub async fn convert_recipe(
     if let Some(response) = authorize_mesh_mutation(&auth, &session, &headers).await {
         return response;
     }
-    match crate::recipe_import::convert(&body) {
+    match crate::recipe_import::convert_portable(&body) {
         Ok(mut preview) => {
             if preview.required_inputs.is_empty() {
                 let revision = CreateRecipeRevision {
@@ -319,7 +344,7 @@ pub(crate) async fn read(
     };
     Ok((raw, state))
 }
-async fn commit(
+pub(crate) async fn commit(
     store: &dyn PersistenceStore,
     expected: Option<&str>,
     state: &ManagementState,
@@ -559,6 +584,7 @@ pub async fn select_deployment(
         };
         let deployment = DesiredDeployment {
             generation,
+            placement: current.and_then(|d| d.placement.clone()),
             endpoint_id: body.endpoint_id.clone(),
             recipe_id: body.recipe_id.clone(),
             revision_digest: body.revision_digest.clone(),
@@ -639,7 +665,16 @@ async fn reconcile_deployment(
     let Ok(endpoint) = deployment.endpoint_id.parse() else {
         return;
     };
-    let mut model = revision.model_spec.clone();
+    let mut model = match crate::dashboard_deployment_groups::render(
+        &revision.model_spec,
+        deployment.placement.as_ref(),
+    ) {
+        Ok(model) => model,
+        Err(error) => {
+            tracing::warn!(%error, deployment_id=id,"invalid deployment placement");
+            return;
+        }
+    };
     model["id"] = Value::String(format!("managed-{id}"));
     let desired = serde_json::json!({"generation":deployment.generation,"recipe_digest":deployment.revision_digest,"desired_state":deployment.desired_state,"model":model});
     let result = admin
@@ -662,6 +697,25 @@ async fn reconcile_deployment(
             Some("host is unavailable or does not support managed deployments".to_string()),
         ),
     };
+    if observed
+        .as_ref()
+        .and_then(|v| v.pointer("/status/phase"))
+        .and_then(Value::as_str)
+        == Some("ready")
+    {
+        let record = crate::dashboard_recipe_evidence::Record {
+            id: format!("ready:{id}:{}", deployment.generation),
+            recipe_id: deployment.recipe_id.clone(),
+            revision_digest: deployment.revision_digest.clone(),
+            endpoint_id: deployment.endpoint_id.clone(),
+            kind: "ready".into(),
+            recorded_at_ms: chrono::Utc::now().timestamp_millis(),
+            data: serde_json::json!({"deployment_id":id,"generation":deployment.generation,"image":revision.model_spec.get("image"),"phase":"ready","inference_tested":false}),
+        };
+        if let Err(error) = store.record_recipe_evidence(record).await {
+            tracing::warn!(%error,"could not store recipe readiness evidence");
+        }
+    }
     for _ in 0..3 {
         let Ok((raw, mut latest)) = read(store.as_ref()).await else {
             break;
@@ -684,6 +738,25 @@ async fn reconcile_deployment(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn catalog_adoption_preserves_execution_and_rejects_changes_atomically() {
+        let mut state:ManagementState=serde_json::from_value(serde_json::json!({"recipes":{"old":[{"digest":"old","revision":1,"description":"old","model_spec":{"image":"same","command":["--host","10.0.0.1"]},"created_at_ms":1}],"portable":[{"digest":"new","revision":1,"description":"new","model_spec":{"image":"same","command":["--host","{{host_address}}"]},"created_at_ms":1}]},"deployments":{"dep":{"endpoint_id":"host","recipe_id":"old","revision_digest":"old","generation":1,"desired_state":"ready","updated_at_ms":1,"observed_at_ms":1,"observed":null,"error":null}}})).unwrap();
+        let body:CatalogAdoption=serde_json::from_value(serde_json::json!({"deployments":{"dep":{"expected_generation":1,"recipe_id":"portable","revision_digest":"new","placement":{"group_id":"group","rank":0,"addresses":["10.0.0.1"]}}},"archive_recipes":["old"]})).unwrap();
+        adopt_catalog(&mut state, &body).unwrap();
+        assert_eq!(state.deployments["dep"].generation, 2);
+        assert_eq!(state.archived_recipes, vec!["old"]);
+        let round_trip: ManagementState =
+            serde_json::from_value(serde_json::to_value(&state).unwrap()).unwrap();
+        assert_eq!(round_trip.archived_recipes, vec!["old"]);
+        assert_eq!(
+            round_trip.deployments["dep"].placement,
+            state.deployments["dep"].placement
+        );
+        let before = serde_json::to_value(&state).unwrap();
+        assert!(adopt_catalog(&mut state, &body).is_err());
+        assert_eq!(before, serde_json::to_value(&state).unwrap());
+    }
+
     use super::*;
     #[tokio::test]
     async fn management_compare_exchange_preserves_concurrent_updates() {
@@ -888,4 +961,143 @@ mod tests {
         .unwrap();
         assert!(!text.contains("literal-secret"));
     }
+}
+
+/// Change catalog ownership of existing runtime specifications without restarting
+/// containers. Equivalence is checked after rank/address rendering, atomically.
+#[derive(utoipa::ToSchema, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CatalogAdoption {
+    pub deployments: BTreeMap<String, AdoptRevision>,
+    #[serde(default)]
+    pub archive_recipes: Vec<String>,
+}
+#[derive(utoipa::ToSchema, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdoptRevision {
+    pub expected_generation: u64,
+    pub recipe_id: String,
+    pub revision_digest: String,
+    pub placement: Option<crate::dashboard_deployment_groups::Placement>,
+}
+fn adopt_catalog(state: &mut ManagementState, body: &CatalogAdoption) -> Result<(), String> {
+    if body.deployments.len() > 64 || body.archive_recipes.len() > 1024 {
+        return Err("catalog adoption exceeds bounds".into());
+    }
+    let mut changes = Vec::new();
+    for (id, b) in &body.deployments {
+        let d = state.deployments.get(id).ok_or("deployment not found")?;
+        if d.generation != b.expected_generation {
+            return Err("generation changed".into());
+        }
+        let old = state
+            .recipes
+            .get(&d.recipe_id)
+            .and_then(|r| r.iter().find(|r| r.digest == d.revision_digest))
+            .ok_or("old recipe missing")?;
+        let new = state
+            .recipes
+            .get(&b.recipe_id)
+            .and_then(|r| r.iter().find(|r| r.digest == b.revision_digest))
+            .ok_or("new recipe missing")?;
+        let render = crate::dashboard_deployment_groups::render;
+        if render(&old.model_spec, d.placement.as_ref())?
+            != render(&new.model_spec, b.placement.as_ref())?
+        {
+            return Err("runtime specifications differ; unload before changing execution".into());
+        }
+        if let Some(p) = &b.placement
+            && (!valid_id(&p.group_id) || p.group_id.len() > 32)
+        {
+            return Err("invalid placement group".into());
+        }
+        let mut d = d.clone();
+        d.generation = d.generation.checked_add(1).ok_or("generation exhausted")?;
+        d.observed_at_ms = None;
+        d.observed = None;
+        d.error = None;
+        d.recipe_id = b.recipe_id.clone();
+        d.revision_digest = b.revision_digest.clone();
+        d.placement = b.placement.clone();
+        changes.push((id.clone(), d));
+    }
+    let mut next = state.clone();
+    for (id, d) in changes {
+        next.deployments.insert(id, d);
+    }
+    for id in &body.archive_recipes {
+        if !next.recipes.contains_key(id) || next.deployments.values().any(|d| d.recipe_id == *id) {
+            return Err("cannot archive a referenced or missing recipe".into());
+        }
+        if !next.archived_recipes.contains(id) {
+            next.archived_recipes.push(id.clone());
+        }
+    }
+    for (id, d) in &next.deployments {
+        if let Some(p) = &d.placement {
+            let peers = next
+                .deployments
+                .values()
+                .filter(|x| {
+                    x.placement
+                        .as_ref()
+                        .is_some_and(|v| v.group_id == p.group_id)
+                })
+                .collect::<Vec<_>>();
+            if peers.len() != p.addresses.len()
+                || peers.iter().any(|x| {
+                    x.recipe_id != d.recipe_id
+                        || x.revision_digest != d.revision_digest
+                        || x.placement.as_ref().unwrap().addresses != p.addresses
+                })
+                || peers
+                    .iter()
+                    .filter(|x| x.placement.as_ref().unwrap().rank == p.rank)
+                    .count()
+                    != 1
+            {
+                return Err(format!("incomplete or inconsistent placement for {id}"));
+            }
+        }
+    }
+    *state = next;
+    Ok(())
+}
+#[utoipa::path(post,path="/dashboard/api/management/adopt",tag="dashboard",request_body=CatalogAdoption,responses((status=200,body=serde_json::Value),(status=403,description="Admin authorization required"),(status=409,description="Revision or state conflict")))]
+pub async fn adopt(
+    State(gateway): State<Arc<Gateway>>,
+    Extension(auth): Extension<Arc<DashboardAuth>>,
+    Extension(session): Extension<AuthSession>,
+    headers: HeaderMap,
+    Json(body): Json<CatalogAdoption>,
+) -> Response {
+    if let Some(r) = authorize_mesh_mutation(&auth, &session, &headers).await {
+        return r;
+    }
+    let Some(store) = gateway.persistence_store() else {
+        return json_no_store(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &serde_json::json!({"error":"SQL required"}),
+        );
+    };
+    for _ in 0..4 {
+        let Ok((raw, mut state)) = read(store.as_ref()).await else {
+            return json_no_store(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &serde_json::json!({"error":"catalog unavailable"}),
+            );
+        };
+        if let Err(error) = adopt_catalog(&mut state, &body) {
+            return json_no_store(StatusCode::CONFLICT, &serde_json::json!({"error":error}));
+        }
+        match commit(store.as_ref(), raw.as_deref(), &state).await {
+            Ok(true) => return json_no_store(StatusCode::OK, &state),
+            Ok(false) => continue,
+            Err(_) => break,
+        }
+    }
+    json_no_store(
+        StatusCode::CONFLICT,
+        &serde_json::json!({"error":"catalog changed; retry"}),
+    )
 }

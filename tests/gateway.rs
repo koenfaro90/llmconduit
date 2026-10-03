@@ -4581,6 +4581,7 @@ async fn response_completed_includes_usage_from_upstream() {
         .push_response(vec![
             Ok(content_chunk("chat-1", "hello")),
             Ok(ChatCompletionChunk {
+                metrics: None,
                 id: "chat-1".to_string(),
                 choices: vec![],
                 usage: Some(ChunkUsage {
@@ -4855,6 +4856,7 @@ async fn response_completed_accumulates_usage_across_web_search_rounds() {
                 r#"{"query":"rust async"}"#,
             )),
             Ok(ChatCompletionChunk {
+                metrics: None,
                 id: "chat-1".to_string(),
                 choices: vec![],
                 usage: Some(ChunkUsage {
@@ -4873,6 +4875,7 @@ async fn response_completed_accumulates_usage_across_web_search_rounds() {
         .push_response(vec![
             Ok(content_chunk("chat-2", "found it")),
             Ok(ChatCompletionChunk {
+                metrics: None,
                 id: "chat-2".to_string(),
                 choices: vec![],
                 usage: Some(ChunkUsage {
@@ -10138,6 +10141,7 @@ fn user_message(text: &str) -> ResponseItem {
 
 fn content_chunk(id: &str, content: &str) -> ChatCompletionChunk {
     ChatCompletionChunk {
+        metrics: None,
         id: id.to_string(),
         choices: vec![ChatChunkChoice {
             index: 0,
@@ -10161,6 +10165,7 @@ fn content_chunk(id: &str, content: &str) -> ChatCompletionChunk {
 /// F1c finding-#3 test to assert the capture artifact maps `length` → `incomplete`.
 fn length_finish_chunk(id: &str) -> ChatCompletionChunk {
     ChatCompletionChunk {
+        metrics: None,
         id: id.to_string(),
         choices: vec![ChatChunkChoice {
             index: 0,
@@ -10181,6 +10186,7 @@ fn length_finish_chunk(id: &str) -> ChatCompletionChunk {
 
 fn reasoning_chunk(id: &str, reasoning: &str) -> ChatCompletionChunk {
     ChatCompletionChunk {
+        metrics: None,
         id: id.to_string(),
         choices: vec![ChatChunkChoice {
             index: 0,
@@ -10201,6 +10207,7 @@ fn reasoning_chunk(id: &str, reasoning: &str) -> ChatCompletionChunk {
 
 fn nested_thinking_chunk(id: &str, thinking: &str, signature: &str) -> ChatCompletionChunk {
     ChatCompletionChunk {
+        metrics: None,
         id: id.to_string(),
         choices: vec![ChatChunkChoice {
             index: 0,
@@ -10227,6 +10234,7 @@ fn nested_thinking_chunk(id: &str, thinking: &str, signature: &str) -> ChatCompl
 
 fn tool_call_chunk(id: &str, call_id: &str, name: &str, arguments: &str) -> ChatCompletionChunk {
     ChatCompletionChunk {
+        metrics: None,
         id: id.to_string(),
         choices: vec![ChatChunkChoice {
             index: 0,
@@ -10255,6 +10263,7 @@ fn tool_call_chunk(id: &str, call_id: &str, name: &str, arguments: &str) -> Chat
 
 fn legacy_function_call_chunk(id: &str, name: &str, arguments: &str) -> ChatCompletionChunk {
     ChatCompletionChunk {
+        metrics: None,
         id: id.to_string(),
         choices: vec![ChatChunkChoice {
             index: 0,
@@ -10285,6 +10294,7 @@ fn usage_chunk(
     reasoning_tokens: Option<u64>,
 ) -> ChatCompletionChunk {
     ChatCompletionChunk {
+        metrics: None,
         id: id.to_string(),
         usage: Some(ChunkUsage {
             prompt_tokens: prompt_tokens.try_into().expect("prompt_tokens fits in i64"),
@@ -14444,6 +14454,7 @@ fn e1_tool_chunk(
     finish: bool,
 ) -> ChatCompletionChunk {
     ChatCompletionChunk {
+        metrics: None,
         id: id.to_string(),
         choices: vec![ChatChunkChoice {
             index: 0,

@@ -16,13 +16,14 @@ describe('ProvidersView', () => {
       executable: [{ digest: 'b'.repeat(64), revision: 1, description: 'Executable', model_spec: { image: 'image@sha256:' + 'b'.repeat(64) }, created_at_ms: 1 }],
     }, deployments: {} });
     renderWithQuery(<RecipeManagement nodes={[]} mutationsEnabled />);
+    fireEvent.click(screen.getByRole('button', {name:'Import Compose / Sparkrun'}));
     const row = (await screen.findByText('archived')).closest('tr')!;
-    fireEvent.click(within(row).getByRole('button', { name: 'Edit revision' }));
+    fireEvent.click(within(row).getByRole('button', { name: 'Review source' }));
     expect(screen.getByLabelText('Recipe ID')).toHaveValue('archived');
     expect(screen.getByLabelText('Recipe format')).toHaveValue('compose');
     expect(screen.getByLabelText('Recipe specification')).toHaveValue(source.source_content);
     expect(within(screen.getByLabelText('Recipe revision')).queryByRole('option', { name: /archived/ })).toBeNull();
-    expect(within(screen.getByLabelText('Recipe revision')).getByRole('option', { name: /executable/ })).toBeInTheDocument();
+    expect(within(screen.getByLabelText('Recipe revision')).getByRole('option', { name: /^executable · revision/ })).toBeInTheDocument();
   });
   it('renders exact advertised models, operational capacity, access limits, and cache metrics', async () => {
     renderWithQuery(<ProvidersView />);

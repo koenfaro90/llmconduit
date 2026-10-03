@@ -23,6 +23,7 @@
     "d3-force": "^3.0.0",
     "d3-sankey": "^0.12.3",
     "highlight.js": "^11.11.1",
+    "monaco-editor": "^0.57.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "uplot": "^1.6.31",

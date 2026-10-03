@@ -581,6 +581,7 @@ pub fn user_message(text: &str) -> ResponseItem {
 
 pub fn content_chunk(id: &str, content: &str) -> ChatCompletionChunk {
     ChatCompletionChunk {
+        metrics: None,
         id: id.to_string(),
         choices: vec![ChatChunkChoice {
             index: 0,
@@ -601,6 +602,7 @@ pub fn content_chunk(id: &str, content: &str) -> ChatCompletionChunk {
 
 pub fn finish_chunk(id: &str, finish_reason: &str) -> ChatCompletionChunk {
     ChatCompletionChunk {
+        metrics: None,
         id: id.to_string(),
         choices: vec![ChatChunkChoice {
             index: 0,
@@ -621,6 +623,7 @@ pub fn finish_chunk(id: &str, finish_reason: &str) -> ChatCompletionChunk {
 
 pub fn reasoning_chunk(id: &str, reasoning: &str) -> ChatCompletionChunk {
     ChatCompletionChunk {
+        metrics: None,
         id: id.to_string(),
         choices: vec![ChatChunkChoice {
             index: 0,
@@ -641,6 +644,7 @@ pub fn reasoning_chunk(id: &str, reasoning: &str) -> ChatCompletionChunk {
 
 pub fn nested_thinking_chunk(id: &str, thinking: &str, signature: &str) -> ChatCompletionChunk {
     ChatCompletionChunk {
+        metrics: None,
         id: id.to_string(),
         choices: vec![ChatChunkChoice {
             index: 0,
@@ -669,6 +673,7 @@ pub fn tool_call_chunk(
     arguments: &str,
 ) -> ChatCompletionChunk {
     ChatCompletionChunk {
+        metrics: None,
         id: id.to_string(),
         choices: vec![ChatChunkChoice {
             index: 0,
@@ -705,6 +710,7 @@ pub fn usage_chunk(
     total_tokens: u64,
 ) -> ChatCompletionChunk {
     ChatCompletionChunk {
+        metrics: None,
         id: id.to_string(),
         usage: Some(ChunkUsage {
             prompt_tokens: prompt_tokens.try_into().expect("prompt_tokens fits in i64"),

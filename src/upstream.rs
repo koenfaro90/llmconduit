@@ -414,6 +414,7 @@ type CandidatePredicate =
 #[derive(Clone, Default)]
 pub struct AuthorizationScope {
     predicate: Option<Arc<CandidatePredicate>>,
+    pub traffic: Option<Arc<crate::traffic::TrafficRequest>>,
 }
 
 impl std::fmt::Debug for AuthorizationScope {
@@ -435,6 +436,7 @@ impl AuthorizationScope {
     {
         Self {
             predicate: Some(Arc::new(predicate)),
+            traffic: None,
         }
     }
 
@@ -753,6 +755,7 @@ pub type DynUpstreamClient = Arc<dyn UpstreamClient>;
 
 #[derive(Debug, Clone)]
 pub struct ReqwestUpstreamClient {
+    traffic: crate::traffic::TrafficController,
     client: reqwest::Client,
     base_url: Url,
     api_key: Option<String>,
@@ -851,6 +854,7 @@ impl std::fmt::Debug for FailoverUpstreamProvider {
 
 #[derive(Debug, Clone)]
 pub struct FailoverUpstreamClient {
+    traffic: crate::traffic::TrafficController,
     providers: Vec<FailoverUpstreamProvider>,
     cooldown: Duration,
     states: Arc<Mutex<Vec<ProviderCooldownState>>>,
@@ -1054,6 +1058,8 @@ impl ModelRouteSpec {
 
 #[derive(Debug, Clone)]
 pub struct RoutingUpstreamClient {
+    traffic: crate::traffic::TrafficController,
+    traffic_pools: Arc<Mutex<HashMap<String, FailoverUpstreamClient>>>,
     providers: Vec<RoutingUpstreamProvider>,
     /// Synthetic providers backing ad-hoc model routes (G7), indexed by
     /// `ModelRouteSpec::route_provider_index`. Kept separate from catalog
@@ -1352,6 +1358,7 @@ impl ReqwestUpstreamClient {
             // Default to the no-op store (D2); the DI root threads the live one in
             // via `with_flow_store` only when the debug UI is enabled.
             flow_store: crate::dashboard_flow::DashboardFlowStore::disabled(),
+            traffic: crate::traffic::TrafficController::new(),
             // Default OFF: a leaf only tags `provider = "primary"` when the DI root
             // marks it the bare/direct engine upstream via `into_bare_primary`.
             tag_primary_provider: false,
@@ -1396,6 +1403,11 @@ impl ReqwestUpstreamClient {
     /// The configured upstream base URL as a string, for the D4 `ProviderHealth`
     /// DTO (a REQUIRED, non-null field). The leaf is the single owner of the
     /// concrete `base_url`, so the failover/routing layers read it from here.
+    pub fn with_traffic(mut self, traffic: crate::traffic::TrafficController) -> Self {
+        self.traffic = traffic;
+        self
+    }
+
     fn base_url_string(&self) -> String {
         self.base_url.to_string()
     }
@@ -1443,8 +1455,13 @@ impl ReqwestUpstreamClient {
         &self,
         url: &Url,
         request: &ChatCompletionRequest,
+        traffic_id: Option<&str>,
     ) -> AppResult<reqwest::Response> {
-        self.with_auth(self.client.post(url.clone()))
+        let mut builder = self.with_auth(self.client.post(url.clone()));
+        if let Some(id) = traffic_id {
+            builder = builder.header("X-Request-Id", id);
+        }
+        builder
             .json(request)
             .send()
             .await
@@ -1479,6 +1496,7 @@ impl ReqwestUpstreamClient {
         url: &Url,
         request: &ChatCompletionRequest,
         response_id: Option<&str>,
+        traffic_id: Option<&str>,
         capture: Option<&Arc<TurnCaptureState>>,
         persistence: Option<&Arc<crate::flow_persistence::PersistenceCapture>>,
     ) -> AppResult<reqwest::Response> {
@@ -1513,7 +1531,7 @@ impl ReqwestUpstreamClient {
             // failover, and server-tool rounds are final-attempt-wins.
             persistence.stage_upstream_request(request);
         }
-        let response = self.send_chat_request(url, request).await;
+        let response = self.send_chat_request(url, request, traffic_id).await;
         if response.is_ok()
             && let Some(persistence) = persistence
         {
@@ -1729,11 +1747,13 @@ impl ReqwestUpstreamClient {
     /// wrap the result for gap-03 attempt recording WITHOUT duplicating the recording
     /// across this method's several return sites. `response_id` keys the D2 on-wire body
     /// capture (already performed by `logged_send_chat_request`).
+    #[allow(clippy::too_many_arguments)]
     async fn dispatch_chat_stream(
         &self,
         url: &Url,
         request: ChatCompletionRequest,
         response_id: Option<&str>,
+        traffic_id: Option<&str>,
         serving: Option<&Arc<ServingToken>>,
         capture: Option<&Arc<TurnCaptureState>>,
         persistence: Option<&Arc<crate::flow_persistence::PersistenceCapture>>,
@@ -1760,7 +1780,7 @@ impl ReqwestUpstreamClient {
         // leaf client so the failover/routing layers never see a context-limit
         // error as a provider failure (it is a same-provider shrink-and-retry).
         let response = self
-            .logged_send_chat_request(url, &request, response_id, capture, persistence)
+            .logged_send_chat_request(url, &request, response_id, traffic_id, capture, persistence)
             .await?;
         // Gap 03 round-1 review (F1): the upstream response HEADERS just arrived — this is
         // the TRUE on-wire first-byte time. Stamp it BEFORE inspecting the status, so a
@@ -1809,7 +1829,14 @@ impl ReqwestUpstreamClient {
             // `response_id`; F1d is last-writer-wins so this overwrites the first
             // oversized attempt's write — AC-10).
             let retry_response = self
-                .logged_send_chat_request(url, &retried, response_id, capture, persistence)
+                .logged_send_chat_request(
+                    url,
+                    &retried,
+                    response_id,
+                    traffic_id,
+                    capture,
+                    persistence,
+                )
                 .await?;
             let retry_status = retry_response.status();
             if retry_status.is_success() {
@@ -1914,6 +1941,32 @@ impl UpstreamClient for ReqwestUpstreamClient {
         &self,
         backend: &BackendChatRequest,
     ) -> AppResult<UpstreamStream> {
+        let traffic_request = backend.authorization.traffic.clone().unwrap_or_else(|| {
+            crate::traffic::TrafficRequest::new(
+                crate::traffic::Identity {
+                    key: "anonymous".into(),
+                    user: "anonymous".into(),
+                    groups: vec![],
+                },
+                backend.request.model.clone(),
+                None,
+                0,
+            )
+        });
+        if self.traffic.enabled() {
+            traffic_request.set_bytes(crate::traffic::encoded_size(&backend.request));
+        }
+        let traffic_lease = self
+            .traffic
+            .acquire(
+                traffic_request,
+                self.base_url_string(),
+                backend
+                    .authorization_provider
+                    .clone()
+                    .unwrap_or_else(|| "primary".into()),
+            )
+            .await?;
         let url = self.endpoint_url("chat/completions")?;
         // Finalize at THIS leaf: the single point that sees the FINAL provider
         // model after routing/failover/exposed-alias remap, with provider kwargs
@@ -2002,6 +2055,7 @@ impl UpstreamClient for ReqwestUpstreamClient {
                     &url,
                     request,
                     response_id.as_deref(),
+                    traffic_lease.as_ref().map(|l| l.wire_id()),
                     serving.as_ref(),
                     capture.as_ref(),
                     persistence.as_ref(),
@@ -2016,12 +2070,15 @@ impl UpstreamClient for ReqwestUpstreamClient {
                     let header_byte_ms = serving
                         .as_ref()
                         .and_then(|serving| serving.take_attempt_header_byte());
-                    Ok(Self::record_served_attempt_on_first_byte(
-                        serving,
-                        stream,
-                        attempt_start_ms,
-                        attempt_model,
-                        header_byte_ms,
+                    Ok(crate::traffic::hold_chat_stream(
+                        Self::record_served_attempt_on_first_byte(
+                            serving,
+                            stream,
+                            attempt_start_ms,
+                            attempt_model,
+                            header_byte_ms,
+                        ),
+                        traffic_lease,
                     ))
                 }
                 Err(err) => {
@@ -2041,15 +2098,18 @@ impl UpstreamClient for ReqwestUpstreamClient {
             };
         }
 
-        self.dispatch_chat_stream(
-            &url,
-            request,
-            response_id.as_deref(),
-            serving.as_ref(),
-            capture.as_ref(),
-            persistence.as_ref(),
-        )
-        .await
+        let stream = self
+            .dispatch_chat_stream(
+                &url,
+                request,
+                response_id.as_deref(),
+                traffic_lease.as_ref().map(|l| l.wire_id()),
+                serving.as_ref(),
+                capture.as_ref(),
+                persistence.as_ref(),
+            )
+            .await?;
+        Ok(crate::traffic::hold_chat_stream(stream, traffic_lease))
     }
 
     async fn count_tokens(&self, backend: &BackendChatRequest) -> AppResult<Option<u64>> {
@@ -2153,6 +2213,33 @@ impl UpstreamClient for ReqwestUpstreamClient {
         request: ProxyCompletionsRequest,
     ) -> AppResult<reqwest::Response> {
         let model = request.model().unwrap_or_default();
+        let traffic_request = request.authorization.traffic.clone().unwrap_or_else(|| {
+            crate::traffic::TrafficRequest::new(
+                crate::traffic::Identity {
+                    key: "anonymous".into(),
+                    user: "anonymous".into(),
+                    groups: vec![],
+                },
+                model.clone(),
+                None,
+                request.body.len(),
+            )
+        });
+        traffic_request.set_bytes(request.body.len());
+        let traffic_lease = if request.endpoint == InferenceEndpoint::VideoJob {
+            None
+        } else {
+            self.traffic
+                .acquire(
+                    traffic_request,
+                    self.base_url_string(),
+                    request
+                        .authorization_provider
+                        .clone()
+                        .unwrap_or_else(|| "primary".into()),
+                )
+                .await?
+        };
         request.authorization.ensure_candidate(
             request
                 .authorization_provider
@@ -2173,10 +2260,19 @@ impl UpstreamClient for ReqwestUpstreamClient {
             ));
         }
         let url = self.endpoint_url(&path)?;
+        let mut upstream_headers = request.headers.clone();
+        if traffic_lease.is_some() {
+            upstream_headers.remove("x-request-id");
+        }
         let outbound = copy_proxy_request_headers(
             self.client.request(request.method.clone(), url),
-            &request.headers,
+            &upstream_headers,
         );
+        let outbound = if let Some(lease) = traffic_lease.as_ref() {
+            outbound.header("X-Request-Id", lease.wire_id())
+        } else {
+            outbound
+        };
         let outbound = if request.method == reqwest::Method::POST {
             outbound.body(request.body)
         } else {
@@ -2203,7 +2299,18 @@ impl UpstreamClient for ReqwestUpstreamClient {
                     .insert(HeaderName::from_static(name), value);
             }
         }
-        Ok(response)
+        if request.endpoint == InferenceEndpoint::Videos && response.status().is_success() {
+            if let Some(lease) = traffic_lease {
+                let request_id = lease.request().id.clone();
+                response.headers_mut().insert(
+                    "x-llmconduit-traffic-request",
+                    HeaderValue::from_str(&request_id).unwrap(),
+                );
+                self.traffic.hold_job(request_id, lease);
+            }
+            return Ok(response);
+        }
+        Ok(crate::traffic::hold_proxy_response(response, traffic_lease))
     }
 
     fn provider_base_url(&self) -> String {
@@ -2212,6 +2319,31 @@ impl UpstreamClient for ReqwestUpstreamClient {
 }
 
 impl FailoverUpstreamClient {
+    pub fn with_traffic(mut self, traffic: crate::traffic::TrafficController) -> Self {
+        self.traffic = traffic;
+        self
+    }
+    fn traffic_order(
+        &self,
+        indices: Vec<usize>,
+        request: Option<&crate::traffic::TrafficRequest>,
+    ) -> Vec<usize> {
+        let Some(request) = request else {
+            return indices;
+        };
+        let candidates = indices
+            .iter()
+            .map(|i| {
+                (
+                    *i,
+                    self.providers[*i].name.clone(),
+                    self.providers[*i].client.provider_base_url(),
+                )
+            })
+            .collect::<Vec<_>>();
+        self.traffic.order(request, &candidates)
+    }
+
     fn provider_is_authorized(&self, provider_index: usize, backend: &BackendChatRequest) -> bool {
         self.providers.get(provider_index).is_some_and(|provider| {
             let model = provider
@@ -2251,6 +2383,7 @@ impl FailoverUpstreamClient {
     pub fn new(providers: Vec<FailoverUpstreamProvider>, cooldown: Duration) -> Self {
         let states = vec![ProviderCooldownState::default(); providers.len()];
         Self {
+            traffic: crate::traffic::TrafficController::new(),
             providers,
             cooldown,
             states: Arc::new(Mutex::new(states)),
@@ -2591,6 +2724,11 @@ impl FailoverUpstreamClient {
         backend: &BackendChatRequest,
         request_timeout: Duration,
     ) -> AppResult<UpstreamStream> {
+        let provider_indices =
+            self.traffic_order(provider_indices, backend.authorization.traffic.as_deref());
+        if provider_indices.is_empty() {
+            return Err(AppError::traffic(false, "pinned replica is unavailable"));
+        }
         let mut last_error = None;
         for provider_index in provider_indices {
             let provider = &self.providers[provider_index];
@@ -2907,6 +3045,14 @@ impl FailoverUpstreamClient {
         provider_indices: Vec<usize>,
         request: ProxyCompletionsRequest,
     ) -> AppResult<reqwest::Response> {
+        let provider_indices = if request.pinned_base_url.is_some() {
+            provider_indices
+        } else {
+            self.traffic_order(provider_indices, request.authorization.traffic.as_deref())
+        };
+        if provider_indices.is_empty() {
+            return Err(AppError::traffic(false, "pinned replica is unavailable"));
+        }
         let mut last_error = None;
         for provider_index in provider_indices {
             let provider = &self.providers[provider_index];
@@ -2957,10 +3103,13 @@ impl FailoverUpstreamClient {
                     if matches!(
                         request.endpoint,
                         InferenceEndpoint::Videos | InferenceEndpoint::VideoJob
-                    ) {
+                    ) || err.failover_disposition() == FailoverDisposition::Terminal
+                    {
                         return Err(err);
                     }
-                    self.mark_failure(provider_index, &err);
+                    if err.failover_disposition() == FailoverDisposition::Failover {
+                        self.mark_failure(provider_index, &err);
+                    }
                     last_error = Some(err);
                 }
             }
@@ -2979,6 +3128,17 @@ impl FailoverUpstreamClient {
 }
 
 impl RoutingUpstreamClient {
+    pub fn with_traffic(mut self, traffic: crate::traffic::TrafficController) -> Self {
+        self.traffic = traffic.clone();
+        for provider in &mut self.providers {
+            provider.client.traffic = traffic.clone();
+        }
+        for provider in &mut self.route_providers {
+            provider.client.traffic = traffic.clone();
+        }
+        self
+    }
+
     pub fn new(providers: Vec<RoutingUpstreamProvider>) -> Self {
         Self::with_routes(providers, Vec::new(), Vec::new())
     }
@@ -2997,7 +3157,71 @@ impl RoutingUpstreamClient {
             routes,
             catalog: Arc::new(AsyncMutex::new(None)),
             catalog_meta: Arc::new(Mutex::new(Arc::new(CatalogMeta::default()))),
+            traffic: crate::traffic::TrafficController::new(),
+            traffic_pools: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    fn replica_pool(
+        &self,
+        catalog: &RoutingModelCatalog,
+        requested: &str,
+    ) -> Option<FailoverUpstreamClient> {
+        let replicas = self.traffic.replicas(requested)?;
+        let (RoutingResolution::Catalog(resolution), _) = catalog.resolve(requested)? else {
+            return None;
+        };
+        if !matches!(resolution.target, RoutingModelTarget::Primary) {
+            return None;
+        }
+        let mut providers = Vec::new();
+        for (i, entry) in catalog.provider_catalogs.iter().enumerate() {
+            let provider = &self.providers[i];
+            let url = provider.primary_client.provider_base_url();
+            if !replicas.contains(&provider.name)
+                && !replicas
+                    .iter()
+                    .any(|r| r.trim_end_matches('/') == url.trim_end_matches('/'))
+            {
+                continue;
+            }
+            if entry.candidates.iter().any(|c| {
+                c.model_id == resolution.model_id && matches!(c.target, RoutingModelTarget::Primary)
+            }) {
+                let mut leg = provider.client.providers[0].clone();
+                leg.upstream_model = Some(resolution.model_id.clone());
+                providers.push(leg);
+            }
+        }
+        if providers.is_empty() {
+            return None;
+        }
+        let key = format!(
+            "{}:{}",
+            resolution.model_id,
+            providers
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let mut cache = self.traffic_pools.lock().unwrap();
+        if let Some(pool) = cache.get(&key) {
+            return Some(pool.clone());
+        }
+        if cache.len() >= 256 {
+            cache.clear();
+        }
+        let cooldown = self
+            .providers
+            .iter()
+            .map(|p| p.client.cooldown)
+            .max()
+            .unwrap_or_default();
+        let pool =
+            FailoverUpstreamClient::new(providers, cooldown).with_traffic(self.traffic.clone());
+        cache.insert(key, pool.clone());
+        Some(pool)
     }
 
     /// Look up a synthetic route provider by index, mapping an out-of-range
@@ -3629,6 +3853,33 @@ impl UpstreamClient for RoutingUpstreamClient {
                 candidates: Vec::new(),
             };
         };
+        if let Some(pool) = self.replica_pool(&catalog, requested_model) {
+            let candidates = pool
+                .providers
+                .iter()
+                .map(|leg| {
+                    let model = leg
+                        .upstream_model
+                        .clone()
+                        .unwrap_or_else(|| requested_model.to_owned());
+                    let context_limit = self
+                        .providers
+                        .iter()
+                        .position(|p| p.name == leg.name)
+                        .and_then(|i| {
+                            catalog.provider_catalogs[i]
+                                .context_limit_by_id
+                                .get(&model)
+                                .copied()
+                        });
+                    BackendCandidate {
+                        model,
+                        context_limit,
+                    }
+                })
+                .collect();
+            return BackendCandidatePlan { candidates };
+        }
         let Some((resolution, _kind)) = catalog.resolve(requested_model) else {
             return BackendCandidatePlan {
                 candidates: Vec::new(),
@@ -3763,6 +4014,18 @@ impl UpstreamClient for RoutingUpstreamClient {
             );
             err
         })?;
+        if let Some(pool) = self.replica_pool(
+            &catalog,
+            backend
+                .authorization
+                .traffic
+                .as_ref()
+                .map_or(backend.request.model.as_str(), |r| r.model.as_str()),
+        ) {
+            return pool
+                .stream_chat_completion_with_timeout(backend, request_timeout)
+                .await;
+        }
         let (resolution, match_kind) = catalog.resolve(&backend.request.model).ok_or_else(|| {
             tracing::warn!(
                 requested_model = %backend.request.model,
@@ -3879,6 +4142,19 @@ impl UpstreamClient for RoutingUpstreamClient {
     ) -> AppResult<reqwest::Response> {
         let catalog = self.load_catalog().await?;
         let requested_model = request.model().unwrap_or_default();
+        if request.pinned_base_url.is_none()
+            && let Some(pool) = self.replica_pool(
+                &catalog,
+                request
+                    .authorization
+                    .traffic
+                    .as_ref()
+                    .map_or(requested_model.as_str(), |r| r.model.as_str()),
+            )
+        {
+            return pool.proxy_completions(request).await;
+        }
+
         let (resolution, match_kind) = catalog.resolve(&requested_model).ok_or_else(|| {
             tracing::warn!(
                 requested_model = %requested_model,

@@ -1,5 +1,6 @@
 import type { DesiredDeployment, ManagementState, MeshNode, RecipeRevision } from '../../api/types';
 export function servingModel(spec: Record<string, unknown>, fallback: string): string {
+  if (Array.isArray(spec.distributed) && spec.distributed[0] && typeof spec.distributed[0] === 'object') return servingModel(spec.distributed[0] as Record<string,unknown>,fallback);
   const env = spec.environment as Record<string, unknown> | undefined;
   if (typeof env?.SERVED_MODEL_NAME === 'string') return env.SERVED_MODEL_NAME;
   const args = Array.isArray(spec.command) ? spec.command.map(String) : [];

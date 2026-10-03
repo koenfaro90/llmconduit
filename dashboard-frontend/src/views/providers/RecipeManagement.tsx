@@ -1,101 +1,68 @@
-import { useState, type FormEvent } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { getConnection } from '../../api/connection';
-import type { MeshNode, SelectDeployment } from '../../api/types';
-import { Panel } from '../../components/ui/Panel';
-import { Button } from '../../components/ui/Button';
-import { RecipeImport } from './RecipeImport';
-import { DataTable } from '../../components/ui/DataTable';
-const key = ['management'] as const;
-const input = 'rounded border border-line bg-bg px-2 py-1.5 text-xs text-text';
-export function RecipeManagement({ nodes, mutationsEnabled, mode = 'all' }: { nodes: MeshNode[]; mutationsEnabled: boolean; mode?: 'all' | 'recipes' | 'deployment' }) {
-  const { client } = getConnection();
-  const cache = useQueryClient();
-  const state = useQuery({ queryKey: key, queryFn: () => client.management(), retry: false, refetchInterval: 5_000 });
-  const [recipeId, setRecipeId] = useState('');
-  const [description, setDescription] = useState('');
-  const [format, setFormat] = useState<'fleet' | 'compose' | 'sparkrun'>('fleet');
-  const [spec, setSpec] = useState('{\n  "image": ""\n}');
-  const [deploymentId, setDeploymentId] = useState('');
-  const [host, setHost] = useState('');
-  const [revisionKey, setRevisionKey] = useState('');
-  const [recipeQuery, setRecipeQuery] = useState('');
-  const [formError, setFormError] = useState('');
-  const refresh = () => { void cache.invalidateQueries({ queryKey: key }); };
-  const create = useMutation({ mutationFn: (body: { description: string; model_spec: Record<string, unknown> }) => client.createRecipeRevision(recipeId, body), onSuccess: refresh });
-  const select = useMutation({ mutationFn: ({ id, body }: { id: string; body: SelectDeployment }) => client.selectDeployment(id, body), onSuccess: refresh });
-  const busy = create.isPending || select.isPending;
-  const revisions = Object.entries(state.data?.recipes ?? {}).flatMap(([id, versions]) => versions.map((revision) => ({ id, revision })));
-  async function upload(file: File | undefined) {
-    if (!file) return;
-    if (file.size > 32 * 1024) { setFormError('Recipe files must be at most 32 KiB.'); return; }
-    try { setSpec(await file.text()); setFormError(''); }
-    catch { setFormError('The recipe file could not be read.'); }
-  }
-  function save(event: FormEvent) {
-    event.preventDefault();
-    try {
-      const model: unknown = format === 'fleet' ? JSON.parse(spec) : { source_format: format, source_content: spec };
-      if (!model || typeof model !== 'object' || Array.isArray(model)) throw new Error('Recipe specification must be an object.');
-      setFormError('');
-      create.mutate({ description, model_spec: model as Record<string, unknown> });
-    } catch (error) { setFormError(String(error)); }
-  }
-  function deploy(event: FormEvent) {
-    event.preventDefault();
-    const selected = revisions.find(({ id, revision }) => `${id}:${revision.digest}` === revisionKey);
-    if (!selected) return;
-    const current = state.data?.deployments[deploymentId];
-    select.mutate({ id: deploymentId, body: { expected_generation: current?.generation ?? 0, endpoint_id: host, recipe_id: selected.id, revision_digest: selected.revision.digest, desired_state: 'ready' } });
-  }
-  return <Panel title={mode === 'recipes' ? 'Recipe catalog' : mode === 'deployment' ? 'Deployment controls' : 'Recipes and deployments'} data-testid="recipe-management">
-    <div className="space-y-4 text-xs">
-      <p className="text-text-muted">Save immutable revisions, then select a revision and host to deploy. Hosts enforce their local policy. Recipe edits leave running deployments unchanged.</p>
-      {state.error && <p role="alert">{String(state.error)}</p>}
-      {!mutationsEnabled && <p className="text-text-muted">Deployment changes are disabled for this session.</p>}
-      {mode !== 'deployment' && <>
-      <form onSubmit={save} className="space-y-2">
-        <div className="flex flex-wrap gap-2">
-          <input aria-label="Recipe ID" placeholder="Recipe ID" required pattern="[a-z0-9][a-z0-9_-]{0,39}" className={input} value={recipeId} onChange={(e) => setRecipeId(e.target.value)} />
-          <input aria-label="Recipe description" placeholder="Description" required maxLength={256} className={input} value={description} onChange={(e) => setDescription(e.target.value)} />
-        </div>
-        <label className="block">Recipe format <select aria-label="Recipe format" className={input} value={format} onChange={(e) => setFormat(e.target.value as typeof format)}><option value="fleet">Fleet JSON</option><option value="compose">Compose YAML</option><option value="sparkrun">Sparkrun YAML</option></select></label>
-        {format !== 'fleet' && <label className="block">Upload recipe YAML <input aria-label="Upload recipe YAML" type="file" accept=".yaml,.yml" onChange={(e) => { void upload(e.target.files?.[0]); }} /></label>}
-        <textarea aria-label="Recipe specification" rows={7} className={`${input} w-full font-mono`} value={spec} onChange={(e) => setSpec(e.target.value)} />
-        <Button type="submit" disabled={!mutationsEnabled || busy}>{format === 'fleet' ? 'Save revision' : 'Save source'}</Button>
-      </form>
-      {format !== 'fleet' && <RecipeImport recipeId={recipeId} description={description} sourceFormat={format} sourceContent={spec} mutationsEnabled={mutationsEnabled} onSaved={refresh} />}
-      <DataTable id="recipe-revisions" tableTestId="recipe-revisions" rows={revisions.filter(r => `${r.id} ${r.revision.description}`.toLowerCase().includes(recipeQuery.toLowerCase()))} filterBar={<input aria-label="Search recipes" placeholder="Search recipe or description…" className={input} value={recipeQuery} onChange={e=>setRecipeQuery(e.target.value)} />} rowKey={({id, revision}) => `${id}:${revision.digest}`} clientPageSize={20} minWidth={800} columns={[
-        {id:'id', label:'Recipe', required:true, render: ({id}) => <strong>{id}</strong>},
-        {id:'revision', label:'Revision', render: ({revision}) => revision.revision},
-        {id:'format', label:'Format', render: ({revision}) => String(revision.model_spec.source_format ?? 'Fleet')},
-        {id:'description', label:'Description', render: ({revision}) => revision.description},
-        {id:'created', label:'Saved', render: ({revision}) => new Date(revision.created_at_ms).toLocaleString()},
-        {id:'edit', label:'Review / edit', render: ({id, revision}) => <Button onClick={() => { setRecipeId(id); setDescription(revision.description);
-          const source = revision.model_spec.source_format;
-          if ((source === 'compose' || source === 'sparkrun') && typeof revision.model_spec.source_content === 'string') { setFormat(source); setSpec(revision.model_spec.source_content); }
-          else { setFormat('fleet'); setSpec(JSON.stringify(revision.model_spec, null, 2)); }
-        }}>Edit revision</Button>},
-      ]} emptyMessage="No recipes saved." />
-      </>}
-      {mode !== 'recipes' && <>
-      <form onSubmit={deploy} className="flex flex-wrap gap-2">
-        <input aria-label="Deployment ID" placeholder="Deployment ID" required pattern="[a-z0-9][a-z0-9_-]{0,39}" className={input} value={deploymentId} onChange={(e) => setDeploymentId(e.target.value)} />
-        <select aria-label="Deployment host" required className={input} value={host} onChange={(e) => setHost(e.target.value)}><option value="">Select host</option>{nodes.filter((node) => node.enabled && node.managed_deployments).map((node) => <option key={node.endpoint_id} value={node.endpoint_id}>{node.label ?? node.host_snapshot?.hostname ?? node.endpoint_id.slice(0, 12)}</option>)}</select>
-        <select aria-label="Recipe revision" required className={input} value={revisionKey} onChange={(e) => setRevisionKey(e.target.value)}><option value="">Select revision</option>{revisions.filter(({ revision }) => revision.model_spec.image).map(({ id, revision }) => <option key={`${id}:${revision.digest}`} value={`${id}:${revision.digest}`}>{id} · revision {revision.revision}</option>)}</select>
-        <Button type="submit" disabled={!mutationsEnabled || busy}>Deploy</Button>
-      </form>
-      <DataTable id="deployment-controls" tableTestId="deployment-controls" rows={Object.entries(state.data?.deployments ?? {}).map(([id, deployment]) => ({id, deployment}))} rowKey={({id}) => id} minWidth={900} columns={[
-        {id:'id', label:'Deployment', required:true, render: ({id}) => <strong>{id}</strong>},
-        {id:'host', label:'Host', render: ({deployment}) => nodes.find(n => n.endpoint_id === deployment.endpoint_id)?.host_snapshot?.hostname ?? deployment.endpoint_id.slice(0,12)},
-        {id:'recipe', label:'Recipe / revision', render: ({deployment}) => `${deployment.recipe_id} · ${deployment.revision_digest.slice(0,12)}`},
-        {id:'desired', label:'Desired', render: ({deployment}) => deployment.desired_state},
-        {id:'observed', label:'Observed', render: ({deployment}) => <span>{deployment.observed?.status?.phase ?? 'Awaiting host'}{deployment.observed_at_ms == null || Date.now() - deployment.observed_at_ms > 20_000 ? ' (stale)' : ''}</span>},
-        {id:'error', label:'Error', render: ({deployment}) => deployment.error ?? deployment.observed?.error ?? deployment.observed?.status?.last_error ?? '—'},
-        {id:'action', label:'Action', render: ({id, deployment}) => <Button disabled={!mutationsEnabled || busy} onClick={() => select.mutate({ id, body: { endpoint_id: deployment.endpoint_id, recipe_id: deployment.recipe_id, revision_digest: deployment.revision_digest, expected_generation: deployment.generation, desired_state: deployment.desired_state === 'ready' ? 'unloaded' : 'ready' } })}>{deployment.desired_state === 'ready' ? 'Stop' : 'Start'}</Button>},
-      ]} emptyMessage="No deployments selected." />
-      </>}
-      {(formError || create.error || select.error) && <p role="alert">{formError || String(create.error ?? select.error)}</p>}
-    </div>
-  </Panel>;
+import {useState,type FormEvent} from 'react';
+import {useMutation,useQuery,useQueryClient} from '@tanstack/react-query';
+import {getConnection} from '../../api/connection';
+import type {MeshNode,RecipeRevision,DesiredDeployment} from '../../api/types';
+import {Panel} from '../../components/ui/Panel';
+import {Button} from '../../components/ui/Button';
+import {JsonEditor} from '../../components/ui/JsonEditor';
+import {StatusIcon} from '../../components/ui/StatusIcon';
+import {RecipeImport} from './RecipeImport';
+import {DataTable} from '../../components/ui/DataTable';
+import type {BenchmarkCell} from '../infrastructure/benchmarkModel';
+const key=['management'] as const;const input='rounded border border-line bg-panel px-3 py-2 text-xs text-text';
+function executable(r:RecipeRevision){return typeof r.model_spec.image==='string'||Array.isArray(r.model_spec.distributed);}
+function ranks(r:RecipeRevision){return Array.isArray(r.model_spec.distributed)?r.model_spec.distributed.length:1;}
+export function RecipeManagement({nodes,mutationsEnabled,mode='all'}:{nodes:MeshNode[];mutationsEnabled:boolean;mode?:'all'|'recipes'|'deployment'}){
+  const {client}=getConnection();const cache=useQueryClient();const state=useQuery({queryKey:key,queryFn:()=>client.management(),retry:false,refetchInterval:5000});
+  const evidence=useQuery({queryKey:['recipe-evidence'],queryFn:()=>client.recipeEvidence(),retry:false,refetchInterval:15000});
+  const [recipeId,setRecipeId]=useState('');const [description,setDescription]=useState('');const [format,setFormat]=useState<'fleet'|'compose'|'sparkrun'>('fleet');const [spec,setSpec]=useState('{\n  "image": "",\n  "user": "1000:1000",\n  "memory_limit": "64g"\n}');
+  const [editor,setEditor]=useState<'none'|'json'|'import'>('none');const [selectedHosts,setSelectedHosts]=useState<string[]>([]);const [addresses,setAddresses]=useState<Record<string,string>>({});const [revisionKey,setRevisionKey]=useState('');const [recipeQuery,setRecipeQuery]=useState('');const [formError,setFormError]=useState('');const [selectedEvidence,setSelectedEvidence]=useState<string>('');const [expanded,setExpanded]=useState<string[]>([]);
+  const refresh=()=>{void cache.invalidateQueries({queryKey:key});void cache.invalidateQueries({queryKey:['recipe-evidence']});};
+  const revisions=Object.entries(state.data?.recipes??{}).flatMap(([id,versions])=>versions.map(revision=>({id,revision})));
+  const catalog=Object.entries(state.data?.recipes??{}).filter(([id])=>!state.data?.archived_recipes?.includes(id)).flatMap(([id,versions])=>{const revision=versions.filter(executable).at(-1);return revision?[{id,revision}]:[];});
+  const sourceRows=revisions.filter(r=>r.revision.model_spec.source_format||state.data?.archived_recipes?.includes(r.id));
+  const deployable=revisions.filter(r=>executable(r.revision)&&!state.data?.archived_recipes?.includes(r.id));
+  const selectedRevision=deployable.find(r=>`${r.id}:${r.revision.digest}`===revisionKey);const availableHosts=nodes.filter(n=>n.enabled&&n.managed_deployments);
+  const create=useMutation({mutationFn:(body:{description:string;model_spec:Record<string,unknown>})=>client.createRecipeRevision(recipeId,body),onSuccess:()=>{refresh();setFormError('Revision saved. Existing deployments keep their pinned revision.');}});
+  const deploy=useMutation({mutationFn:()=>{if(!selectedRevision)throw Error('Select a recipe revision.');return client.deployGroup({recipe_id:selectedRevision.id,revision_digest:selectedRevision.revision.digest,hosts:selectedHosts.map(id=>({endpoint_id:id,address:addresses[id]||nodes.find(n=>n.endpoint_id===id)?.host_snapshot?.hostname||''})),desired_state:'ready'});},onSuccess:()=>{refresh();setFormError('Placement accepted. Check each host’s observed status.');}});
+  const action=useMutation({mutationFn:async(items:Array<{id:string;deployment:DesiredDeployment}>)=>{const first=items[0]!;if(first.deployment.placement){const placement=first.deployment.placement;return client.deployGroup({group_id:placement.group_id,recipe_id:first.deployment.recipe_id,revision_digest:first.deployment.revision_digest,hosts:items.slice().sort((a,b)=>a.deployment.placement!.rank-b.deployment.placement!.rank).map(row=>({endpoint_id:row.deployment.endpoint_id,address:row.deployment.placement!.addresses[row.deployment.placement!.rank]!})),expected_generations:Object.fromEntries(items.map(r=>[r.id,r.deployment.generation])),desired_state:items.some(r=>r.deployment.desired_state==='ready')?'unloaded':'ready'});}return Promise.all(items.map(({id,deployment:d})=>client.selectDeployment(id,{endpoint_id:d.endpoint_id,recipe_id:d.recipe_id,revision_digest:d.revision_digest,expected_generation:d.generation,desired_state:items.some(r=>r.deployment.desired_state==='ready')?'unloaded':'ready'})));},onSuccess:refresh});
+  const busy=create.isPending||deploy.isPending||action.isPending;
+  function save(event:FormEvent){event.preventDefault();try{const model:unknown=JSON.parse(spec);if(!model||typeof model!=='object'||Array.isArray(model))throw Error('Recipe specification must be an object.');setFormError('');create.mutate({description,model_spec:model as Record<string,unknown>});}catch(error){setFormError(String(error));}}
+  function edit(id:string,r:RecipeRevision){setRecipeId(id);setDescription(r.description);const source=r.model_spec.source_format;if((source==='compose'||source==='sparkrun')&&typeof r.model_spec.source_content==='string'){setFormat(source);setSpec(r.model_spec.source_content);setEditor('import');}else{setFormat('fleet');setSpec(JSON.stringify(r.model_spec,null,2));setEditor('json');}}
+  const deploymentRows=Object.entries(state.data?.deployments??{}).map(([id,deployment])=>({id,deployment}));
+  const groups=new Map<string,typeof deploymentRows>();for(const row of deploymentRows){const group=row.deployment.placement?.group_id??row.id.replace(/-rank[0-9]+$/,'');groups.set(group,[...(groups.get(group)??[]),row]);}
+  const grouped=[...groups].map(([id,children])=>({id,children,deployment:children[0]!.deployment,aggregate:true}));
+  const proofs=selectedEvidence?evidence.data?.filter(e=>`${e.recipe_id}:${e.revision_digest}`===selectedEvidence)??[]:[];
+  return <Panel title={mode==='recipes'?'Recipe catalog':mode==='deployment'?'Deployment controls':'Recipes and deployments'} data-testid="recipe-management"><div className="space-y-4 text-xs">
+    {state.error&&<p role="alert">{String(state.error)}</p>}{!mutationsEnabled&&<p className="text-text-muted">Changes are disabled for this session.</p>}
+    {mode!=='deployment'&&<>
+      <div className="flex flex-wrap items-center justify-between gap-2"><p className="text-text-muted">Portable executable recipes · validation is specific to a revision and tested hardware</p><div className="flex gap-2"><Button variant="ghost" onClick={()=>{setFormat('fleet');setEditor('json');setRecipeId('');setDescription('');setSpec('{\n  "image": "",\n  "user": "1000:1000",\n  "memory_limit": "64g"\n}');}}>New JSON recipe</Button><Button variant="ghost" onClick={()=>{setFormat('compose');setEditor('import');setSpec('');}}>Import Compose / Sparkrun</Button></div></div>
+      <DataTable interactive id="recipe-revisions" tableTestId="recipe-revisions" rows={catalog.filter(r=>`${r.id} ${r.revision.description}`.toLowerCase().includes(recipeQuery.toLowerCase()))} rowKey={r=>`${r.id}:${r.revision.digest}`} clientPageSize={20} minWidth={1050} filterBar={<input aria-label="Search recipes" placeholder="Find recipe…" className={input} value={recipeQuery} onChange={e=>setRecipeQuery(e.target.value)}/>} columns={[
+        {id:'id',label:'Recipe',required:true,render:r=><strong>{r.id}</strong>},{id:'revision',label:'Revision',render:r=>r.revision.revision},{id:'ranks',label:'Placement',render:r=>ranks(r.revision)>1?`${ranks(r.revision)} distributed ranks`:'One host / replicas'},
+        {id:'description',label:'Description',render:r=>r.revision.description},
+        {id:'validation',label:'Validation',value:r=>{const proofs=evidence.data?.filter(e=>e.recipe_id===r.id&&e.revision_digest===r.revision.digest)??[];return proofs.some(e=>e.kind==='smoke'&&Number(e.data.passed_requests)>=2&&Number(e.data.failed_requests)===0||e.kind==='benchmark'&&(e.data.cells as BenchmarkCell[]??[]).some(c=>c.status==='complete'&&(c.num_requests??0)>=2&&(c.num_errors??0)===0))?'Inference tested':proofs.some(e=>e.kind==='ready')?'Startup passed':evidence.error?'Evidence unavailable':'Untested';},render:r=>{const proofs=evidence.data?.filter(e=>e.recipe_id===r.id&&e.revision_digest===r.revision.digest)??[];const tested=proofs.some(e=>e.kind==='smoke'&&Number(e.data.passed_requests)>=2&&Number(e.data.failed_requests)===0||e.kind==='benchmark'&&(e.data.cells as BenchmarkCell[]??[]).some(c=>c.status==='complete'&&(c.num_requests??0)>=2&&(c.num_errors??0)===0));return <button className="inline-flex gap-1 items-center" onClick={()=>setSelectedEvidence(`${r.id}:${r.revision.digest}`)}><StatusIcon status={tested?'validated':proofs.some(e=>e.kind==='ready')?'pending':'unknown'}/>{tested?'Tested':proofs.some(e=>e.kind==='ready')?'Startup passed':evidence.error?'Unavailable':'Untested'}</button>;}},
+        {id:'benchmark',label:'Best measured decode',render:r=>{const cells=evidence.data?.filter(e=>e.recipe_id===r.id&&e.revision_digest===r.revision.digest&&e.kind==='benchmark').flatMap(e=>(e.data.cells as BenchmarkCell[])??[]).filter(c=>c.status==='complete'&&c.aggregate_tps!=null)??[];return cells.length?`${Math.max(...cells.map(c=>c.aggregate_tps!)).toFixed(1)} tok/s`:'—';}},
+        {id:'created',label:'Saved',value:r=>r.revision.created_at_ms,render:r=>new Date(r.revision.created_at_ms).toLocaleString()},
+        {id:'edit',label:'Review / edit',render:r=><Button variant="ghost" onClick={()=>edit(r.id,r.revision)}>Edit revision</Button>}
+      ]} emptyMessage="No executable recipes. Import a source or create Fleet JSON."/>
+      {selectedEvidence&&<Panel className="p-3 space-y-3"><div className="flex items-center justify-between gap-2"><h3 className="font-semibold">Revision evidence</h3><Button variant="ghost" onClick={()=>setSelectedEvidence('')}>Close evidence</Button></div><p className="text-text-muted">Readiness proves startup. Smoke tests or completed benchmark requests prove inference on the recorded host; changed revisions start untested.</p><DataTable interactive id="recipe-proof" rows={proofs} rowKey={r=>r.id} columns={[{id:'kind',label:'Evidence',render:r=>r.kind},{id:'host',label:'Tested host',render:r=>nodes.find(n=>n.endpoint_id===r.endpoint_id)?.host_snapshot?.hostname??r.endpoint_id.slice(0,12)},{id:'date',label:'Recorded',value:r=>r.recorded_at_ms,render:r=>new Date(r.recorded_at_ms).toLocaleString()},{id:'results',label:'Results',render:r=>r.kind==='benchmark'?<a className="text-accent" href={`#/benchmarks/${r.data.benchmark_run_id}`}>Open benchmark</a>:r.kind==='smoke'?`${r.data.passed_requests} passed / ${r.data.failed_requests} failed`:'Startup ready'}]}/>{proofs.filter(r=>r.kind==='benchmark').map(r=><details key={r.id}><summary className="cursor-pointer">Stored benchmark measurements · {new Date(r.recorded_at_ms).toLocaleDateString()}</summary><pre className="mt-2 max-h-72 overflow-auto text-[10px]">{JSON.stringify(r.data,null,2)}</pre></details>)}</Panel>}
+      {editor!=='none'&&<Panel className="space-y-3 p-3"><div className="flex justify-between gap-2"><h3 className="font-semibold">{editor==='json'?'JSON recipe editor':'Source import'}</h3><Button variant="ghost" onClick={()=>setEditor('none')}>Close editor</Button></div><form onSubmit={save} className="space-y-3"><div className="flex flex-wrap gap-2"><input aria-label="Recipe ID" placeholder="Portable recipe name" required pattern="[a-z0-9][a-z0-9_-]{0,39}" className={input} value={recipeId} onChange={e=>setRecipeId(e.target.value)}/><input aria-label="Recipe description" placeholder="Description" required maxLength={256} className={`${input} flex-1`} value={description} onChange={e=>setDescription(e.target.value)}/></div>
+        {editor==='json'?<><JsonEditor value={spec} onChange={setSpec}/><Button type="submit" disabled={!mutationsEnabled||busy}>Save revision</Button></>:<><label className="block">Source format <select aria-label="Recipe format" className={input} value={format} onChange={e=>setFormat(e.target.value as 'compose'|'sparkrun')}><option value="compose">Compose YAML</option><option value="sparkrun">Sparkrun YAML</option></select></label><label className="block">Upload source <input aria-label="Upload recipe YAML" type="file" accept=".yaml,.yml" onChange={e=>{const file=e.target.files?.[0];if(!file)return;if(file.size>32768){setFormError('Source files must be at most 32 KiB.');return;}void file.text().then(setSpec);}}/></label><textarea aria-label="Recipe specification" rows={8} className={`${input} w-full font-mono`} value={spec} onChange={e=>setSpec(e.target.value)}/></>}
+      </form>{editor==='import'&&format!=='fleet'&&<><RecipeImport recipeId={recipeId} description={description} sourceFormat={format} sourceContent={spec} mutationsEnabled={mutationsEnabled} onSaved={refresh}/><details><summary className="cursor-pointer">Importable source library · {sourceRows.length} revisions</summary><DataTable interactive id="recipe-sources" rows={sourceRows} rowKey={r=>`${r.id}:${r.revision.digest}`} clientPageSize={15} columns={[{id:'name',label:'Source',render:r=>r.id},{id:'format',label:'Format',render:r=>String(r.revision.model_spec.source_format??'Archived Fleet JSON')},{id:'import',label:'Review / convert',render:r=><Button onClick={()=>edit(r.id,r.revision)}>Review source</Button>}]} /></details></>}</Panel>}
+    </>}
+    {mode!=='recipes'&&<>
+      <form onSubmit={e=>{e.preventDefault();setFormError('');deploy.mutate();}} className="space-y-3"><label className="block">Recipe revision <select aria-label="Recipe revision" required className={`${input} ml-2`} value={revisionKey} onChange={e=>{setRevisionKey(e.target.value);setSelectedHosts([]);}}><option value="">Select executable recipe</option>{deployable.map(({id,revision})=><option key={`${id}:${revision.digest}`} value={`${id}:${revision.digest}`}>{id} · revision {revision.revision}</option>)}</select></label><p className="text-text-muted">{selectedRevision&&ranks(selectedRevision.revision)>1?`Choose exactly ${ranks(selectedRevision.revision)} hosts in rank order. Rank 0 is the head. Use reachable fabric addresses and the recipe’s matching HCA topology.`:'Select one or more hosts. A one-host recipe creates independent replicas. Deployment names are generated automatically.'}</p>
+      <fieldset aria-label="Deployment hosts" disabled={!mutationsEnabled||busy} className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">{availableHosts.map(n=>{const rank=selectedHosts.indexOf(n.endpoint_id);return <label key={n.endpoint_id} className="flex flex-wrap gap-2 items-center rounded border border-line p-2"><input type="checkbox" checked={rank>=0} onChange={()=>setSelectedHosts(ids=>ids.includes(n.endpoint_id)?ids.filter(id=>id!==n.endpoint_id):[...ids,n.endpoint_id])}/><span>{n.host_snapshot?.hostname??n.label} {rank>=0?`· rank ${rank}`:''}</span>{rank>=0&&<input aria-label={`Address ${n.host_snapshot?.hostname??n.endpoint_id}`} className={`${input} w-full`} placeholder="Reachable host / fabric address" value={addresses[n.endpoint_id]??n.host_snapshot?.hostname??''} onChange={e=>setAddresses(old=>({...old,[n.endpoint_id]:e.target.value}))}/>}</label>;})}</fieldset><Button type="submit" disabled={!mutationsEnabled||busy||!selectedRevision||!selectedHosts.length||ranks(selectedRevision.revision)>1&&selectedHosts.length!==ranks(selectedRevision.revision)}>Deploy</Button></form>
+      <DataTable interactive id="deployment-controls" tableTestId="deployment-controls" rows={grouped} rowKey={r=>r.id} minWidth={1000} canExpand={r=>r.aggregate} expandedKeys={expanded} expandOnRowClick onToggleExpanded={r=>setExpanded(ids=>ids.includes(r.id)?ids.filter(id=>id!==r.id):[...ids,r.id])} expandedRows={r=>r.children.map(c=>({...c,children:[c],aggregate:false}))} columns={[
+        {id:'id',label:'Deployment',required:true,render:r=><span className={r.aggregate?'font-semibold':'pl-3 text-text-muted'}>{r.aggregate?r.deployment.recipe_id:`↳ ${nodes.find(n=>n.endpoint_id===r.deployment.endpoint_id)?.host_snapshot?.hostname??r.deployment.endpoint_id.slice(0,12)}`}</span>},
+        {id:'host',label:'Placement',render:r=>r.aggregate?`${r.children.length} hosts`:`rank ${r.deployment.placement?.rank??r.id.match(/rank([0-9]+)/)?.[1]??0}`},
+        {id:'recipe',label:'Recipe / revision',render:r=>`${r.deployment.recipe_id} · ${state.data?.recipes[r.deployment.recipe_id]?.find(v=>v.digest===r.deployment.revision_digest)?.revision??'—'}`},
+        {id:'desired',label:'Desired',render:r=>r.children.every(c=>c.deployment.desired_state==='ready')?'ready':'unloaded'},
+        {id:'observed',label:'Observed',value:r=>r.children.every(c=>c.deployment.observed?.status?.phase==='ready')?'ready':r.deployment.observed?.status?.phase??'pending',render:r=><StatusIcon status={r.children.every(c=>c.deployment.observed?.status?.phase==='ready')?'ready':r.deployment.observed_at_ms==null||Date.now()-r.deployment.observed_at_ms>20000?'stale':r.deployment.observed?.status?.phase??'unknown'}/>},
+        {id:'error',label:'Error',render:r=>r.children.map(c=>c.deployment.error??c.deployment.observed?.error??c.deployment.observed?.status?.last_error).filter(Boolean).join('; ')||'—'},
+        {id:'action',label:'Action',render:r=>r.aggregate&&<Button variant="ghost" disabled={!mutationsEnabled||busy} onClick={e=>{e.stopPropagation();action.mutate(r.children);}}>{r.children.some(c=>c.deployment.desired_state==='ready')?'Stop':'Start'}</Button>}
+      ]} emptyMessage="No managed deployments."/>
+    </>}
+    {(formError||create.error||deploy.error||action.error)&&<p role={create.error||deploy.error||action.error?'alert':'status'}>{formError||String(create.error??deploy.error??action.error)}</p>}
+  </div></Panel>;
 }

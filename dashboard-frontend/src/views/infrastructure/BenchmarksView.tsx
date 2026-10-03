@@ -47,7 +47,7 @@ export function BenchmarksView() {
   const [duration, setDuration] = useState(5);
   const [tokens, setTokens] = useState(256);
   const [prefill, setPrefill] = useState(true);
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(()=>decodeURIComponent(window.location.hash.split('/')[2]??'')||null);
   const [metric, setMetric] = useState<Metric>("aggregate_tps");
   const [message, setMessage] = useState("");
   const runs = useQuery({
@@ -459,7 +459,7 @@ export function BenchmarksView() {
                   ))}
                 </select>
               </div>
-              <DataTable
+              <DataTable interactive
                 id="benchmark-matrix"
                 tableTestId="benchmark-matrix"
                 rows={rows}
@@ -559,7 +559,7 @@ export function BenchmarksView() {
           {!!report?.prefill.length && (
             <Panel className="p-4 space-y-2">
               <h3 className="text-sm font-semibold">Prefill scouts</h3>
-              <DataTable
+              <DataTable interactive
                 id="benchmark-prefill"
                 rows={report.prefill}
                 rowKey={(p) => String(p.context_tokens)}
@@ -589,7 +589,7 @@ export function BenchmarksView() {
             <h3 className="text-sm font-semibold">
               Latency and capacity detail
             </h3>
-            <DataTable
+            <DataTable interactive
               id="benchmark-details"
               rows={cells}
               rowKey={(c) => `${c.context_tokens}-${c.concurrency}`}
@@ -602,6 +602,7 @@ export function BenchmarksView() {
                   render: (c) =>
                     `${contextLabel(c.context_tokens)} · C${c.concurrency}`,
                 },
+                {id:"throughput",label:"Decode tok/s · total / user",value:c=>c.aggregate_tps,render:c=>`${fmt(c.aggregate_tps)} / ${fmt(c.per_user_tps)}`},
                 { id: "state", label: "Status", render: (c) => c.status },
                 {
                   id: "ttft",
@@ -688,7 +689,7 @@ export function BenchmarksView() {
       )}
       <Panel className="p-4 space-y-3">
         <h2 className="text-sm font-semibold">Run history</h2>
-        <DataTable
+        <DataTable interactive
           id="benchmark-history"
           tableTestId="benchmark-history"
           rows={runs.data ?? []}

@@ -30,6 +30,7 @@ const MESH_ERROR_BODY_DISPLAY_LIMIT: usize = 500;
 #[derive(Debug, Clone)]
 pub struct MeshUpstreamClient {
     registry: Arc<MeshRegistry>,
+    traffic: crate::traffic::TrafficController,
     finalization_policies: BackendFinalizationPolicies,
     flatten_content: bool,
     max_sse_frame_bytes: usize,
@@ -37,6 +38,11 @@ pub struct MeshUpstreamClient {
 }
 
 impl MeshUpstreamClient {
+    pub(crate) fn with_traffic(mut self, traffic: crate::traffic::TrafficController) -> Self {
+        self.traffic = traffic;
+        self
+    }
+
     pub(crate) fn new(
         registry: Arc<MeshRegistry>,
         finalization_policies: BackendFinalizationPolicies,
@@ -46,6 +52,7 @@ impl MeshUpstreamClient {
     ) -> Self {
         Self {
             registry,
+            traffic: crate::traffic::TrafficController::new(),
             finalization_policies,
             flatten_content,
             max_sse_frame_bytes,
@@ -60,6 +67,21 @@ impl UpstreamClient for MeshUpstreamClient {
         &self,
         backend: &BackendChatRequest,
     ) -> AppResult<UpstreamStream> {
+        let traffic_request = backend.authorization.traffic.clone().unwrap_or_else(|| {
+            crate::traffic::TrafficRequest::new(
+                crate::traffic::Identity::default(),
+                backend.request.model.clone(),
+                None,
+                0,
+            )
+        });
+        if self.traffic.enabled() {
+            traffic_request.set_bytes(crate::traffic::encoded_size(&backend.request));
+        }
+        let lease = self
+            .traffic
+            .acquire(traffic_request, "mesh://workers".into(), "mesh".into())
+            .await?;
         let mut backend = backend.clone();
         finalize_request_for_backend(&mut backend, &self.finalization_policies);
         let model = backend.request.model.clone();
@@ -140,8 +162,11 @@ impl UpstreamClient for MeshUpstreamClient {
                                 serving.set_provider(format!("mesh:{}", candidate.0));
                                 serving.set_model_served_final(model.clone());
                             }
-                            return Ok(Box::pin(
-                                futures::stream::once(async move { Ok(first) }).chain(stream),
+                            return Ok(crate::traffic::hold_chat_stream(
+                                Box::pin(
+                                    futures::stream::once(async move { Ok(first) }).chain(stream),
+                                ),
+                                lease,
                             ));
                         }
                         Some(Err(err))

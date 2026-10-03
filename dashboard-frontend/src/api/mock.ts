@@ -1,3 +1,5 @@
+import {blankConfig,blankRuntime,type TrafficResponse} from '../views/traffic/trafficModel';
+let MOCK_TRAFFIC:TrafficResponse={revision:0,config:blankConfig(),runtime:blankRuntime(),scope:'single gateway process'};
 /**
  * In-browser mock backend — lets all four views ship before the Rust contract is live.
  *
@@ -794,6 +796,17 @@ export const mockFetch: typeof fetch = async (input, init): Promise<Response> =>
     return json({ api_call_id: id, killed: true });
   }
 
+  if (path === '/dashboard/api/traffic' && method === 'GET') return json(MOCK_TRAFFIC);
+  if (path === '/dashboard/api/traffic' && method === 'POST') {
+    if(!headerValue(init?.headers,'X-CSRF-Token'))return json({error:'missing csrf'},403);
+    const body=JSON.parse(String(init?.body??'{}')) as {revision:number;config:TrafficResponse['config']};
+    if(body.revision!==MOCK_TRAFFIC.revision)return json({error:'policy changed'},409);
+    MOCK_TRAFFIC={...MOCK_TRAFFIC,revision:body.revision+1,config:body.config,runtime:{...MOCK_TRAFFIC.runtime,revision:body.revision+1,mode:body.config.mode}};return json(MOCK_TRAFFIC);
+  }
+  if (path === '/dashboard/api/traffic/backends' || path === '/dashboard/api/traffic/engines') return json([]);
+  if (path === '/dashboard/api/traffic/layout') return json({mobile_compact:false});
+  if (path === '/dashboard/api/management/recipe-evidence' && method === 'GET') return json([]);
+  if (/^\/dashboard\/api\/hosts\/[^/]+\/history$/.test(path) && method === 'GET') return json({samples:[],bucket_ms:15000,since_ms:Date.now()-3600_000,until_ms:Date.now(),sampling:'latest observation per interval'});
   if (path === '/dashboard/api/benchmarks' && method === 'GET') return json([]);
   if (path === '/dashboard/api/management' && method === 'GET') return json({ recipes: {}, deployments: {} });
   if (path === '/dashboard/api/management/model-activity' && method === 'GET') return json([]);
@@ -1333,6 +1346,7 @@ export const MOCK_KEYS: ApiKeyRecord[] = [
 
 /** Reset the mutable mock account state (tests). */
 export function resetMockAccounts(): void {
+  MOCK_TRAFFIC={revision:0,config:blankConfig(),runtime:blankRuntime(),scope:'single gateway process'};
   mockSessionUser = null;
   mockHistoryCleared = false;
   CONFIGURED_PROVIDERS = [{

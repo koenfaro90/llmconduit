@@ -28,6 +28,7 @@ const MODEL_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone)]
 pub struct ManagedProviderOptions {
+    pub traffic: crate::traffic::TrafficController,
     pub http_client: reqwest::Client,
     pub flatten_content: bool,
     pub min_completion_tokens: i64,
@@ -293,6 +294,7 @@ impl ManagedProviderRegistry {
         )
         .with_finalization_policies(self.options.finalization_policies.clone())
         .with_flow_store(self.options.flow_store.clone())
+        .with_traffic(self.options.traffic.clone())
     }
 
     async fn route_for_model(
@@ -756,6 +758,7 @@ mod tests {
 
     fn test_options() -> ManagedProviderOptions {
         ManagedProviderOptions {
+            traffic: crate::traffic::TrafficController::new(),
             http_client: reqwest::Client::new(),
             flatten_content: true,
             min_completion_tokens: 1,

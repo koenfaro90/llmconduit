@@ -16,6 +16,7 @@ describe('Recipe conversion', () => {
     const convert = vi.spyOn(client, 'convertRecipe').mockResolvedValue(preview);
     const save = vi.spyOn(client, 'createRecipeRevision').mockResolvedValue({ digest: 'a'.repeat(64), revision: 1, description: 'test', model_spec: spec, created_at_ms: 1 });
     renderWithQuery(<RecipeManagement nodes={[]} mutationsEnabled />);
+    fireEvent.click(screen.getByRole('button', {name:'Import Compose / Sparkrun'}));
     fireEvent.change(screen.getByLabelText('Recipe ID'), { target: { value: 'compose-test' } });
     fireEvent.change(screen.getByLabelText('Recipe description'), { target: { value: 'Compose source' } });
     fireEvent.change(screen.getByLabelText('Recipe format'), { target: { value: 'compose' } });
@@ -29,7 +30,7 @@ describe('Recipe conversion', () => {
     await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
     expect(save).toHaveBeenNthCalledWith(1, 'compose-test', { description: 'Compose source', model_spec: { source_format: 'compose', source_content: source } });
     expect(save).toHaveBeenNthCalledWith(2, 'compose-test', { description: 'Compose source', model_spec: spec });
-    expect(await screen.findByRole('status')).toHaveTextContent('Select the executable revision and a host');
+    expect(await screen.findByRole('status')).toHaveTextContent('Select the recipe and ordered hosts');
   });
   it('blocks saving incomplete previews and never deploys as a conversion side effect', async () => {
     const client = getConnection().client;
@@ -45,6 +46,7 @@ describe('Recipe conversion', () => {
   it('invalidates a preview when settings or source change', async () => {
     vi.spyOn(getConnection().client, 'convertRecipe').mockResolvedValue(preview);
     renderWithQuery(<RecipeManagement nodes={[]} mutationsEnabled />);
+    fireEvent.click(screen.getByRole('button', {name:'Import Compose / Sparkrun'}));
     fireEvent.change(screen.getByLabelText('Recipe ID'), { target: { value: 'test' } });
     fireEvent.change(screen.getByLabelText('Recipe description'), { target: { value: 'test' } });
     fireEvent.change(screen.getByLabelText('Recipe format'), { target: { value: 'compose' } });

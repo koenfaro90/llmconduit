@@ -111,6 +111,8 @@ pub struct ResourceRuntimeState {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
+// Additive bounded host telemetry is larger than the other wire messages.
+#[allow(clippy::large_enum_variant)]
 pub enum WorkerToHub {
     Hello(WorkerAdvertisement),
     Heartbeat(Heartbeat),

@@ -2283,7 +2283,9 @@ export function assertNever(value: never): never {
 }
 
 /** Fleet reports null for unmeasured values (including GB10 dedicated VRAM). */
+export interface EngineObservation {instance:string;model:string;engine:string;source:string;sampled_at:string;received_at:string;running:number;waiting:number;requests:Array<{id:string;gateway_request_id?:string;state:string;prompt_tokens:number;computed_tokens:number;output_tokens:number;preemptions:number}>}
 export interface FleetHostSnapshot {
+  engine_observations?: EngineObservation[];
   schema_version: number;
   sampled_at: string;
   hostname: string;
@@ -2293,7 +2295,7 @@ export interface FleetHostSnapshot {
   memory: { total_bytes: number; available_bytes: number; used_bytes: number } | null;
   disk: { total_bytes: number; available_bytes: number; used_bytes: number } | null;
   network: { name: string; rx_bytes: number; tx_bytes: number; rx_bytes_per_second: number | null; tx_bytes_per_second: number | null }[];
-  gpus: { index: number; uuid: string; name: string; unified_memory: boolean; memory_total_mib: number | null; memory_used_mib: number | null; utilization_percent: number | null; temperature_celsius: number | null; power_watts: number | null }[];
+  gpus: { index: number; uuid: string; name: string; unified_memory: boolean; memory_total_mib: number | null; memory_used_mib: number | null; utilization_percent: number | null; temperature_celsius: number | null; power_watts: number | null; clock_mhz?: number | null; memory_clock_mhz?: number | null }[];
   containers: { id: string; name: string; image: string; state: string; status: string; cpu_percent: number | null; memory_bytes: number | null; pids: number | null }[];
   errors: string[];
 }
@@ -2306,6 +2308,7 @@ export interface RecipeRevision {
   created_at_ms: number;
 }
 export interface DesiredDeployment {
+  placement?: {group_id:string;rank:number;addresses:string[]};
   generation: number;
   endpoint_id: string;
   recipe_id: string;
@@ -2316,7 +2319,7 @@ export interface DesiredDeployment {
   observed: { status?: { phase?: string; last_error?: string }; error?: string } | null;
   error: string | null;
 }
-export interface ManagementState {
+export interface ManagementState { archived_recipes?: string[];
   recipes: Record<string, RecipeRevision[]>;
   deployments: Record<string, DesiredDeployment>;
 }

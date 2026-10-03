@@ -249,6 +249,39 @@ fn protected_routes(gateway: Arc<Gateway>, auth: Arc<DashboardAuth>) -> Router<A
     // the `no_store` map.
     let api_routes = Router::new()
         .route(
+            "/dashboard/api/management/recipe-evidence",
+            get(crate::dashboard_recipe_evidence::list)
+                .post(crate::dashboard_recipe_evidence::record_smoke),
+        )
+        .route(
+            "/dashboard/api/hosts/{id}/history",
+            get(crate::dashboard_host_history::history),
+        )
+        .route(
+            "/dashboard/api/traffic/layout",
+            get(crate::dashboard_traffic::layout),
+        )
+        .route(
+            "/dashboard/api/traffic/backends",
+            get(crate::dashboard_traffic::backends),
+        )
+        .route(
+            "/dashboard/api/traffic/engines",
+            get(crate::dashboard_traffic::engines),
+        )
+        .route(
+            "/dashboard/api/traffic/requests/{id}/cancel",
+            post(crate::dashboard_traffic::cancel),
+        )
+        .route(
+            "/dashboard/api/traffic",
+            get(crate::dashboard_traffic::get).post(crate::dashboard_traffic::save),
+        )
+        .route(
+            "/dashboard/api/traffic/preview",
+            post(crate::dashboard_traffic::preview),
+        )
+        .route(
             "/dashboard/api/benchmarks",
             get(crate::dashboard_benchmarks::list).post(crate::dashboard_benchmarks::create),
         )
@@ -259,6 +292,14 @@ fn protected_routes(gateway: Arc<Gateway>, auth: Arc<DashboardAuth>) -> Router<A
         .route(
             "/dashboard/api/benchmarks/{id}/cancel",
             post(crate::dashboard_benchmarks::cancel),
+        )
+        .route(
+            "/dashboard/api/management/adopt",
+            post(crate::dashboard_management::adopt),
+        )
+        .route(
+            "/dashboard/api/management/deployment-groups",
+            post(crate::dashboard_deployment_groups::select),
         )
         .route(
             "/dashboard/api/management/model-activity",
@@ -874,12 +915,49 @@ fn auth_failure_response(path: &str, failure: crate::authz::AuthFailure) -> Resp
     response
 }
 
+fn traffic_caller(
+    gateway: &Gateway,
+    headers: &HeaderMap,
+    identity: Option<&ClientIdentity>,
+) -> crate::traffic::Caller {
+    let identity = identity
+        .map(|id| crate::traffic::Identity {
+            key: id.key_id.clone(),
+            user: id.owner_id.clone().unwrap_or_else(|| id.key_id.clone()),
+            groups: gateway
+                .authz()
+                .traffic_identity_for_key(&id.key_id)
+                .map(|i| i.groups)
+                .unwrap_or_default(),
+        })
+        .unwrap_or_else(|| crate::traffic::Identity {
+            key: "anonymous".into(),
+            user: "anonymous".into(),
+            groups: vec![],
+        });
+    let session = ["x-llm-session-id", "x-llmconduit-session-id"]
+        .iter()
+        .find_map(|name| {
+            headers
+                .get(*name)
+                .and_then(|v| v.to_str().ok())
+                .filter(|v| !v.is_empty() && v.len() <= 256)
+        })
+        .map(|v| hex::encode(Sha256::digest(v.as_bytes())));
+    crate::traffic::Caller {
+        identity,
+        session,
+        client_auth: Some(gateway.client_auth().clone()),
+    }
+}
+
 fn authorize_inference(
     context: Option<&crate::authz::AuthContext>,
     endpoint: crate::upstream::InferenceEndpoint,
     requested_model: &str,
+    caller: Option<&crate::traffic::Caller>,
 ) -> AppResult<crate::upstream::AuthorizationScope> {
-    context.map_or_else(
+    let mut scope = context.map_or_else(
         || Ok(crate::upstream::AuthorizationScope::unrestricted()),
         |context| {
             context
@@ -888,7 +966,35 @@ fn authorize_inference(
                     AppError::forbidden("the API key is not authorized for the requested model")
                 })
         },
-    )
+    )?;
+    if context.is_none()
+        && let Some(caller) = caller
+        && let Some(auth) = caller.client_auth.clone()
+        && caller.identity.key != "anonymous"
+    {
+        let id = caller.identity.key.clone();
+        let model = requested_model.to_owned();
+        scope = crate::upstream::AuthorizationScope::restricted(move |_, _, _, _| {
+            auth.identity_for_key(&id)
+                .is_some_and(|key| key.allows_model(&model))
+        });
+    }
+    scope.traffic = Some(crate::traffic::TrafficRequest::new(
+        context
+            .map(|c| c.traffic_identity())
+            .or_else(|| caller.map(|c| c.identity.clone()))
+            .unwrap_or_else(|| crate::traffic::Identity {
+                key: "anonymous".into(),
+                user: "anonymous".into(),
+                groups: vec![],
+            }),
+        requested_model.to_owned(),
+        context
+            .and_then(|c| c.traffic_session.clone())
+            .or_else(|| caller.and_then(|c| c.session.clone())),
+        0,
+    ));
+    Ok(scope)
 }
 
 async fn acquire_inference_session(
@@ -1705,6 +1811,8 @@ async fn log_api_call(
     } else {
         None
     };
+    let caller = traffic_caller(&gateway, &headers, client_identity.as_ref());
+    parts.extensions.insert(caller);
     if let Some(identity) = client_identity {
         parts.extensions.insert(identity);
     }
@@ -2797,6 +2905,7 @@ fn json_type(value: &Value) -> &'static str {
 async fn post_responses(
     State(gateway): State<Arc<Gateway>>,
     auth: Option<Extension<crate::authz::AuthContext>>,
+    caller: Option<Extension<crate::traffic::Caller>>,
     api_call_id: Option<axum::Extension<crate::dashboard_flow::ApiCallId>>,
     persistence: Option<axum::Extension<Arc<crate::flow_persistence::PersistenceCapture>>>,
     Json(request): Json<ResponsesRequest>,
@@ -2807,6 +2916,7 @@ async fn post_responses(
         auth.as_ref().map(|value| &value.0),
         crate::upstream::InferenceEndpoint::Responses,
         &requested,
+        caller.as_ref().map(|c| &c.0),
     )?;
     let auth = auth.map(|value| value.0);
     let lease = acquire_inference_session(&gateway, auth.as_ref()).await?;
@@ -2867,6 +2977,7 @@ async fn post_responses(
 async fn get_responses(
     State(gateway): State<Arc<Gateway>>,
     auth: Option<Extension<crate::authz::AuthContext>>,
+    caller: Option<Extension<crate::traffic::Caller>>,
     upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Response {
     match upgrade {
@@ -2874,7 +2985,12 @@ async fn get_responses(
             .max_frame_size(gateway.config().max_request_body_bytes)
             .max_message_size(gateway.config().max_request_body_bytes)
             .on_upgrade(move |socket| {
-                responses_ws_serve(socket, gateway, auth.map(|value| value.0))
+                responses_ws_serve(
+                    socket,
+                    gateway,
+                    auth.map(|value| value.0),
+                    caller.map(|c| c.0),
+                )
             })
             .into_response(),
         Err(_) => {
@@ -2899,6 +3015,7 @@ async fn responses_ws_serve(
     socket: WebSocket,
     gateway: Arc<Gateway>,
     auth: Option<crate::authz::AuthContext>,
+    caller: Option<crate::traffic::Caller>,
 ) {
     let max_request_body_bytes = gateway.config().max_request_body_bytes;
     // `split` so the inbound `recv` and outbound `send` can be raced in the same
@@ -2979,6 +3096,7 @@ async fn responses_ws_serve(
         auth.as_ref(),
         crate::upstream::InferenceEndpoint::Responses,
         &requested,
+        caller.as_ref(),
     ) {
         Ok(authorization) => authorization,
         Err(_) => {
@@ -3150,6 +3268,7 @@ async fn send_responses_ws_error(
 async fn post_messages(
     State(gateway): State<Arc<Gateway>>,
     auth: Option<Extension<crate::authz::AuthContext>>,
+    caller: Option<Extension<crate::traffic::Caller>>,
     api_call_id: Option<axum::Extension<crate::dashboard_flow::ApiCallId>>,
     persistence: Option<axum::Extension<Arc<crate::flow_persistence::PersistenceCapture>>>,
     Json(request): Json<AnthropicRequest>,
@@ -3161,6 +3280,7 @@ async fn post_messages(
         api_call_id,
         persistence.map(|extension| extension.0),
         auth.map(|value| value.0),
+        caller.map(|c| c.0),
     )
     .await
     {
@@ -3220,6 +3340,7 @@ async fn handle_count_tokens(
         auth.as_ref(),
         crate::upstream::InferenceEndpoint::CountTokens,
         &original_model,
+        None,
     )?;
     let responses_request = gateway.apply_system_prompt_prefix(responses_request, &resolved_model);
     let roles = gateway.roles_for_request(&original_model, &resolved_model);
@@ -3307,6 +3428,7 @@ async fn handle_count_tokens(
 async fn post_chat_completions(
     State(gateway): State<Arc<Gateway>>,
     auth: Option<Extension<crate::authz::AuthContext>>,
+    caller: Option<Extension<crate::traffic::Caller>>,
     api_call_id: Option<axum::Extension<crate::dashboard_flow::ApiCallId>>,
     persistence: Option<axum::Extension<Arc<crate::flow_persistence::PersistenceCapture>>>,
     Json(request): Json<ChatCompletionRequest>,
@@ -3314,6 +3436,7 @@ async fn post_chat_completions(
     handle_chat_completions(
         gateway,
         auth.map(|value| value.0),
+        caller.map(|c| c.0),
         api_call_id.map(|extension| extension.0.0),
         persistence.map(|extension| extension.0),
         request,
@@ -3357,6 +3480,7 @@ async fn dashboard_chat_completions(
     handle_chat_completions(
         gateway,
         access.auth_context().cloned(),
+        None,
         api_call_id.map(|extension| extension.0.0),
         persistence.map(|extension| extension.0),
         request,
@@ -3367,6 +3491,8 @@ async fn dashboard_chat_completions(
 /// Effective inference scope of a dashboard session. A dashboard login never
 /// upgrades inference privileges: delegated sessions retain their policy snapshot,
 /// while SQL users receive the union of the model scopes on their active keys.
+// AuthContext carries live authority; keep the existing value-based access API.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum DashboardInferenceAccess {
     Unrestricted,
     Policy(crate::authz::AuthContext),
@@ -3458,6 +3584,7 @@ async fn authorize_dashboard_chat_csrf(
 async fn handle_chat_completions(
     gateway: Arc<Gateway>,
     auth: Option<crate::authz::AuthContext>,
+    caller: Option<crate::traffic::Caller>,
     api_call_id: Option<String>,
     persistence: Option<Arc<crate::flow_persistence::PersistenceCapture>>,
     request: ChatCompletionRequest,
@@ -3468,6 +3595,7 @@ async fn handle_chat_completions(
         auth.as_ref(),
         crate::upstream::InferenceEndpoint::ChatCompletions,
         &requested,
+        caller.as_ref(),
     )?;
     let lease = acquire_inference_session(&gateway, auth.as_ref()).await?;
     let wants_stream = request.stream;
@@ -3620,11 +3748,13 @@ pub(crate) async fn proxy_prepared_request(
         .ok()
         .and_then(|v| v.get("stream").and_then(Value::as_bool))
         .unwrap_or(false);
-    request.authorization = if let Some(context) = &auth {
-        authorize_inference(Some(&context.0), endpoint, &model)?
-    } else {
-        crate::upstream::AuthorizationScope::unrestricted()
+    let identity = match gateway.client_auth().authenticate_headers(&request.headers) {
+        ClientAuthOutcome::Authenticated(id) => Some(id),
+        _ => None,
     };
+    let caller = traffic_caller(&gateway, &request.headers, identity.as_ref());
+    request.authorization =
+        authorize_inference(auth.as_ref().map(|c| &c.0), endpoint, &model, Some(&caller))?;
     let context = auth.map(|a| a.0);
     let video_owner = crate::media_api::owner(context.as_ref(), &request.headers);
     let lease = acquire_inference_session(&gateway, context.as_ref()).await?;
@@ -3674,6 +3804,7 @@ async fn handle_post_messages(
     api_call_id: Option<String>,
     persistence: Option<Arc<crate::flow_persistence::PersistenceCapture>>,
     auth: Option<crate::authz::AuthContext>,
+    caller: Option<crate::traffic::Caller>,
 ) -> AppResult<Response> {
     let requested = request.model.clone();
     let model = gateway.resolve_request_model(&request.model).await.0;
@@ -3681,6 +3812,7 @@ async fn handle_post_messages(
         auth.as_ref(),
         crate::upstream::InferenceEndpoint::Messages,
         &requested,
+        caller.as_ref(),
     )?;
     let lease = acquire_inference_session(&gateway, auth.as_ref()).await?;
     let wants_stream = request.stream;

@@ -185,6 +185,7 @@ pub struct Gateway {
     /// aggregate operator-configured scrape results and is never used for
     /// per-request/key accounting.
     provider_metrics: crate::provider_metrics::ProviderMetricsRegistry,
+    traffic: crate::traffic::TrafficController,
     /// Optional local Fleet control-plane client for dashboard GPU switching.
     /// Built from env-only URL/token settings and never persisted in Config.
     fleet: Option<Arc<crate::dashboard_fleet::FleetClient>>,
@@ -694,7 +695,8 @@ fn remove_defaults_shadowed_by_request_extra(
     extra_body: &mut BTreeMap<String, Value>,
     request_extra: &BTreeMap<String, Value>,
 ) {
-    for aliases in [&["max_tokens", "max_output_tokens", "max_completion_tokens"][..]] {
+    {
+        let aliases = &["max_tokens", "max_output_tokens", "max_completion_tokens"][..];
         if aliases.iter().any(|key| request_extra.contains_key(*key)) {
             remove_keys(extra_body, aliases);
         }
@@ -817,6 +819,7 @@ impl Gateway {
             // enabled layer via `with_metrics` in the `--with-debug-ui` branch.
             metrics: crate::metrics::MetricsLayer::disabled(),
             provider_metrics: crate::provider_metrics::ProviderMetricsRegistry::default(),
+            traffic: crate::traffic::TrafficController::new(),
             fleet: None,
             // F1: disabled by default (zero overhead); the DI root attaches an
             // enabled sink via `with_turn_capture` when `turn_capture_dir` is
@@ -984,6 +987,14 @@ impl Gateway {
 
     pub fn provider_metrics(&self) -> crate::provider_metrics::ProviderMetricsRegistry {
         self.provider_metrics.clone()
+    }
+
+    pub fn traffic(&self) -> crate::traffic::TrafficController {
+        self.traffic.clone()
+    }
+    pub fn with_traffic(mut self, traffic: crate::traffic::TrafficController) -> Self {
+        self.traffic = traffic;
+        self
     }
 
     pub fn with_fleet(mut self, fleet: Option<Arc<crate::dashboard_fleet::FleetClient>>) -> Self {
@@ -1702,10 +1713,21 @@ impl Gateway {
         request: ResponsesRequest,
         api_call_id: Option<String>,
         persistence_capture: Option<Arc<crate::flow_persistence::PersistenceCapture>>,
-        authorization: crate::upstream::AuthorizationScope,
+        mut authorization: crate::upstream::AuthorizationScope,
         endpoint: crate::upstream::InferenceEndpoint,
         auth_context: Option<crate::authz::AuthContext>,
     ) -> AppResult<ReceiverStream<SseEvent>> {
+        if let Some(traffic) = authorization.traffic.as_mut().and_then(Arc::get_mut)
+            && traffic.session.is_none()
+            && let Some(session) = request
+                .prompt_cache_key
+                .as_ref()
+                .filter(|s| !s.is_empty() && s.len() <= 256)
+        {
+            use sha2::{Digest, Sha256};
+            traffic.session = Some(format!("{:x}", Sha256::digest(session.as_bytes())));
+        }
+
         // D2/D3: ONE serving token per flow, allocated here (not per turn) so the L1
         // telemetry guard built BELOW and every per-turn `BackendChatRequest` in
         // `run_turn` share the SAME `Arc` — the failover/routing layers tag
@@ -1925,7 +1947,7 @@ impl Gateway {
         let (baseline_record, prefix_len) = self
             .find_replay_baseline(&request)
             .await
-            .map_err(&finalize_pre_spawn_err)?;
+            .map_err(finalize_pre_spawn_err)?;
         let mut tail_request = request.clone();
         tail_request.input = request.input[prefix_len..].to_vec();
         if self.config.brave_api_key.is_none() {
@@ -1989,7 +2011,7 @@ impl Gateway {
             vision_session.is_some(),
             roles,
         )
-        .map_err(&finalize_pre_spawn_err)?;
+        .map_err(finalize_pre_spawn_err)?;
 
         // G3 pre-flight context budgeting (T9: candidate-set seam). Estimate
         // over the LOWERED upstream payload (`lowered.messages`/`tools`/scalars)

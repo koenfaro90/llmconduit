@@ -196,6 +196,16 @@ impl ClientAuth {
         Some(models)
     }
 
+    pub fn identity_for_key(&self, id: &str) -> Option<ClientIdentity> {
+        self.state
+            .read()
+            .ok()?
+            .by_digest
+            .values()
+            .find(|key| key.key_id == id)
+            .cloned()
+    }
+
     pub fn authenticate_headers(&self, headers: &HeaderMap) -> ClientAuthOutcome {
         self.authenticate(presented_key(headers).as_deref())
     }

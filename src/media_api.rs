@@ -176,11 +176,105 @@ pub async fn generate(
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct VideoJob {
+    #[serde(default)]
+    traffic: Option<VideoTraffic>,
+    #[serde(default)]
+    status: Option<String>,
     upstream_id: String,
     model: String,
     base_url: String,
     owner: String,
     created_at_ms: i64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct VideoTraffic {
+    identity: crate::traffic::Identity,
+    session: Option<String>,
+    bytes: usize,
+}
+fn terminal_status(status: Option<&str>) -> bool {
+    matches!(
+        status,
+        Some("completed" | "failed" | "cancelled" | "canceled")
+    )
+}
+
+pub(crate) async fn restore_traffic_jobs(gateway: &Gateway) -> AppResult<()> {
+    let (_, jobs) = jobs(gateway).await?;
+    for (id, job) in jobs {
+        if !terminal_status(job.status.as_deref())
+            && let Some(t) = job.traffic
+        {
+            gateway.traffic().restore_job(
+                &id,
+                t.identity,
+                job.model,
+                t.session,
+                t.bytes,
+                &job.base_url,
+            );
+        }
+    }
+    Ok(())
+}
+pub(crate) async fn reconcile_traffic_jobs(gateway: &Gateway) {
+    use futures::StreamExt;
+    let Ok((_, map)) = jobs(gateway).await else {
+        return;
+    };
+    futures::stream::iter(
+        map.into_iter()
+            .filter(|(_, j)| j.traffic.is_some() && !terminal_status(j.status.as_deref())),
+    )
+    .for_each_concurrent(Some(4), |(id, job)| async move {
+        let mut request = ProxyCompletionsRequest::new(
+            HeaderMap::new(),
+            Bytes::from(serde_json::to_vec(&serde_json::json!({"model":job.model})).unwrap()),
+        )
+        .with_endpoint(InferenceEndpoint::VideoJob);
+        request.resource_path = Some(format!("videos/{}", job.upstream_id));
+        request.method = reqwest::Method::GET;
+        request.pinned_base_url = Some(job.base_url.clone());
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let response = gateway.upstream_client().proxy_completions(request).await?;
+            if response.status().is_success() {
+                let value = read_job_json(response).await?;
+                update_job_status(gateway, &id, value.get("status").and_then(Value::as_str))
+                    .await?;
+            }
+            Ok::<(), AppError>(())
+        })
+        .await;
+    })
+    .await;
+}
+async fn update_job_status(gateway: &Gateway, id: &str, status: Option<&str>) -> AppResult<()> {
+    let Some(status) = status.filter(|s| s.len() <= 64 && !s.chars().any(char::is_control)) else {
+        return Ok(());
+    };
+    let store = gateway.persistence_store().unwrap();
+    for _ in 0..4 {
+        let (raw, mut map) = jobs(gateway).await?;
+        let Some(job) = map.get_mut(id) else {
+            return Ok(());
+        };
+        job.status = Some(status.to_owned());
+        if store
+            .compare_exchange_setting(
+                JOBS_KEY,
+                raw.as_deref(),
+                &serde_json::to_string(&map).unwrap(),
+            )
+            .await
+            .map_err(|_| AppError::upstream("video job storage unavailable"))?
+        {
+            if terminal_status(Some(status)) {
+                gateway.traffic().finish_job(id);
+            }
+            return Ok(());
+        }
+    }
+    Err(AppError::conflict("video job state changed"))
 }
 const JOBS_KEY: &str = "media.video-jobs.v1";
 pub(crate) fn owner(auth: Option<&crate::authz::AuthContext>, headers: &HeaderMap) -> String {
@@ -226,6 +320,17 @@ pub(crate) async fn register_video(
 ) -> AppResult<Response> {
     let status = response.status();
     let mut headers = response.headers().clone();
+    let traffic_request = headers
+        .remove("x-llmconduit-traffic-request")
+        .and_then(|h| h.to_str().ok().map(str::to_owned));
+    let traffic = traffic_request
+        .as_deref()
+        .and_then(|id| gateway.traffic().job_identity(id))
+        .map(|(identity, session, bytes)| VideoTraffic {
+            identity,
+            session,
+            bytes,
+        });
     let base_url = headers
         .get("x-llmconduit-upstream")
         .and_then(|v| v.to_str().ok())
@@ -242,6 +347,11 @@ pub(crate) async fn register_video(
         .to_owned();
     let id = format!("video_{}", uuid::Uuid::new_v4().simple());
     let job = VideoJob {
+        traffic,
+        status: value
+            .get("status")
+            .and_then(Value::as_str)
+            .map(str::to_owned),
         upstream_id,
         model: requested_model.to_owned(),
         base_url,
@@ -273,6 +383,12 @@ pub(crate) async fn register_video(
         return Err(AppError::upstream(
             "video job state changed; backend may have accepted the generation",
         ));
+    }
+    if let Some(request_id) = traffic_request {
+        gateway.traffic().bind_job(&request_id, &id);
+        if terminal_status(job.status.as_deref()) {
+            gateway.traffic().finish_job(&id);
+        }
     }
     value["id"] = Value::String(id);
     let mut out = (status, Json(value)).into_response();
@@ -318,6 +434,14 @@ pub async fn video_job(
             "the API key is not authorized for this video model",
         ));
     }
+    if method == axum::http::Method::DELETE
+        && job.traffic.is_some()
+        && !terminal_status(job.status.as_deref())
+    {
+        return Err(AppError::conflict(
+            "wait for video generation to finish before deleting its job",
+        ));
+    }
     let content = uri.path().ends_with("/content");
     let mut request = ProxyCompletionsRequest::new(
         headers,
@@ -348,6 +472,9 @@ pub async fn video_job(
         .as_object_mut()
         .ok_or_else(|| AppError::upstream("video job response must be an object"))?
         .insert("id".into(), Value::String(id.clone()));
+    if method != axum::http::Method::DELETE {
+        update_job_status(&gateway, &id, value.get("status").and_then(Value::as_str)).await?;
+    }
     if method == axum::http::Method::DELETE {
         let store = gateway.persistence_store().unwrap();
         for _ in 0..4 {
@@ -422,6 +549,8 @@ mod tests {
     #[test]
     fn video_job_metadata_round_trips_and_ids_are_paths() {
         let job = VideoJob {
+            traffic: None,
+            status: None,
             upstream_id: "video_backend".into(),
             model: "alias".into(),
             base_url: "http://localhost/v1".into(),

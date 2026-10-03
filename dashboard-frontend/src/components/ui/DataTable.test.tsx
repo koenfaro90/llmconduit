@@ -88,3 +88,11 @@ describe('DataTable', () => {
     expect(within(view.getByTestId('mirror-b-data-table')).queryByRole('columnheader', { name: 'State' })).toBeNull();
   });
 });
+
+it('sorts management columns numerically and preserves filters when no rows match',()=>{
+    const view=render(<DataTable interactive id="numeric" rows={[{id:'a',n:20},{id:'b',n:3}]} rowKey={r=>r.id} rowTestId="number-row" columns={[{id:'n',label:'Count',value:r=>r.n,render:r=>`${r.n} requests`}]}/>);
+    fireEvent.click(view.getByRole('button',{name:'Sort Count'}));expect(view.getAllByTestId('number-row')[0]).toHaveTextContent('3 requests');
+    fireEvent.click(view.getByRole('button',{name:'Sort Count'}));expect(view.getAllByTestId('number-row')[0]).toHaveTextContent('20 requests');
+    fireEvent.change(view.getByLabelText('Filter Count'),{target:{value:'99'}});expect(view.queryAllByTestId('number-row')).toHaveLength(0);
+    fireEvent.change(view.getByLabelText('Filter Count'),{target:{value:''}});expect(view.getAllByTestId('number-row')).toHaveLength(2);
+});

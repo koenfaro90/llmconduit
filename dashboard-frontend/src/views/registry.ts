@@ -16,12 +16,14 @@ import { AccessView } from './access/AccessView';
 import { ChatView } from './chat/ChatView';
 
 import { BenchmarksView } from './infrastructure/BenchmarksView';
+import { TrafficView } from './traffic/TrafficView';
 import { HostsView } from './infrastructure/HostsView';
 import { RecipesView } from './infrastructure/RecipesView';
 import { ModelsView } from './infrastructure/ModelsView';
 import { DeploymentView } from './infrastructure/DeploymentView';
 
 export const VIEW_BY_ROUTE: Record<RouteName, ComponentType> = {
+  traffic: TrafficView,
   flows: FlowsView,
   requests: RequestsView,
   sessions: SessionsView,

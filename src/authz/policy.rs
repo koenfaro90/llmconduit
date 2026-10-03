@@ -347,6 +347,17 @@ pub struct PolicySnapshot {
 }
 
 impl PolicySnapshot {
+    pub fn groups_for(&self, principal: &str) -> Vec<String> {
+        let mut groups: Vec<_> = self
+            .principal_groups
+            .get(principal)
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect();
+        groups.sort();
+        groups
+    }
     pub fn new(
         epoch: u64,
         rules: Vec<PolicyRule>,

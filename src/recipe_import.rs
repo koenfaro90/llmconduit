@@ -1008,12 +1008,13 @@ fn sparkrun(c: &mut Conversion<'_>, root: &Value) -> Result<(), String> {
             headless = rank > 0;
         }
         if let Some(head) = head
+            && head != "{{head_address}}"
             && head.parse::<std::net::IpAddr>().is_err()
         {
             return Err("distributed head_address must be an IP address".into());
         }
         if let Some(host) = host {
-            if host.parse::<std::net::IpAddr>().is_err() {
+            if host != "{{host_address}}" && host.parse::<std::net::IpAddr>().is_err() {
                 return Err("distributed host_address must be an IP address".into());
             }
             c.spec
@@ -1279,6 +1280,57 @@ pub fn convert(body: &ConvertRecipeRequest) -> Result<ConvertedRecipe, String> {
     })
 }
 
+/// Convert distributed sources into host-independent rank templates in one revision.
+pub fn convert_portable(body: &ConvertRecipeRequest) -> Result<ConvertedRecipe, String> {
+    let minimum = if body.source_format == "sparkrun" {
+        serde_yaml::from_str::<serde_json::Value>(&body.source_content)
+            .ok()
+            .and_then(|v| v.get("min_nodes").and_then(Value::as_u64))
+            .unwrap_or(1)
+    } else {
+        1
+    };
+    let count = body.options.num_nodes.map(u64::from).unwrap_or(minimum);
+    if count <= 1 || body.options.node_rank.is_some() {
+        return convert(body);
+    }
+    if count > 8 {
+        return Err("distributed recipes support at most eight ranks".into());
+    }
+    let mut request = body.clone();
+    request.options.num_nodes = Some(count as u32);
+    request.options.head_address = Some("{{head_address}}".into());
+    request.options.host_address = Some("{{host_address}}".into());
+    let mut ranks = Vec::new();
+    let mut combined: Option<ConvertedRecipe> = None;
+    for rank in 0..count {
+        request.options.node_rank = Some(rank as u32);
+        let result = convert(&request)?;
+        ranks.push(result.model_spec.clone());
+        if let Some(combined) = combined.as_mut() {
+            for input in result.required_inputs {
+                if !combined.required_inputs.contains(&input) {
+                    combined.required_inputs.push(input);
+                }
+            }
+            for warning in result.warnings {
+                if !combined.warnings.contains(&warning) {
+                    combined.warnings.push(warning);
+                }
+            }
+        } else {
+            combined = Some(result);
+        }
+    }
+    let mut combined = combined.unwrap();
+    combined.model_spec = json!({"distributed":ranks});
+    combined
+        .warnings
+        .retain(|w| !w.starts_with("This preview is one distributed rank"));
+    combined.warnings.push("Choose ordered hosts and their fabric addresses at deployment; rank 0 is the head. Fleet admits each rank independently; partial startup is reported per host.".into());
+    Ok(combined)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1536,6 +1588,34 @@ command: >-
         b.options.variables.insert("model".into(), json!("{model}"));
         let p = convert(&b).unwrap();
         assert!(p.required_inputs.iter().any(|s| s.contains("model")));
+    }
+
+    #[test]
+    fn portable_sparkrun_conversion_produces_all_ranks_without_host_addresses() {
+        let b = request(
+            "sparkrun",
+            "recipe_version: '2'\nruntime: vllm\nmodel: repo/model\ncontainer: image\nmin_nodes: 2\nmax_nodes: 2\ndefaults: {port: 8131, tensor_parallel: 2}\ncommand: vllm serve {model} --port {port} -tp {tensor_parallel}\n",
+        );
+        let preview = convert_portable(&b).unwrap();
+        assert!(
+            preview.required_inputs.is_empty(),
+            "{:?}",
+            preview.required_inputs
+        );
+        assert_eq!(
+            preview.model_spec["distributed"].as_array().unwrap().len(),
+            2
+        );
+        assert_eq!(
+            preview.model_spec["distributed"][1]["environment"]["VLLM_HOST_IP"],
+            "{{host_address}}"
+        );
+        assert!(
+            preview.model_spec["distributed"][1]["command"][1]
+                .as_str()
+                .unwrap()
+                .contains("--headless")
+        );
     }
     #[test]
     fn distributed_sparkrun_requires_rank_and_fabric_addresses() {
