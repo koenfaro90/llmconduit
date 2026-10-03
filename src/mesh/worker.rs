@@ -119,6 +119,12 @@ impl WorkerRuntime {
 
     async fn refresh_model_switching(&self) -> Option<ModelSwitchingAdvertisement> {
         let fleet = self.fleet.as_ref()?;
+        // Managed Fleet has one writer: legacy switching must not advertise
+        // controls whose writes would bypass central durable desired state.
+        if fleet.managed_report().await.is_ok() {
+            *self.model_switching.lock().await = None;
+            return None;
+        }
         let models = match fleet.list_models().await {
             Ok(response) => response
                 .models
