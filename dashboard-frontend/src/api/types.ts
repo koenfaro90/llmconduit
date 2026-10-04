@@ -2285,7 +2285,19 @@ export function assertNever(value: never): never {
 /** Fleet reports null for unmeasured values (including GB10 dedicated VRAM). */
 export interface EngineObservation {instance:string;model:string;engine:string;source:string;sampled_at:string;received_at:string;running:number;waiting:number;requests:Array<{id:string;gateway_request_id?:string;state:string;prompt_tokens:number;computed_tokens:number;output_tokens:number;preemptions:number}>}
 export interface ManagedCapacity {memory_budget_mib:number;memory_reserved_mib:number;gpu_sharing_enabled:boolean;gpus:Array<{index:number;total_mib:number;budget_mib:number;reserved_mib:number;unified_memory:boolean;exclusive_deployment?:string}>}
+export interface HostFilesystem {
+  mount_point:string;mount_points:string[];device:string;device_id:string;filesystem_type:string;read_only:boolean;
+  total_bytes:number;free_bytes:number;available_bytes:number;used_bytes:number;
+  inodes_total:number|null;inodes_free:number|null;inodes_used:number|null;
+}
+export interface HostBlockDevice {
+  name:string;device_id:string;leaf_device:boolean;read_bytes_per_second:number|null;write_bytes_per_second:number|null;
+  read_iops:number|null;write_iops:number|null;read_latency_ms:number|null;write_latency_ms:number|null;
+  busy_percent:number|null;in_flight:number;average_queue_depth:number|null;
+}
 export interface FleetHostSnapshot {
+  filesystems?:HostFilesystem[];
+  block_devices?:HostBlockDevice[];
   collection?: {metrics?:Record<string,{interval_ms:number;sampled_at:string|null}>;host_interval_ms:number;gpu_interval_ms:number;container_interval_ms:number;gpu_backend:string;gpu_sampled_at:string|null;containers_sampled_at:string|null;gpu_duration_ms:number|null};
   managed_capacity?: ManagedCapacity;
   engine_observations?: EngineObservation[];

@@ -188,3 +188,20 @@ GPU averages and PCIe totals. GPU fan speed is available in the graph selector a
 per-GPU details, with its own `gpu_fan` interval/off setting. Unsupported sensors
 remain unavailable and legitimate zero readings stay zero. NVML reports intended
 operating percentages rather than actual RPM; values above 100% are preserved.
+
+### Filesystem and block-device observations
+
+Fleet carries bounded optional `filesystems` and `block_devices` arrays through
+mesh and stored host history; legacy snapshots without them remain valid. Hosts
+show sortable/filterable tables for capacity, available vs reserved space, inode
+usage, host mount access modes and whole-device I/O. Mount/device selectors share
+the existing history viewer and time ranges; historical devices remain selectable.
+The overview uses root filesystem capacity and leaf-device I/O totals, maximum
+leaf busy percentage and IOPS-weighted latency. Logical layers can be selected
+individually in host details without adding them to host totals. Unsupported,
+initial/reset, stale/off values and idle latencies remain unavailable.
+
+Fleet defaults `disk` to 30 seconds and `disk_io` to one second, independently of
+CPU/GPU/container sampling. These counters use host mounts and kernel statistics;
+no filesystem directory scans, Docker stats or Prometheus are involved. Mesh and
+SQL history cadence remain unchanged.

@@ -47,7 +47,7 @@ it('shows independent metric intervals and disabled container resource sampling'
  const measured:MeshNode={...node,host_snapshot:{...node.host_snapshot!,collection:{host_interval_ms:100,gpu_interval_ms:100,container_interval_ms:5000,gpu_backend:'nvml',gpu_sampled_at:null,containers_sampled_at:null,gpu_duration_ms:null,metrics:{pcie_rx:{interval_ms:100,sampled_at:'2026-10-03T12:00:00Z'},container_cpu:{interval_ms:0,sampled_at:null},memory:{interval_ms:30000,sampled_at:'2026-10-03T11:59:40Z'}}}}};
  render(<HostTelemetry nodes={[measured]} now={now}/>);
  expect(screen.getByText('Metric sampling intervals')).toBeInTheDocument();
- const table=screen.getByRole('table',{hidden:true});
+ const table=screen.getByText('Metric sampling intervals').parentElement!.querySelector('table')!;
  expect(table).toHaveTextContent('container cpu');expect(table).toHaveTextContent('Off');expect(table).toHaveTextContent('30000 ms');
 });
 
@@ -55,4 +55,12 @@ it('shows fan percentages per physical GPU without clamping or inventing unavail
  const measured:MeshNode={...node,host_snapshot:{...node.host_snapshot!,gpus:[{...node.host_snapshot!.gpus[0]!,fan_speed_percent:123},{...node.host_snapshot!.gpus[0]!,index:1,uuid:'second',fan_speed_percent:0},{...node.host_snapshot!.gpus[0]!,index:2,uuid:'third',fan_speed_percent:null}]}};
  render(<HostTelemetry nodes={[measured]} now={now}/>);
  const panel=screen.getByTestId('host-telemetry');expect(panel).toHaveTextContent('Fan 123.0%');expect(panel).toHaveTextContent('Fan 0.0%');expect(panel).toHaveTextContent('Fan —');
+});
+
+it('shows host filesystem reserved space, unavailable inodes and idle I/O using shared tables',()=>{
+ const measured:MeshNode={...node,host_snapshot:{...node.host_snapshot!,filesystems:[{mount_point:'/',mount_points:['/','/home'],device:'/dev/sda1',device_id:'8:1',filesystem_type:'ext4',read_only:false,total_bytes:1024**3,free_bytes:600*1024**2,available_bytes:500*1024**2,used_bytes:424*1024**2,inodes_total:null,inodes_free:null,inodes_used:null}],block_devices:[{name:'sda',device_id:'8:0',leaf_device:true,read_bytes_per_second:0,write_bytes_per_second:null,read_iops:0,write_iops:null,read_latency_ms:null,write_latency_ms:null,busy_percent:0,in_flight:0,average_queue_depth:0}]}};
+ render(<HostTelemetry nodes={[measured]} now={now}/>);
+ const panel=screen.getByTestId('host-telemetry');expect(panel).toHaveTextContent('500.0 MiB');expect(panel).toHaveTextContent('600.0 MiB');expect(panel).toHaveTextContent('(+1 aliases)');expect(panel).toHaveTextContent('sda');expect(panel).toHaveTextContent('0.0 B/s');expect(panel).not.toHaveTextContent('0.00 ms');
+ expect(screen.getByRole('region',{name:'Host filesystems'}).querySelector('table')).not.toBeNull();
+ expect(screen.getByRole('region',{name:'Host disk I/O'}).querySelector('table')).not.toBeNull();
 });

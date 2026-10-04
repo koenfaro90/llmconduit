@@ -16,6 +16,10 @@ pub struct FleetHostSnapshot {
     pub cpu: Option<HostCpu>,
     pub memory: Option<HostMemory>,
     pub disk: Option<HostMemory>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub filesystems: Vec<HostFilesystem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub block_devices: Vec<HostBlockDevice>,
     pub network: Vec<HostNetwork>,
     pub gpus: Vec<HostGpu>,
     pub containers: Vec<HostContainer>,
@@ -43,9 +47,9 @@ pub struct HostMetricCollection {
 impl HostMetricCollection {
     fn validate(&self, name: &str) -> bool {
         let minimum = match name {
-            "cpu" | "memory" | "network" | "disk" | "gpu_utilization" | "gpu_memory"
-            | "gpu_temperature" | "gpu_power" | "gpu_clock" | "gpu_memory_clock" | "gpu_fan"
-            | "pcie_rx" | "pcie_tx" | "pcie_link" | "pcie_errors" => 100,
+            "cpu" | "memory" | "network" | "disk" | "disk_io" | "gpu_utilization"
+            | "gpu_memory" | "gpu_temperature" | "gpu_power" | "gpu_clock" | "gpu_memory_clock"
+            | "gpu_fan" | "pcie_rx" | "pcie_tx" | "pcie_link" | "pcie_errors" => 100,
             "container_inventory" | "container_cpu" | "container_memory" | "container_pids" => 1000,
             _ => return false,
         };
@@ -83,6 +87,113 @@ pub struct HostMemory {
     pub total_bytes: u64,
     pub available_bytes: u64,
     pub used_bytes: u64,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
+pub struct HostFilesystem {
+    pub mount_point: String,
+    pub mount_points: Vec<String>,
+    pub device: String,
+    pub device_id: String,
+    pub filesystem_type: String,
+    pub read_only: bool,
+    pub total_bytes: u64,
+    pub free_bytes: u64,
+    pub available_bytes: u64,
+    pub used_bytes: u64,
+    pub inodes_total: Option<u64>,
+    pub inodes_free: Option<u64>,
+    pub inodes_used: Option<u64>,
+}
+fn storage_device_id(value: &str) -> bool {
+    let parts: Vec<_> = value.split(':').collect();
+    parts.len() == 2
+        && parts.iter().all(|p| {
+            !p.is_empty()
+                && p.bytes().all(|b| b.is_ascii_digit())
+                && p.parse::<u32>().is_ok_and(|v| v <= 1 << 20)
+        })
+}
+impl HostFilesystem {
+    fn validate(&self) -> bool {
+        let path = |p: &str| {
+            p.starts_with('/')
+                && p.len() <= 512
+                && !p.chars().any(char::is_control)
+                && !p.split('/').any(|part| matches!(part, "." | ".."))
+        };
+        path(&self.mount_point)
+            && (1..=8).contains(&self.mount_points.len())
+            && self.mount_points.contains(&self.mount_point)
+            && self.mount_points.iter().all(|p| path(p))
+            && self.device.len() <= 128
+            && !self.device.chars().any(char::is_control)
+            && storage_device_id(&self.device_id)
+            && matches!(
+                self.filesystem_type.as_str(),
+                "ext2"
+                    | "ext3"
+                    | "ext4"
+                    | "xfs"
+                    | "btrfs"
+                    | "f2fs"
+                    | "vfat"
+                    | "exfat"
+                    | "zfs"
+                    | "bcachefs"
+                    | "ntfs3"
+                    | "overlay"
+            )
+            && self.free_bytes <= self.total_bytes
+            && self.available_bytes <= self.free_bytes
+            && self.used_bytes == self.total_bytes - self.free_bytes
+            && match (self.inodes_total, self.inodes_free, self.inodes_used) {
+                (None, None, None) => true,
+                (Some(total), Some(free), Some(used)) => {
+                    total > 0 && free <= total && used == total - free
+                }
+                _ => false,
+            }
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
+pub struct HostBlockDevice {
+    pub name: String,
+    pub device_id: String,
+    pub leaf_device: bool,
+    pub read_bytes_per_second: Option<f64>,
+    pub write_bytes_per_second: Option<f64>,
+    pub read_iops: Option<f64>,
+    pub write_iops: Option<f64>,
+    pub read_latency_ms: Option<f64>,
+    pub write_latency_ms: Option<f64>,
+    pub busy_percent: Option<f64>,
+    pub in_flight: u64,
+    pub average_queue_depth: Option<f64>,
+}
+impl HostBlockDevice {
+    fn validate(&self) -> bool {
+        !self.name.is_empty()
+            && self.name.len() <= 64
+            && !matches!(self.name.as_str(), "." | "..")
+            && self
+                .name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+            && storage_device_id(&self.device_id)
+            && [
+                self.read_bytes_per_second,
+                self.write_bytes_per_second,
+                self.read_iops,
+                self.write_iops,
+                self.read_latency_ms,
+                self.write_latency_ms,
+                self.busy_percent,
+                self.average_queue_depth,
+            ]
+            .iter()
+            .all(|v| v.is_none_or(|v| v.is_finite() && v >= 0.0))
+            && self.busy_percent.is_none_or(|v| v <= 100.0)
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
 pub struct HostNetwork {
@@ -225,7 +336,7 @@ impl FleetHostSnapshot {
             && matches!(c.gpu_backend.as_str(), "" | "nvml" | "nvidia-smi")
             && [&c.gpu_sampled_at, &c.containers_sampled_at].iter().all(|v| v.as_ref().is_none_or(|v| chrono::DateTime::parse_from_rfc3339(v).is_ok()))
             && metric(c.gpu_duration_ms)
-            && c.metrics.len() <= 19 && c.metrics.iter().all(|(name, value)| value.validate(name)))
+            && c.metrics.len() <= 20 && c.metrics.iter().all(|(name, value)| value.validate(name)))
             && self.engine_observations.len()<=4 && self.engine_observations.iter().all(EngineObservation::validate)
             && self.schema_version == 1
             && chrono::DateTime::parse_from_rfc3339(&self.sampled_at).is_ok()
@@ -236,6 +347,8 @@ impl FleetHostSnapshot {
                 && c.load_average.iter().all(|v| metric(Some(*v))))
             && [&self.memory, &self.disk].iter().all(|m| m.as_ref().is_none_or(|m|
                 m.available_bytes <= m.total_bytes && m.used_bytes <= m.total_bytes))
+            && self.filesystems.len() <= 16 && self.filesystems.iter().all(HostFilesystem::validate)
+            && self.block_devices.len() <= 16 && self.block_devices.iter().all(HostBlockDevice::validate)
             && self.network.len() <= 32 && self.network.iter().all(|n| text(&n.name, 128)
                 && metric(n.rx_bytes_per_second) && metric(n.tx_bytes_per_second))
             && self.gpus.len() <= 16 && self.gpus.iter().all(|g| text(&g.uuid, 128) && text(&g.name, 256)
@@ -266,6 +379,61 @@ pub(crate) fn fixture() -> FleetHostSnapshot {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn storage_round_trip_legacy_nulls_and_validation() {
+        let legacy = fixture();
+        assert!(legacy.filesystems.is_empty() && legacy.block_devices.is_empty());
+        let mut value = serde_json::to_value(legacy).unwrap();
+        value["filesystems"] = serde_json::json!([{"mount_point":"/","mount_points":["/","/home"],"device":"/dev/nvme0n1p2","device_id":"259:2","filesystem_type":"ext4","read_only":false,"total_bytes":1000,"free_bytes":600,"available_bytes":500,"used_bytes":400,"inodes_total":100,"inodes_free":30,"inodes_used":70}]);
+        value["block_devices"] = serde_json::json!([{"name":"nvme0n1","device_id":"259:0","leaf_device":true,"read_bytes_per_second":512.0,"write_bytes_per_second":0.0,"read_iops":1.0,"write_iops":0.0,"read_latency_ms":2.0,"write_latency_ms":null,"busy_percent":2.0,"in_flight":0,"average_queue_depth":0.02}]);
+        value["collection"] = serde_json::json!({"host_interval_ms":1000,"gpu_interval_ms":5000,"container_interval_ms":5000,"gpu_backend":"nvml","gpu_sampled_at":null,"containers_sampled_at":null,"gpu_duration_ms":null,"metrics":{"disk":{"interval_ms":30000,"sampled_at":"2026-10-03T12:00:00Z"},"disk_io":{"interval_ms":1000,"sampled_at":"2026-10-03T12:00:00Z"}}});
+        let snapshot: FleetHostSnapshot = serde_json::from_value(value.clone()).unwrap();
+        assert!(snapshot.validate());
+        assert_eq!(
+            snapshot,
+            serde_json::from_slice(&serde_json::to_vec(&snapshot).unwrap()).unwrap()
+        );
+        for (field, bad) in [
+            ("mount_point", serde_json::json!("/../private")),
+            ("available_bytes", serde_json::json!(700)),
+            ("inodes_used", serde_json::json!(71)),
+            ("device_id", serde_json::json!("SECRET")),
+        ] {
+            let mut bad_value = value.clone();
+            bad_value["filesystems"][0][field] = bad;
+            assert!(
+                !serde_json::from_value::<FleetHostSnapshot>(bad_value)
+                    .unwrap()
+                    .validate()
+            );
+        }
+        for (field, bad) in [
+            ("name", serde_json::json!("../device")),
+            ("busy_percent", serde_json::json!(101.0)),
+            ("read_iops", serde_json::json!(-1.0)),
+        ] {
+            let mut bad_value = value.clone();
+            bad_value["block_devices"][0][field] = bad;
+            assert!(
+                !serde_json::from_value::<FleetHostSnapshot>(bad_value)
+                    .unwrap()
+                    .validate()
+            );
+        }
+        value["block_devices"][0]["read_bytes_per_second"] = serde_json::Value::Null;
+        value["block_devices"][0]["read_iops"] = serde_json::Value::Null;
+        for field in ["inodes_total", "inodes_free", "inodes_used"] {
+            value["filesystems"][0][field] = serde_json::Value::Null;
+        }
+        assert!(
+            serde_json::from_value::<FleetHostSnapshot>(value)
+                .unwrap()
+                .validate()
+        );
+        let mut bounded = snapshot;
+        bounded.filesystems = vec![bounded.filesystems[0].clone(); 17];
+        assert!(!bounded.validate());
+    }
     #[test]
     fn fan_telemetry_preserves_unavailable_and_above_100_with_own_interval() {
         let mut sample = fixture();
