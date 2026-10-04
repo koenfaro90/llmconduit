@@ -49,3 +49,22 @@ it('deploys an ordered two-host recipe with generated identifiers and exposes pi
  await waitFor(()=>expect(deploy).toHaveBeenCalledWith({recipe_id:'qwen',revision_digest:'old',hosts:[{endpoint_id:'two',address:'192.168.37.108'},{endpoint_id:'one',address:'192.168.37.107'}],desired_state:'ready'}));
  expect(screen.queryByLabelText('Deployment ID')).toBeNull();
 });
+
+it('shows the largest compatible memory peak alongside newer ordinary smoke evidence',async()=>{
+ const client=getConnection().client;
+ const spec={image:'pinned',gpus:'device=0',memory_limit:'28g',gpu_memory:{mode:'shared',mib_per_device:17408,fraction:0}};
+ vi.mocked(client.management).mockResolvedValue({recipes:{model:[
+  {revision:1,digest:'family',description:'family',created_at_ms:1,model_spec:{...spec,metadata:{gpu_families:['spark']},sizes:{small:{overrides:{memory_limit:'28g'}}}}},
+  {revision:2,digest:'old',description:'small',created_at_ms:2,model_spec:{...spec,metadata:{size_name:'small',size_source_digest:'family'}}},
+  {revision:3,digest:'new',description:'small',created_at_ms:3,model_spec:{...spec,metadata:{size_name:'small',size_source_digest:'family'}}},
+ ]},deployments:{}});
+ const base={recipe_id:'model',endpoint_id:'host',kind:'smoke'};
+ vi.spyOn(client,'recipeEvidence').mockResolvedValue([
+  {...base,id:'ordinary',revision_digest:'new',recorded_at_ms:4,data:{passed_requests:2}},
+  {...base,id:'high',revision_digest:'new',recorded_at_ms:3,data:{memory_profile:{gpu_peak_mib:{0:12288},unified_peak_mib:24576}}},
+  {...base,id:'low',revision_digest:'old',recorded_at_ms:2,data:{memory_profile:{gpu_peak_mib:{0:11264},unified_peak_mib:20480}}},
+ ]);
+ renderWithQuery(<RecipesView/>);
+ await waitFor(()=>expect(screen.getByTestId('recipe-revisions')).toHaveTextContent('Measured peak: 12.0 GiB GPU · 24.0 GiB unified'));
+ expect(screen.getByRole('button',{name:'Review small evidence'})).toBeInTheDocument();
+});

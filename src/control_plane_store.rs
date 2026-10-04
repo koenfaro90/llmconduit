@@ -3667,8 +3667,14 @@ impl PersistenceStore for SqlStore {
         digest: Option<&str>,
     ) -> StoreResult<Vec<MetricSample>> {
         let p = self.postgres();
+        // Ordinary smoke checks must not hide a calibrated memory profile.
+        let memory_class = if p {
+            "CASE WHEN kind='smoke' AND jsonb_typeof(data::jsonb #> '{data,memory_profile}')='object' THEN 1 ELSE 0 END"
+        } else {
+            "CASE WHEN kind='smoke' AND json_type(data,'$.data.memory_profile')='object' THEN 1 ELSE 0 END"
+        };
         let sql = format!(
-            "SELECT recipe_id,ts_ms,data FROM (SELECT recipe_id,ts_ms,data,ROW_NUMBER() OVER (PARTITION BY recipe_id,revision_digest,endpoint_id,kind ORDER BY ts_ms DESC,id DESC) AS rank FROM recipe_evidence WHERE (recipe_id={} OR {}='') AND (revision_digest={} OR {}='')) AS evidence WHERE rank=1 ORDER BY ts_ms DESC LIMIT 1024",
+            "SELECT recipe_id,ts_ms,data FROM (SELECT recipe_id,ts_ms,data,ROW_NUMBER() OVER (PARTITION BY recipe_id,revision_digest,endpoint_id,kind,{memory_class} ORDER BY ts_ms DESC,id DESC) AS rank FROM recipe_evidence WHERE (recipe_id={} OR {}='') AND (revision_digest={} OR {}='')) AS evidence WHERE rank=1 ORDER BY ts_ms DESC LIMIT 1024",
             placeholder(p, 1),
             placeholder(p, 2),
             placeholder(p, 3),
@@ -4395,6 +4401,44 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[tokio::test]
+    async fn dashboard_memory_evidence_survives_newer_ordinary_smoke_checks() {
+        use super::{PersistenceStore, SqlStore};
+        let store = SqlStore::connect_sqlite("sqlite::memory:").await.unwrap();
+        let mut record = crate::dashboard_recipe_evidence::Record {
+            id: "memory-old".into(),
+            recipe_id: "model".into(),
+            revision_digest: "pinned".into(),
+            endpoint_id: "host".into(),
+            kind: "smoke".into(),
+            recorded_at_ms: 1,
+            data: serde_json::json!({"passed_requests":16,"memory_profile":{"gpu_peak_mib":{"0":12000}}}),
+        };
+        store.record_recipe_evidence(record.clone()).await.unwrap();
+        record.id = "memory-new".into();
+        record.recorded_at_ms = 2;
+        store.record_recipe_evidence(record.clone()).await.unwrap();
+        record.id = "ordinary-smoke".into();
+        record.recorded_at_ms = 3;
+        record.data = serde_json::json!({"passed_requests":2,"memory_profile":null});
+        store.record_recipe_evidence(record).await.unwrap();
+        let samples = store
+            .recipe_evidence_history(Some("model"), Some("pinned"))
+            .await
+            .unwrap();
+        assert_eq!(samples.len(), 2);
+        let ids = samples
+            .iter()
+            .map(|s| {
+                serde_json::from_str::<serde_json::Value>(&s.data).unwrap()["id"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["ordinary-smoke", "memory-new"]);
     }
 
     use super::*;
