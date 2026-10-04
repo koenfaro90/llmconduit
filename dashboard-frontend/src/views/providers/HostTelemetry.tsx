@@ -17,7 +17,7 @@ export function HostTelemetry({ nodes, now = Date.now() }: { nodes: MeshNode[]; 
     <h2 className="text-sm font-semibold">Fleet hosts</h2>
     <p className="mt-1 text-xs text-text-muted">Live system and container observations</p>
     {!nodes.length && <p className="mt-3 text-xs text-text-muted">No enrolled hosts.</p>}
-    <div className="mt-3 grid gap-3 lg:grid-cols-2">{[...nodes].sort((a,b)=>(a.host_snapshot?.hostname??a.label??a.endpoint_id).localeCompare(b.host_snapshot?.hostname??b.label??b.endpoint_id,undefined,{numeric:true})).map(node => {
+    <div className={`mt-3 grid gap-3 ${nodes.length>1?'lg:grid-cols-2':''}`}>{[...nodes].sort((a,b)=>(a.host_snapshot?.hostname??a.label??a.endpoint_id).localeCompare(b.host_snapshot?.hostname??b.label??b.endpoint_id,undefined,{numeric:true})).map(node => {
       const host = node.host_snapshot;
       const age = host ? (now - Date.parse(host.sampled_at)) / 1000 : NaN;
       const stale = !Number.isFinite(age) || age > 20 || age < -30 || !node.enabled;
@@ -48,7 +48,7 @@ export function HostTelemetry({ nodes, now = Date.now() }: { nodes: MeshNode[]; 
               {id:'available',label:'Available',value:f=>f.available_bytes,render:f=>bytes(f.available_bytes)},
               {id:'free',label:'Free (incl. reserved)',value:f=>f.free_bytes,render:f=>bytes(f.free_bytes)},
               {id:'inodes',label:'Inodes used / total',value:f=>f.inodes_total&&f.inodes_used!=null?f.inodes_used/f.inodes_total:null,render:f=>f.inodes_total&&f.inodes_used!=null?`${f.inodes_used.toLocaleString()} / ${f.inodes_total.toLocaleString()} (${percent(f.inodes_used/f.inodes_total*100)})`:DASH},
-              {id:'access',label:'Access',value:f=>f.read_only?'Read only':'Read/write',render:f=><span title={f.read_only?'Host mount is read only':'Host mount is read/write'}><StatusIcon status={f.read_only?'read only':'ready'}/><span className="ml-1">{f.read_only?'RO':'RW'}</span></span>},
+              {id:'access',label:'Access',value:f=>f.read_only?'Read only':'Read/write',render:f=><span title={f.read_only?'Host mount is read only':'Host mount is read/write'}><StatusIcon status={f.read_only?'read only':'read/write'}/><span className="ml-1">{f.read_only?'RO':'RW'}</span></span>},
             ]} emptyMessage="No filesystem sample available."/>
             <p className="text-[10px] text-text-muted">Host mounts, grouped by filesystem; aliases share capacity. Available excludes filesystem-reserved space. Access is the primary host mount’s mode. Network/pseudo filesystems and directory scans are excluded.</p>
           </section>
