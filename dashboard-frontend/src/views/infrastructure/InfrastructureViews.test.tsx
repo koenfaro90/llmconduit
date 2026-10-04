@@ -21,6 +21,20 @@ it('aggregates replicas once and expands every host without duplicating request 
  expect(screen.getByTestId('running-models').querySelectorAll('tbody > tr')).toHaveLength(3);
 });
 
+it('chooses different physical devices for each host and requires the recipe GPU count',async()=>{
+ const client=getConnection().client;
+ vi.mocked(client.management).mockResolvedValue({recipes:{model:[{revision:1,digest:'pinned',description:'two GPUs',model_spec:{image:'pinned',gpus:'device=0,1',memory_limit:'4g'},created_at_ms:1}]},deployments:{}});
+ const deploy=vi.spyOn(client,'deployGroup').mockResolvedValue({group_id:'generated',deployments:{}});
+ const nodes=['one','two'].map((id,index)=>({endpoint_id:id,label:id,enabled:true,managed_deployments:true,host_snapshot:{sampled_at:new Date().toISOString(),hostname:id,gpus:Array.from({length:4},(_,i)=>({index:i+index*4,name:'NVIDIA RTX PRO 6000 Blackwell',unified_memory:false,memory_total_mib:96000,memory_used_mib:0})),managed_capacity:{memory_budget_mib:128000,memory_reserved_mib:0,gpu_sharing_enabled:true,gpus:Array.from({length:4},(_,i)=>({index:i+index*4,total_mib:96000,budget_mib:95000,reserved_mib:0,unified_memory:false}))}}} as MeshNode));
+ renderWithQuery(<RecipeManagement mode="deployment" mutationsEnabled nodes={nodes}/>);
+ await screen.findByRole('option',{name:'model · revision 1'});fireEvent.change(screen.getByLabelText('Recipe revision'),{target:{value:'model:pinned'}});
+ fireEvent.click(screen.getByLabelText('GPU 1 on one'));expect(screen.getByLabelText('Deploy to one')).toBeDisabled();
+ fireEvent.click(screen.getByLabelText('GPU 3 on one'));fireEvent.click(screen.getByLabelText('Deploy to one'));
+ fireEvent.click(screen.getByLabelText('GPU 4 on two'));fireEvent.click(screen.getByLabelText('GPU 6 on two'));fireEvent.click(screen.getByLabelText('Deploy to two'));
+ fireEvent.click(screen.getByRole('button',{name:'Deploy'}));
+ await waitFor(()=>expect(deploy).toHaveBeenCalledWith(expect.objectContaining({hosts:[{endpoint_id:'one',address:'one',gpus:[0,3]},{endpoint_id:'two',address:'two',gpus:[5,6]}]})));
+});
+
 it('deploys an ordered two-host recipe with generated identifiers and exposes pinned revisions',async()=>{
  const client=getConnection().client;const spec={distributed:[{image:'pinned'},{image:'pinned'}]};
  vi.mocked(client.management).mockResolvedValue({recipes:{qwen:[{revision:1,digest:'old',description:'tested',model_spec:spec,created_at_ms:1},{revision:2,digest:'new',description:'new',model_spec:spec,created_at_ms:2}]},deployments:{}});

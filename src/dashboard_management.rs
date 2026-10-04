@@ -1057,6 +1057,7 @@ mod tests {
             group_id: "pair".into(),
             rank: 1,
             addresses: vec!["host1".into(), "host2".into()],
+            gpus: None,
         };
         assert_eq!(
             crate::dashboard_deployment_groups::render(&restored.model_spec, Some(&placement))

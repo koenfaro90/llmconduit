@@ -20,5 +20,9 @@ export function deploymentRows(state: ManagementState | undefined, nodes: MeshNo
 
 export function runtimeSpec(row:DeploymentRow):Record<string,unknown>{
   const spec=row.revision?.model_spec??{};
-  return Array.isArray(spec.distributed)?spec.distributed[row.deployment.placement?.rank??0] as Record<string,unknown>??{}:spec;
+  return placedSpec(spec,row.deployment);
+}
+export function placedSpec(spec:Record<string,unknown>,deployment:Pick<DesiredDeployment,'placement'>):Record<string,unknown>{
+ const rank=Array.isArray(spec.distributed)?spec.distributed[deployment.placement?.rank??0] as Record<string,unknown>??{}:spec;
+ return deployment.placement?.gpus?{...rank,gpus:`device=${deployment.placement.gpus.join(',')}`}:rank;
 }

@@ -194,6 +194,28 @@ mod tests {
         assert!(check(&state, "two", &d, Some(&h)).is_ok());
     }
     #[test]
+    fn reservations_follow_placement_devices_instead_of_recipe_defaults() {
+        let (mut state, d, mut h) = fixture();
+        let mut second = h.managed_capacity.as_ref().unwrap().gpus[0].clone();
+        second.index = 1;
+        h.managed_capacity.as_mut().unwrap().gpus.push(second);
+        state.deployments.insert("first".into(), d.clone());
+        let mut placed = d.clone();
+        placed.placement = Some(crate::dashboard_deployment_groups::Placement {
+            group_id: "g".into(),
+            rank: 0,
+            addresses: vec!["host".into()],
+            gpus: Some(vec![1]),
+        });
+        assert!(check(&state, "second", &placed, Some(&h)).is_ok());
+        state.deployments.insert("second".into(), placed.clone());
+        assert!(
+            check(&state, "third", &placed, Some(&h))
+                .unwrap_err()
+                .contains("GPU 1 memory")
+        );
+    }
+    #[test]
     fn shared_capacity_requires_fresh_permission_and_unified_ram_coverage() {
         let (state, d, mut h) = fixture();
         assert!(check(&state, "one", &d, None).is_err());

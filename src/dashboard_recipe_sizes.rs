@@ -130,6 +130,11 @@ fn apply(model: &mut Value, size: &Size) -> Result<(), &'static str> {
             );
         }
         if parameter == "gpu_memory_utilization"
+            && size
+                .overrides
+                .get("gpu_memory")
+                .and_then(|v| v.get("fraction"))
+                .is_none()
             && let Some(memory) = object.get_mut("gpu_memory").and_then(Value::as_object_mut)
         {
             memory.insert("fraction".into(), value.clone());
@@ -322,5 +327,18 @@ mod tests {
         assert_eq!(resolved["command"][5], "4G");
         assert_eq!(resolved["environment"]["MAX_NUM_SEQS"], "16");
         assert_eq!(resolved["environment"]["OTHER"], "preserved");
+    }
+    #[test]
+    fn calibrated_fixed_cache_budget_can_override_utilization_fraction() {
+        let mut spec = recipe();
+        spec["sizes"]["compact"]["overrides"]["gpu_memory"]["fraction"] = json!(0.0);
+        let resolved = resolve(&spec, "compact", &"a".repeat(64)).unwrap();
+        assert_eq!(resolved["gpu_memory"]["fraction"], 0.0);
+        assert!(
+            resolved["command"][2]
+                .as_str()
+                .unwrap()
+                .contains("--gpu-memory-utilization 0.3")
+        );
     }
 }

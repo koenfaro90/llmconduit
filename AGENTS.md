@@ -8,7 +8,13 @@ Rust LLM API gateway. Accepts OpenAI Responses, OpenAI Chat Completions, and Ant
 task APIs (JSON/multipart/binary streaming). Video handles persist owner/backend
 routing in SQL. See `docs/media-api.md`. Infrastructure pages separate Hosts, Recipes,
 Models, Deployment, Benchmarks and opt-in Traffic policies; Providers retains upstream/mesh administration. Host history is collected into SQL independently of browsers; recipes use Monaco JSON editing and portable distributed placement. Recipes offer named sizes with immutable resolved revisions;
-opt-in shared GPU admission uses host-owned RAM/VRAM reservations and fresh capacity reports. See `docs/fleet-dashboard-management.md` and `docs/production-traffic.md`. Adds server-side Brave web search, per-model defaults, nested failover/model routing across upstreams, replay caching, request-log analysis, and an optional debug UI.
+opt-in shared GPU admission uses host-owned RAM/VRAM reservations and fresh capacity reports.
+Physical GPU selections belong to per-rank deployment placement, must preserve the recipe's
+device count and require observed unload before changes. Rendering, admission, Start/Stop,
+model details and UI capacity must all use selected devices rather than recipe defaults.
+Memory validation evidence records measured startup/load peaks and explicit margins per
+resolved revision and tested hardware; do not label an untested size as calibrated.
+See `docs/fleet-dashboard-management.md` and `docs/production-traffic.md`. Adds server-side Brave web search, per-model defaults, nested failover/model routing across upstreams, replay caching, request-log analysis, and an optional debug UI.
 
 Use the code layout below as the architecture map when touching unfamiliar areas.
 

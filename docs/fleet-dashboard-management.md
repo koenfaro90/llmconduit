@@ -74,3 +74,37 @@ Single-host deployment IDs may move only after the old host has positively
 reported unload. Its durable local desire remains unloaded; new generations and
 observations belong to the new host. Changing revisions also requires observed
 unload. Distributed group moves still require a new placement.
+
+## Physical GPU placement and measured memory
+
+Each selected host can supply `gpus: [2, 3]` in the deployment-group request.
+The controller persists these physical indices in that rank's placement, renders
+`device=2,3` for Fleet and reserves those devices rather than the recipe defaults.
+The selected count must match the recipe's explicit per-rank device count; duplicate,
+missing, incompatible and out-of-range devices are rejected. Every rank can choose
+different indices. Omission preserves existing placements and recipe selections.
+Changing GPUs requires observed unload, just like changing the executable revision.
+
+The Deployment page shows device selection, measured utilization/VRAM and unreserved
+budgets per GPU. Pending central placements count before the next Fleet observation.
+Models and Deployment display physical indices. NVIDIA visibility uses physical host
+IDs; CUDA visibility remains local to the exposed container devices. Changing placement
+does not edit the immutable recipe or its tensor-parallel degree. Shared memory settings
+apply per selected device; host RAM still has a separate budget.
+
+Smoke evidence may include a bounded `memory_profile`, pinned to revision, host,
+generation and physical placement. It records sampled NVIDIA process GPU peaks,
+kernel container RAM peaks, unified working-memory peaks, sampling interval/duration,
+tested context/concurrency/image pixels and the explicit safety-margin rule. At least
+two successful requests, no failures and measurements for every assigned device are
+required. The source remains an operator measurement report, not an automatically
+certified universal requirement. Recipes shows measured peaks separately from
+reservation budgets and links each resolved size to its own evidence.
+
+Fixed KV bytes disable vLLM's utilization-based profiling. A calibrated size can
+explicitly declare `gpu_memory.fraction: 0` to reserve its measured MiB requirement
+plus margin while retaining the engine utilization setting. Without an explicit
+fraction override, the typed utilization setting still sets the reservation fraction.
+Measurements apply to the recorded image, settings, GPU family and tested workload;
+changes require validation again. Sampled peaks include startup and inference; a
+budget adds a visible margin rather than treating idle usage as the requirement.

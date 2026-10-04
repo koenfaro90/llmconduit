@@ -9,7 +9,7 @@ import {StatChip} from '../../components/ui/StatChip';
 import {runtimeSpec,deploymentRows,type DeploymentRow} from './managementModel';
 import {useManagement} from './useManagement';
 import {resourceLabel,sizeName} from './recipeSizes';
-import {shortHost,compareNames} from './hardwareModel';
+import {shortHost,compareNames,gpuDevices} from './hardwareModel';
 interface ModelRow extends DeploymentRow {aggregate:boolean;children:ModelRow[];last:number|null;counts:number[]|null}
 export function ModelsView(){
   const {nodes,state,error}=useManagement();const {client}=getConnection();const [query,setQuery]=useState('');const [expanded,setExpanded]=useState<string[]>([]);const [details,setDetails]=useState<DeploymentRow|null>(null);
@@ -24,6 +24,7 @@ export function ModelsView(){
     <DataTable interactive id="running-models" tableTestId="running-models" rows={rows} rowKey={r=>r.id} minWidth={1250} filterBar={<input aria-label="Search models" placeholder="Find a model or host…" value={query} onChange={e=>setQuery(e.target.value)} className="rounded border border-line bg-panel p-2 text-xs"/>} columns={[
       {id:'model',label:'Model',required:true,render:r=>r.aggregate?<strong>{r.model}</strong>:<span className="pl-3 text-text-muted">↳ {r.host}</span>,value:r=>r.aggregate?r.model:r.host},
       {id:'host',label:'Placement',value:r=>r.aggregate?r.children.map(c=>c.host).join(', '):r.host,render:r=><span className="flex flex-wrap gap-1">{r.aggregate&&<span className="text-text-muted">{new Set(r.children.map(c=>c.deployment.endpoint_id)).size} hosts · </span>}{(r.aggregate?r.children:[r]).filter((c,i,list)=>list.findIndex(other=>other.deployment.endpoint_id===c.deployment.endpoint_id)===i).map(c=><a key={c.deployment.endpoint_id} title={c.host} className="text-accent" href={`#/hosts/${c.deployment.endpoint_id}`} onClick={e=>e.stopPropagation()}>{shortHost(c.host)}</a>)}</span>},
+      {id:'gpus',label:'Physical GPUs',value:r=>r.aggregate?r.children.map(c=>`${shortHost(c.host)}: ${gpuDevices(runtimeSpec(c))?.join(', ')??'—'}`).join(' · '):gpuDevices(runtimeSpec(r))?.join(', ')??'—',render:r=>r.aggregate?r.children.map(c=>`${shortHost(c.host)}: ${gpuDevices(runtimeSpec(c))?.join(', ')??'—'}`).join(' · '):gpuDevices(runtimeSpec(r))?.join(', ')??'—'},
       {id:'recipe',label:'Recipe / revision',render:r=>r.aggregate?[...new Set(r.children.map(c=>c.deployment.recipe_id))].join(', '):`${r.deployment.recipe_id} · ${r.revision?.revision??'—'}`},
       {id:'size',label:'Size / memory',render:r=>r.aggregate?[...new Set(r.children.map(c=>sizeName(c.revision)??'default'))].join(', '):`${sizeName(r.revision)??'default'} · ${resourceLabel(runtimeSpec(r))}`},
       {id:'state',label:'State',value:r=>r.aggregate?r.children.every(c=>c.deployment.observed?.status?.phase==='ready')?'ready':'pending':r.deployment.observed?.status?.phase??'unknown',render:r=><StatusIcon status={r.aggregate?r.children.every(c=>c.deployment.observed?.status?.phase==='ready')?'ready':'pending':r.deployment.observed_at_ms==null||Date.now()-r.deployment.observed_at_ms>20_000?'stale':r.deployment.observed?.status?.phase??'unknown'}/>},

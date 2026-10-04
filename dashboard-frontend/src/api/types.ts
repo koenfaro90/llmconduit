@@ -2310,7 +2310,7 @@ export interface RecipeRevision {
   created_at_ms: number;
 }
 export interface DesiredDeployment {
-  placement?: {group_id:string;rank:number;addresses:string[]};
+  placement?: {group_id:string;rank:number;addresses:string[];gpus?:number[]};
   generation: number;
   endpoint_id: string;
   recipe_id: string;

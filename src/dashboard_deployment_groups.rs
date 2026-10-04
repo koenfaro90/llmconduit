@@ -23,14 +23,19 @@ pub struct Placement {
     pub group_id: String,
     pub rank: u32,
     pub addresses: Vec<String>,
+    /// Physical host indices; absence retains the pinned recipe's device selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpus: Option<Vec<u32>>,
 }
-#[derive(Clone, utoipa::ToSchema, Deserialize)]
+#[derive(Clone, utoipa::ToSchema, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Host {
     pub endpoint_id: String,
     pub address: String,
+    #[serde(default)]
+    pub gpus: Option<Vec<u32>>,
 }
-#[derive(Clone, utoipa::ToSchema, Deserialize)]
+#[derive(Clone, utoipa::ToSchema, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Selection {
     #[serde(default)]
@@ -66,6 +71,57 @@ pub fn render(spec: &Value, placement: Option<&Placement>) -> Result<Value, Stri
             || p.addresses.iter().any(|s| !valid_address(s))
         {
             return Err("invalid placement addresses".into());
+        }
+        if let Some(selected) = &p.gpus {
+            let original = model
+                .get("gpus")
+                .and_then(Value::as_str)
+                .and_then(|s| s.strip_prefix("device="))
+                .and_then(|s| {
+                    s.split(',')
+                        .map(str::parse::<u32>)
+                        .collect::<Result<Vec<_>, _>>()
+                        .ok()
+                })
+                .ok_or("GPU placement requires an explicit recipe device count")?;
+            if selected.is_empty()
+                || selected.len() != original.len()
+                || selected.len() > 64
+                || selected.iter().any(|i| *i >= 64)
+                || selected
+                    .iter()
+                    .collect::<std::collections::HashSet<_>>()
+                    .len()
+                    != selected.len()
+            {
+                return Err("select distinct GPUs matching the recipe's device count".into());
+            }
+            if selected != &original {
+                let csv = selected
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",");
+                model["gpus"] = json!(format!("device={csv}"));
+                // NVIDIA uses physical host IDs; CUDA indexes the devices exposed inside
+                // this container. Keep the engine's local tensor-parallel numbering.
+                if let Some(env) = model.get_mut("environment").and_then(Value::as_object_mut) {
+                    if env.contains_key("NVIDIA_VISIBLE_DEVICES") {
+                        env.insert("NVIDIA_VISIBLE_DEVICES".into(), json!(csv));
+                    }
+                    if env.contains_key("CUDA_VISIBLE_DEVICES") {
+                        env.insert(
+                            "CUDA_VISIBLE_DEVICES".into(),
+                            json!(
+                                (0..selected.len())
+                                    .map(|i| i.to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(",")
+                            ),
+                        );
+                    }
+                }
+            }
         }
         fn replace(value: &mut Value, p: &Placement) {
             match value {
@@ -171,6 +227,7 @@ fn apply(
             group_id: group.to_owned(),
             rank: rank as u32,
             addresses: addresses.clone(),
+            gpus: host.gpus.clone(),
         };
         if let Some(current) = current {
             if current.endpoint_id != host.endpoint_id {
@@ -187,7 +244,7 @@ fn apply(
                         != Some("unloaded"))
             {
                 return Err(
-                    "all ranks must be observed unloaded before changing the revision or addresses"
+                    "all ranks must be observed unloaded before changing the revision, addresses or GPUs"
                         .into(),
                 );
             }
@@ -311,6 +368,43 @@ pub async fn select(
             Err(message) => return err(StatusCode::CONFLICT, &message),
         };
         for (id, deployment) in &result {
+            if body.desired_state == "ready" {
+                let rendered = state
+                    .recipes
+                    .get(&deployment.recipe_id)
+                    .and_then(|rs| rs.iter().find(|r| r.digest == deployment.revision_digest))
+                    .and_then(|r| render(&r.model_spec, deployment.placement.as_ref()).ok());
+                if let Some(indices) = rendered
+                    .as_ref()
+                    .and_then(|s| s.get("gpus"))
+                    .and_then(Value::as_str)
+                    .and_then(|s| s.strip_prefix("device="))
+                {
+                    let snapshot = deployment
+                        .endpoint_id
+                        .parse()
+                        .ok()
+                        .and_then(|e| admin.registry().host_snapshot(e));
+                    let recipe = &state.recipes[&deployment.recipe_id]
+                        .iter()
+                        .find(|r| r.digest == deployment.revision_digest)
+                        .unwrap()
+                        .model_spec;
+                    if indices.split(',').any(|i| {
+                        let Some(mut one) = snapshot.clone() else {
+                            return true;
+                        };
+                        one.gpus.retain(|g| Some(g.index) == i.parse::<u32>().ok());
+                        one.gpus.is_empty()
+                            || !dashboard_management::matches_hardware(recipe, Some(&one))
+                    }) {
+                        return err(
+                            StatusCode::CONFLICT,
+                            "selected GPU is unavailable or does not match the recipe's hardware",
+                        );
+                    }
+                }
+            }
             if let Err(message) = crate::dashboard_resource_admission::check(
                 &state,
                 id,
@@ -342,12 +436,50 @@ pub async fn select(
 mod tests {
     use super::*;
     #[test]
+    fn gpu_placement_round_trips_and_renders_each_rank_independently() {
+        let input = json!({"endpoint_id":"host","address":"host","gpus":[4,5]});
+        let host: Host = serde_json::from_value(input.clone()).unwrap();
+        assert_eq!(serde_json::to_value(host).unwrap(), input);
+        let spec = json!({"distributed":[{"gpus":"device=0,1","environment":{"NVIDIA_VISIBLE_DEVICES":"all","CUDA_VISIBLE_DEVICES":"0,1","OTHER":"unchanged"}},{"gpus":"device=0,1"}]});
+        let p: Placement = serde_json::from_value(
+            json!({"group_id":"group","rank":0,"addresses":["one","two"],"gpus":[4,5]}),
+        )
+        .unwrap();
+        let restored: Placement =
+            serde_json::from_value(serde_json::to_value(&p).unwrap()).unwrap();
+        assert_eq!(p, restored);
+        let rendered = render(&spec, Some(&p)).unwrap();
+        assert_eq!(rendered["gpus"], "device=4,5");
+        assert_eq!(rendered["environment"]["NVIDIA_VISIBLE_DEVICES"], "4,5");
+        assert_eq!(rendered["environment"]["CUDA_VISIBLE_DEVICES"], "0,1");
+        assert_eq!(rendered["environment"]["OTHER"], "unchanged");
+        let mut worker = p.clone();
+        worker.rank = 1;
+        worker.gpus = Some(vec![2, 3]);
+        assert_eq!(render(&spec, Some(&worker)).unwrap()["gpus"], "device=2,3");
+        assert_eq!(spec["distributed"][0]["gpus"], "device=0,1");
+        for devices in [vec![], vec![0], vec![0, 0], vec![64, 65]] {
+            let mut invalid = p.clone();
+            invalid.gpus = Some(devices);
+            assert!(render(&spec, Some(&invalid)).is_err());
+        }
+        let old: Placement =
+            serde_json::from_value(json!({"group_id":"group","rank":0,"addresses":["one","two"]}))
+                .unwrap();
+        assert!(old.gpus.is_none());
+        assert_eq!(
+            render(&spec, Some(&old)).unwrap()["environment"]["NVIDIA_VISIBLE_DEVICES"],
+            "all"
+        );
+    }
+    #[test]
     fn distributed_render_preserves_rank_specs_and_binds_addresses() {
         let spec = json!({"distributed":[{"command":["--master-addr","{{head_address}}","--host","{{host_address}}"]},{"command":["--node-rank","{{node_rank}}","--nnodes","{{num_nodes}}"],"environment":{"VLLM_HOST_IP":"{{host_address}}"}}]});
         let p = Placement {
             group_id: "group".into(),
             rank: 1,
             addresses: vec!["192.168.37.107".into(), "192.168.37.108".into()],
+            gpus: None,
         };
         let rendered = render(&spec, Some(&p)).unwrap();
         assert_eq!(
@@ -381,10 +513,12 @@ mod tests {
                 Host {
                     endpoint_id: endpoint.clone(),
                     address: "127.0.0.1".into(),
+                    gpus: None,
                 },
                 Host {
                     endpoint_id: endpoint,
                     address: "127.0.0.2".into(),
+                    gpus: None,
                 },
             ],
             expected_generations: BTreeMap::new(),

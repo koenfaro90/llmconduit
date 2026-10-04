@@ -1,11 +1,12 @@
 import type {MeshNode,RecipeRevision,ManagementState} from '../../api/types';
-import {hostCapacity,gpuDevices,rankSpecs} from './hardwareModel';
+import {hostCapacity,gpuDevices} from './hardwareModel';
+import {placedSpec} from './managementModel';
 export interface SizeDefinition {description?:string;overrides?:Record<string,unknown>;vllm?:Record<string,string|number>}
 export function sizes(revision:RecipeRevision):Record<string,SizeDefinition>{return revision.model_spec.sizes as Record<string,SizeDefinition>??{};}
 export function sizeName(revision:RecipeRevision|undefined){return (revision?.model_spec.metadata as Record<string,unknown>|undefined)?.size_name as string|undefined;}
 export function sizeSpec(revision:RecipeRevision,name:string):Record<string,unknown>{
  const spec=structuredClone(revision.model_spec);const definition=sizes(revision)[name];delete spec.sizes;
- function apply(rank:Record<string,unknown>){Object.assign(rank,definition?.overrides??{});if(definition?.vllm?.gpu_memory_utilization!=null&&rank.gpu_memory){rank.gpu_memory={...rank.gpu_memory as object,fraction:Number(definition.vllm.gpu_memory_utilization)};}return rank;}
+ function apply(rank:Record<string,unknown>){Object.assign(rank,definition?.overrides??{});if(definition?.vllm?.gpu_memory_utilization!=null&&rank.gpu_memory&&(definition.overrides?.gpu_memory as {fraction?:number}|undefined)?.fraction==null){rank.gpu_memory={...rank.gpu_memory as object,fraction:Number(definition.vllm.gpu_memory_utilization)};}return rank;}
  if(Array.isArray(spec.distributed))spec.distributed=spec.distributed.map(rank=>apply(rank as Record<string,unknown>));else apply(spec);
  return spec;
 }
@@ -21,16 +22,26 @@ export function placementFit(spec:Record<string,unknown>,node:MeshNode,state:Man
  const required=gpuDevices(spec);const shared=(spec.gpu_memory as {mode?:string}|undefined)?.mode==='shared';const policy=node.host_snapshot?.managed_capacity;
  if(shared&&(!policy||!policy.gpu_sharing_enabled))return {fits:false,reason:'Shared GPU access is not enabled on this host'};
  if(!policy)return {fits:required?required.every(index=>capacity.freeGpuIndices.includes(index)):capacity.freeGpuIndices.length>0,reason:'Exclusive GPU reservation'};
- // Desired placements can be newer than the latest local capacity report. Count
- // their budgets too, rather than offering a just-reserved device a second time.
+ const ledger=resourceReservations(node,state);const ram=ledger.ram;const reservation=ledger.gpus;
+ const requestedRam=memoryMiB(spec.memory_limit);if(requestedRam==null||Math.max(policy.memory_reserved_mib,ram)+requestedRam>policy.memory_budget_mib)return {fits:false,reason:'Insufficient unreserved RAM budget'};
+ if(!required?.length)return {fits:true,reason:'RAM budget available'};
+ let unified=0;
+ for(const index of required){const gpu=policy.gpus.find(g=>g.index===index);if(!gpu)return {fits:false,reason:`GPU ${index} capacity unavailable`};const held=reservation.get(index);if(gpu.exclusive_deployment||held?.exclusive||!shared&&(gpu.reserved_mib>0||(held?.mib??0)>0))return {fits:false,reason:`GPU ${index} reserved exclusively`};const amount=shared?gpuEstimate(spec,gpu.total_mib):gpu.budget_mib;if(amount==null||Math.max(gpu.reserved_mib,held?.mib??0)+amount>gpu.budget_mib)return {fits:false,reason:`Insufficient GPU ${index} memory budget`};if(shared&&gpu.unified_memory)unified+=amount;}
+ if(unified>requestedRam)return {fits:false,reason:'Unified GPU estimate exceeds RAM budget'};
+ return {fits:true,reason:shared?'Shared GPU and RAM budgets available':'Exclusive GPU and RAM budgets available'};
+}
+export function defaultGpuSelection(spec:Record<string,unknown>,node:MeshNode,state:ManagementState|undefined):number[]|undefined {
+ const required=gpuDevices(spec);if(!required)return undefined;
+ const candidates=(node.host_snapshot?.gpus??[]).slice().sort((a,b)=>a.index-b.index).filter(g=>placementFit({...spec,gpus:`device=${g.index}`},node,state).fits).map(g=>g.index);
+ return candidates.length>=required.length?candidates.slice(0,required.length):required;
+}
+export function resourceReservations(node:MeshNode,state:ManagementState|undefined){
+ const policy=node.host_snapshot?.managed_capacity;
  let ram=0;const reservation=new Map<number,{mib:number;exclusive:boolean}>();
  for(const d of Object.values(state?.deployments??{})){
   if(d.endpoint_id!==node.endpoint_id||d.desired_state!=='ready'&&(!d.observed?.status?.phase||d.observed.status.phase==='unloaded'))continue;
-  const revision=state?.recipes[d.recipe_id]?.find(r=>r.digest===d.revision_digest);const rank=rankSpecs(revision?.model_spec??{})[d.placement?.rank??0]??{};ram+=memoryMiB(rank.memory_limit)??policy.memory_budget_mib;
-  for(const index of gpuDevices(rank)??[]){const gpu=policy.gpus.find(g=>g.index===index);const exclusive=(rank.gpu_memory as {mode?:string}|undefined)?.mode!=='shared';const old=reservation.get(index)??{mib:0,exclusive:false};reservation.set(index,{mib:old.mib+(exclusive?gpu?.budget_mib??0:gpuEstimate(rank,gpu?.total_mib??null)??gpu?.budget_mib??0),exclusive:old.exclusive||exclusive});}
+  const revision=state?.recipes[d.recipe_id]?.find(r=>r.digest===d.revision_digest);const rank=placedSpec(revision?.model_spec??{},d);ram+=memoryMiB(rank.memory_limit)??policy?.memory_budget_mib??0;
+  for(const index of gpuDevices(rank)??[]){const gpu=policy?.gpus.find(g=>g.index===index);const exclusive=(rank.gpu_memory as {mode?:string}|undefined)?.mode!=='shared';const old=reservation.get(index)??{mib:0,exclusive:false};reservation.set(index,{mib:old.mib+(exclusive?gpu?.budget_mib??0:gpuEstimate(rank,gpu?.total_mib??null)??gpu?.budget_mib??0),exclusive:old.exclusive||exclusive});}
  }
- const requestedRam=memoryMiB(spec.memory_limit);if(requestedRam==null||Math.max(policy.memory_reserved_mib,ram)+requestedRam>policy.memory_budget_mib)return {fits:false,reason:'Insufficient unreserved RAM budget'};
- if(!required?.length)return {fits:true,reason:'RAM budget available'};
- for(const index of required){const gpu=policy.gpus.find(g=>g.index===index);if(!gpu)return {fits:false,reason:`GPU ${index} capacity unavailable`};const held=reservation.get(index);if(gpu.exclusive_deployment||held?.exclusive||!shared&&(gpu.reserved_mib>0||(held?.mib??0)>0))return {fits:false,reason:`GPU ${index} reserved exclusively`};const amount=shared?gpuEstimate(spec,gpu.total_mib):gpu.budget_mib;if(amount==null||Math.max(gpu.reserved_mib,held?.mib??0)+amount>gpu.budget_mib)return {fits:false,reason:`Insufficient GPU ${index} memory budget`};if(shared&&gpu.unified_memory&&amount>requestedRam)return {fits:false,reason:'Unified GPU estimate exceeds RAM budget'};}
- return {fits:true,reason:shared?'Shared GPU and RAM budgets available':'Exclusive GPU and RAM budgets available'};
+ return {ram:Math.max(ram,policy?.memory_reserved_mib??0),gpus:reservation};
 }

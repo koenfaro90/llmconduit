@@ -1,8 +1,18 @@
 import {it,expect} from 'vitest';
-import {gpuEstimate,placementFit,sizeSpec} from './recipeSizes';
+import {gpuEstimate,placementFit,sizeSpec,defaultGpuSelection} from './recipeSizes';
 import type {MeshNode,RecipeRevision,ManagementState} from '../../api/types';
 const revision:RecipeRevision={digest:'base',revision:1,description:'',created_at_ms:1,model_spec:{image:'pinned',gpus:'device=0',memory_limit:'100g',sizes:{shared:{overrides:{memory_limit:'40g',gpu_memory:{mode:'shared',mib_per_device:32768}},vllm:{gpu_memory_utilization:0.3}}}}};
 const node=()=>({endpoint_id:'host',enabled:true,managed_deployments:true,host_snapshot:{sampled_at:new Date().toISOString(),gpus:[{index:0,name:'GB10',unified_memory:true}],managed_capacity:{memory_budget_mib:116000,memory_reserved_mib:40960,gpu_sharing_enabled:true,gpus:[{index:0,total_mib:124000,budget_mib:116000,reserved_mib:37200,unified_memory:true}]}}}) as MeshNode;
 it('resolves size budgets without mutating the family; utilization affects estimates',()=>{const spec=sizeSpec(revision,'shared');expect(spec.memory_limit).toBe('40g');expect(gpuEstimate(spec,124000)).toBe(37200);expect(revision.model_spec.memory_limit).toBe('100g');expect(sizeSpec(revision,'').memory_limit).toBe('100g');});
 it('admits shared placements with budget and rejects exclusive, stale and oversized requests',()=>{const host=node();const shared=sizeSpec(revision,'shared');expect(placementFit(shared,host,undefined).fits).toBe(true);expect(placementFit(revision.model_spec,host,undefined).fits).toBe(false);expect(placementFit({...shared,memory_limit:'100g'},host,undefined).fits).toBe(false);host.host_snapshot!.sampled_at='2020-01-01T00:00:00Z';expect(placementFit(shared,host,undefined).reason).toContain('stale');});
 it('counts pending central reservations before the host reports them',()=>{const host=node();host.host_snapshot!.managed_capacity!.memory_reserved_mib=0;host.host_snapshot!.managed_capacity!.gpus[0]!.reserved_mib=0;const shared={...revision,model_spec:sizeSpec(revision,'shared')};const state={recipes:{r:[shared]},deployments:Object.fromEntries(['one','two'].map(id=>[id,{generation:1,endpoint_id:'host',recipe_id:'r',revision_digest:'base',desired_state:'ready',observed:null}]))} as unknown as ManagementState;expect(placementFit({...shared.model_spec,memory_limit:'40g'},host,state).fits).toBe(false);});
+it('offers different physical GPUs and reserves pending placement on the actual selected device',()=>{
+ const host=node();const p=host.host_snapshot!.managed_capacity!;p.memory_reserved_mib=0;p.gpus[0]!.reserved_mib=0;
+ host.host_snapshot!.gpus.push({...host.host_snapshot!.gpus[0]!,index:1});p.gpus.push({...p.gpus[0]!,index:1});
+ const shared={...revision,model_spec:sizeSpec(revision,'shared')};
+ const state={recipes:{r:[shared]},deployments:{pending:{generation:1,endpoint_id:'host',recipe_id:'r',revision_digest:'base',desired_state:'ready',placement:{group_id:'g',rank:0,addresses:['host'],gpus:[1]}}}} as unknown as ManagementState;
+ p.gpus[1]!.budget_mib=40000;
+ expect(placementFit({...shared.model_spec,gpus:'device=1'},host,state).fits).toBe(false);
+ expect(placementFit({...shared.model_spec,gpus:'device=0'},host,state).fits).toBe(true);
+ expect(defaultGpuSelection(shared.model_spec,host,state)).toEqual([0]);
+});
