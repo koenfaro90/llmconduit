@@ -14,6 +14,7 @@ export interface ChartSeries {
   /** `[x epoch ms, y]` points, x ascending. `null` y = gap. */
   points: Array<[number, number | null]>;
   stroke?: string;
+  dash?: string;
 }
 
 
@@ -92,7 +93,7 @@ export function LineChart({
           d += `${pen ? 'L' : 'M'}${sx(x).toFixed(1)},${sy(y).toFixed(1)} `;
           pen = true;
         }
-        return <g key={s.key}><path d={d} fill="none" stroke={stroke} strokeWidth={1.5} data-series={s.key} />{showPoints && s.points.map(([x,y],index)=>y==null?null:<circle key={index} cx={sx(x)} cy={sy(y)} r={2.5} fill={stroke} />)}</g>;
+        return <g key={s.key}><path d={d} fill="none" stroke={stroke} strokeWidth={1.5} strokeDasharray={s.dash} data-series={s.key} />{showPoints && s.points.map(([x,y],index)=>y==null?null:<circle key={index} cx={sx(x)} cy={sy(y)} r={2.5} fill={stroke} />)}</g>;
       })}
     </svg>
   );
@@ -104,7 +105,7 @@ export function ChartLegend({ series }: { series: ChartSeries[] }) {
     <div className="flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-text-muted">
       {series.map((s, i) => (
         <span key={s.key} className="flex items-center gap-1">
-          <span className="inline-block h-1.5 w-3 rounded-sm" style={{ background: s.stroke ?? seriesColor(i) }} />
+          <svg aria-hidden="true" width="18" height="8"><line x1="0" x2="18" y1="4" y2="4" stroke={s.stroke??seriesColor(i)} strokeWidth="2" strokeDasharray={s.dash}/></svg>
           {s.label}
         </span>
       ))}

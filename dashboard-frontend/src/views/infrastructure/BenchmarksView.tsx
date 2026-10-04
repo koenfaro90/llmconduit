@@ -3,6 +3,8 @@ import { useStore } from "zustand";
 import { authStore } from "../../store/authStore";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { getConnection } from "../../api/connection";
+import {NumericMultiSelect} from "../../components/ui/NumericMultiSelect";
+import {compareNames,shortHost} from "./hardwareModel";
 import { Button } from "../../components/ui/Button";
 import { DataTable } from "../../components/ui/DataTable";
 import { Panel } from "../../components/ui/Panel";
@@ -74,7 +76,7 @@ export function BenchmarksView() {
       r.deployment.observed?.status?.phase === "ready" &&
       runtimeSpec(r).readiness != null &&
       !/embedding|rerank/i.test(r.model),
-  );
+  ).sort((a,b)=>compareNames(a.model,b.model)||compareNames(a.host,b.host));
   const hostName = (r: BenchmarkRun) =>
     nodes.find((n) => n.endpoint_id === r.endpoint_id)?.host_snapshot
       ?.hostname ?? r.host;
@@ -92,6 +94,7 @@ export function BenchmarksView() {
   const start = useMutation({
     mutationFn: async () => {
       if (!target) throw Error("Select a ready chat deployment.");
+      if (!concurrency || !contexts) throw Error("Select at least one concurrency and context depth.");
       const options = {
         concurrency: parseMatrix(concurrency, 1, 32, 6),
         contexts: parseMatrix(contexts, 0, 131072, 4),
@@ -214,7 +217,7 @@ export function BenchmarksView() {
               )}
               {targets.map((t) => (
                 <option key={t.id} value={t.id}>
-                  {t.model} · {t.host}
+                  {t.model} · {shortHost(t.host)}
                 </option>
               ))}
             </select>
@@ -228,6 +231,7 @@ export function BenchmarksView() {
               onChange={(e) => {
                 const v = e.target.value;
                 setPreset(v);
+                if (v === "catalog") {setConcurrency("1,4,16");setContexts("8192,32768");setDuration(5);setTokens(256);setPrefill(true);}
                 if (v === "quick" || v === "standard") {
                   const p = PRESETS[v];
                   setConcurrency(p.concurrency.join(","));
@@ -240,33 +244,12 @@ export function BenchmarksView() {
             >
               <option value="quick">Quick · 4 cells</option>
               <option value="standard">Standard decode matrix · 9 cells</option>
+              <option value="catalog">Recipe comparison · C1/C4/C16, 8k/32k</option>
               <option value="custom">Custom matrix</option>
             </select>
           </label>
-          <label className="space-y-1 text-xs">
-            Concurrency
-            <input
-              aria-label="Benchmark concurrency"
-              className={`${field} block w-full`}
-              value={concurrency}
-              onChange={(e) => {
-                setConcurrency(e.target.value);
-                setPreset("custom");
-              }}
-            />
-          </label>
-          <label className="space-y-1 text-xs">
-            Context tokens
-            <input
-              aria-label="Benchmark contexts"
-              className={`${field} block w-full`}
-              value={contexts}
-              onChange={(e) => {
-                setContexts(e.target.value);
-                setPreset("custom");
-              }}
-            />
-          </label>
+          <NumericMultiSelect label="Benchmark concurrency" values={concurrency.split(',').filter(Boolean).map(Number)} choices={[1,2,4,8,16,32]} min={1} max={32} limit={6} format={n=>`C${n}`} onChange={values=>{setConcurrency(values.join(','));setPreset('custom');}}/>
+          <NumericMultiSelect label="Benchmark contexts" values={contexts.split(',').filter(Boolean).map(Number)} choices={[0,2048,8192,16384,32768,65536,131072]} min={0} max={131072} limit={4} format={contextLabel} onChange={values=>{setContexts(values.join(','));setPreset('custom');}}/>
           <label className="space-y-1 text-xs">
             Seconds per cell
             <input
@@ -306,7 +289,7 @@ export function BenchmarksView() {
                 setPreset("custom");
               }}
             />
-            Measure prefill scouts
+            Measure prefill at selected context depths
           </label>
           <div className="flex items-end justify-end">
             <Button
@@ -442,6 +425,17 @@ export function BenchmarksView() {
               finalized measurements.
             </p>
           </Panel>
+          <Panel className="p-4 space-y-3" data-testid="prefill-depths">
+            <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-semibold">Prefill by context depth</h3><span className="text-xs text-text-muted">{run.options.prefill?'Measured separately from decode':'Disabled for this run'}</span></div>
+            <p className="text-[10px] text-text-muted">Each selected nonzero depth gets a fresh-prompt scout. Results arrive as depths finish; missing or skipped measurements stay explicit. TTFT includes the full request latency.</p>
+            <DataTable interactive id="benchmark-prefill-depths" rows={[...new Set([...run.options.contexts.filter(n=>n>0),...(report?.prefill??[]).map(p=>p.context_tokens).filter(n=>n>0)])].sort((a,b)=>a-b).map(context=>{const measured=report?.prefill.find(p=>p.context_tokens===context);return {context_tokens:context,tok_per_sec:measured?.tok_per_sec??null,ttft:measured?.ttft??null,samples:measured?.samples??null,status:measured?.status??(!run.options.prefill?'disabled':active?'pending':'unmeasured')};})} rowKey={p=>String(p.context_tokens)} minWidth={600} columns={[
+              {id:'context',label:'Context depth · tokens',required:true,value:p=>p.context_tokens,render:p=>`${contextLabel(p.context_tokens)} · ${p.context_tokens.toLocaleString()}`},
+              {id:'status',label:'State',render:p=>p.status},
+              {id:'rate',label:'Prefill · tok/s',value:p=>p.status==='complete'?p.tok_per_sec:null,render:p=><strong className="font-mono text-accent">{p.status==='complete'?fmt(p.tok_per_sec):p.status==='pending'?'…':'—'}</strong>},
+              {id:'ttft',label:'Time to first token · ms',value:p=>p.status==='complete'&&p.ttft!=null?p.ttft*1000:null,render:p=>p.status==='complete'&&p.ttft!=null?fmt(p.ttft*1000):'—'},
+              {id:'samples',label:'Samples',value:p=>p.samples,render:p=>p.samples??'—'}
+            ]} emptyMessage="Select nonzero context depths to measure prefill."/>
+          </Panel>
           <div className="grid gap-4 xl:grid-cols-[3fr_2fr]">
             <Panel className="p-4 space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -556,35 +550,6 @@ export function BenchmarksView() {
               </p>
             </Panel>
           </div>
-          {!!report?.prefill.length && (
-            <Panel className="p-4 space-y-2">
-              <h3 className="text-sm font-semibold">Prefill scouts</h3>
-              <DataTable interactive
-                id="benchmark-prefill"
-                rows={report.prefill}
-                rowKey={(p) => String(p.context_tokens)}
-                columns={[
-                  {
-                    id: "context",
-                    label: "Context",
-                    render: (p) => contextLabel(p.context_tokens),
-                  },
-                  {
-                    id: "rate",
-                    label: "Prefill tok/s",
-                    render: (p) =>
-                      p.status === "skipped" ? "Skip" : fmt(p.tok_per_sec),
-                  },
-                  {
-                    id: "ttft",
-                    label: "TTFT · seconds",
-                    render: (p) => fmt(p.ttft),
-                  },
-                  { id: "samples", label: "Samples", render: (p) => p.samples },
-                ]}
-              />
-            </Panel>
-          )}
           <Panel className="p-4 space-y-3">
             <h3 className="text-sm font-semibold">
               Latency and capacity detail

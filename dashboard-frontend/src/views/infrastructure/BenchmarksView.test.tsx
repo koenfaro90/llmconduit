@@ -133,10 +133,16 @@ it("validates custom matrices before sending a start command", async () => {
       screen.getByRole("button", { name: "Run benchmark" }),
     ).not.toBeDisabled(),
   );
-  fireEvent.change(screen.getByLabelText("Benchmark concurrency"), {
-    target: { value: "1,1" },
-  });
+  fireEvent.click(screen.getByRole("button", {name:"Benchmark concurrency C1"}));
+  fireEvent.click(screen.getByRole("button", {name:"Benchmark concurrency C2"}));
   fireEvent.click(screen.getByRole("button", { name: "Run benchmark" }));
-  expect(await screen.findByRole("alert")).toHaveTextContent("unique values");
+  expect(await screen.findByRole("alert")).toHaveTextContent("Select at least one concurrency");
   expect(start).not.toHaveBeenCalled();
+});
+
+it("shows pending prefill depths before measurements and keeps skipped depths explicit",async()=>{
+ const c=getConnection().client;const planned={...run,options:{...run.options,contexts:[32768,8192],prefill:true},report:{...run.report!,prefill:[{context_tokens:8192,tok_per_sec:null,ttft:null,samples:0,status:'skipped'}]}};
+ vi.mocked(c.benchmarks).mockResolvedValue([planned]);vi.mocked(c.benchmark).mockResolvedValue(planned);
+ renderWithQuery(<BenchmarksView/>);fireEvent.click(await screen.findByRole('button',{name:'actual dep'}));
+ const prefill=await screen.findByTestId('prefill-depths');await waitFor(()=>expect(prefill).toHaveTextContent('skipped'));expect(prefill).toHaveTextContent('pending');expect(prefill).toHaveTextContent('8k');expect(prefill).toHaveTextContent('32k');expect(prefill).toHaveTextContent('Time to first token');
 });

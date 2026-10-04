@@ -122,6 +122,103 @@ pub(crate) fn source_has_credentials(value: &serde_yaml::Value) -> bool {
         _ => false,
     }
 }
+/// Catalog annotations are included in the revision identity, but stripped before
+/// execution. Image provenance must refer to an image present in this recipe.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RecipeMetadata {
+    #[serde(default)]
+    pub gpu_families: Vec<String>,
+    #[serde(default)]
+    pub image_sources: BTreeMap<String, String>,
+    #[serde(default)]
+    pub image_source_urls: BTreeMap<String, String>,
+}
+pub(crate) fn matches_hardware(
+    spec: &Value,
+    snapshot: Option<&crate::dashboard_fleet_host::FleetHostSnapshot>,
+) -> bool {
+    let families = spec
+        .pointer("/metadata/gpu_families")
+        .and_then(Value::as_array);
+    let Some(families) = families.filter(|families| !families.is_empty()) else {
+        return true;
+    };
+    snapshot.is_some_and(|snapshot| {
+        snapshot.gpus.iter().any(|gpu| {
+            let upper = gpu.name.to_ascii_uppercase();
+            let family = if upper.contains("GB10") || gpu.unified_memory {
+                "spark"
+            } else if upper.contains("RTX")
+                && upper.contains("PRO")
+                && upper.contains("6000")
+                && upper.contains("BLACKWELL")
+            {
+                "rtx-pro-6000-blackwell"
+            } else {
+                gpu.name.as_str()
+            };
+            families.iter().any(|value| value.as_str() == Some(family))
+        })
+    })
+}
+fn validate_metadata(spec: &serde_json::Map<String, Value>) -> Result<(), &'static str> {
+    let Some(value) = spec.get("metadata") else {
+        return Ok(());
+    };
+    let metadata: RecipeMetadata =
+        serde_json::from_value(value.clone()).map_err(|_| "invalid recipe metadata")?;
+    if metadata.gpu_families.len() > 8
+        || metadata
+            .gpu_families
+            .iter()
+            .any(|v| v.is_empty() || v.len() > 128 || v.chars().any(char::is_control))
+    {
+        return Err("GPU families must be bounded, nonempty names");
+    }
+    let mut images = Vec::new();
+    if let Some(ranks) = spec.get("distributed").and_then(Value::as_array) {
+        images.extend(
+            ranks
+                .iter()
+                .filter_map(|rank| rank.get("image").and_then(Value::as_str)),
+        );
+    } else if let Some(image) = spec.get("image").and_then(Value::as_str) {
+        images.push(image);
+    }
+    if metadata.image_sources.len() > 8 || metadata.image_source_urls.len() > 8 {
+        return Err("too many image sources");
+    }
+    for (image, source) in &metadata.image_sources {
+        if !images.contains(&image.as_str())
+            || source.is_empty()
+            || source.len() > 512
+            || source.chars().any(char::is_whitespace)
+            || source.contains('@')
+        {
+            return Err(
+                "image source must be a readable, credential-free image name present in the recipe",
+            );
+        }
+    }
+    for (image, source) in &metadata.image_source_urls {
+        let url = url::Url::parse(source).map_err(|_| "image source URL must be HTTP(S)")?;
+        if !images.contains(&image.as_str())
+            || source.len() > 1024
+            || !matches!(url.scheme(), "http" | "https")
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(
+                "image source URL must be a credential-free HTTP(S) source for a recipe image",
+            );
+        }
+    }
+    Ok(())
+}
 pub(crate) fn validate_recipe(body: &CreateRecipeRevision) -> Result<String, &'static str> {
     if body.description.len() > 256 {
         return Err("description exceeds 256 bytes");
@@ -129,11 +226,14 @@ pub(crate) fn validate_recipe(body: &CreateRecipeRevision) -> Result<String, &'s
     let Some(spec) = body.model_spec.as_object() else {
         return Err("model_spec must be an object");
     };
+    validate_metadata(spec)?;
     if let Some(ranks) = spec.get("distributed") {
         let Some(ranks) = ranks.as_array() else {
             return Err("distributed must be an array of rank specifications");
         };
-        if spec.len() != 1
+        if spec
+            .keys()
+            .any(|key| !matches!(key.as_str(), "distributed" | "metadata"))
             || !(2..=8).contains(&ranks.len())
             || ranks
                 .iter()
@@ -176,6 +276,7 @@ pub(crate) fn validate_recipe(body: &CreateRecipeRevision) -> Result<String, &'s
         return Ok(format!("{:x}", Sha256::digest(bytes)));
     }
     let allowed = [
+        "metadata",
         "description",
         "image",
         "command",
@@ -550,6 +651,25 @@ pub async fn select_deployment(
                 "render the source recipe into an executable revision before deployment",
             );
         }
+        let revision = state.recipes[&body.recipe_id]
+            .iter()
+            .find(|r| r.digest == body.revision_digest)
+            .unwrap();
+        if body.desired_state == "ready"
+            && !matches_hardware(
+                &revision.model_spec,
+                body.endpoint_id
+                    .parse()
+                    .ok()
+                    .and_then(|endpoint| admin.registry().host_snapshot(endpoint))
+                    .as_ref(),
+            )
+        {
+            return error(
+                StatusCode::CONFLICT,
+                "recipe GPU families do not match the host's detected hardware, or the host observation is unavailable",
+            );
+        }
         if state.deployments.len() >= 64 && !state.deployments.contains_key(&id) {
             return error(StatusCode::CONFLICT, "deployment limit reached");
         }
@@ -829,6 +949,72 @@ mod tests {
             assert!(deployment.observed_at_ms.is_some());
             assert!(deployment.error.is_none());
         }
+    }
+    #[test]
+    fn declared_hardware_requires_detected_gpu_family() {
+        let spec = serde_json::json!({"metadata":{"gpu_families":["spark"]}});
+        assert!(!matches_hardware(&spec, None));
+        assert!(matches_hardware(
+            &serde_json::json!({"image":"pinned"}),
+            None
+        ));
+        let mut snapshot: crate::dashboard_fleet_host::FleetHostSnapshot = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"sampled_at":"2026-10-04T00:00:00Z","hostname":"host","architecture":"arm64","uptime_seconds":1,"cpu":null,"memory":null,"disk":null,"network":[],"containers":[],"errors":[],
+            "gpus":[{"index":0,"uuid":"gpu","name":"NVIDIA GB10","unified_memory":true,"memory_total_mib":null,"memory_used_mib":null,"utilization_percent":0,"temperature_celsius":40,"power_watts":null}]
+        })).unwrap();
+        assert!(matches_hardware(&spec, Some(&snapshot)));
+        snapshot.gpus[0].name = "NVIDIA RTX PRO 6000 Blackwell Server Edition".into();
+        snapshot.gpus[0].unified_memory = false;
+        assert!(!matches_hardware(&spec, Some(&snapshot)));
+        assert!(matches_hardware(
+            &serde_json::json!({"metadata":{"gpu_families":["rtx-pro-6000-blackwell"]}}),
+            Some(&snapshot)
+        ));
+    }
+    #[test]
+    fn catalog_annotations_round_trip_and_never_reach_fleet() {
+        let image = format!("example@sha256:{}", "a".repeat(64));
+        let body = CreateRecipeRevision {
+            description: "portable annotated recipe".into(),
+            model_spec: serde_json::json!({"image":image,"gpus":"device=0","user":"1000:1000","memory_limit":"128m","metadata":{"gpu_families":["spark"],"image_sources":{image.clone():"example:stable"},"image_source_urls":{image.clone():"https://example.org/build"}}}),
+        };
+        let digest = validate_recipe(&body).unwrap();
+        let restored: CreateRecipeRevision =
+            serde_json::from_str(&serde_json::to_string(&body).unwrap()).unwrap();
+        assert_eq!(restored.model_spec, body.model_spec);
+        assert_eq!(validate_recipe(&restored).unwrap(), digest);
+        let rendered =
+            crate::dashboard_deployment_groups::render(&restored.model_spec, None).unwrap();
+        assert!(rendered.get("metadata").is_none());
+        assert_eq!(rendered["image"], image);
+        let distributed = CreateRecipeRevision {
+            description: "distributed annotations".into(),
+            model_spec: serde_json::json!({"distributed":[body.model_spec.clone(),body.model_spec.clone()],"metadata":body.model_spec["metadata"].clone()}),
+        };
+        let restored: CreateRecipeRevision =
+            serde_json::from_str(&serde_json::to_string(&distributed).unwrap()).unwrap();
+        assert_eq!(restored.model_spec, distributed.model_spec);
+        assert_eq!(
+            validate_recipe(&restored).unwrap(),
+            validate_recipe(&distributed).unwrap()
+        );
+        let placement = crate::dashboard_deployment_groups::Placement {
+            group_id: "pair".into(),
+            rank: 1,
+            addresses: vec!["host1".into(), "host2".into()],
+        };
+        assert_eq!(
+            crate::dashboard_deployment_groups::render(&restored.model_spec, Some(&placement))
+                .unwrap(),
+            rendered
+        );
+        let mut invalid = body.clone();
+        invalid.model_spec["metadata"]["image_source_urls"][&image] =
+            Value::String("https://user:password@example.org/build".into());
+        assert!(validate_recipe(&invalid).is_err());
+        invalid.model_spec["metadata"] =
+            serde_json::json!({"gpu_families":["spark"],"unexpected":"ignored"});
+        assert!(validate_recipe(&invalid).is_err());
     }
     #[test]
     fn recipe_digest_is_canonical_and_credentials_are_rejected() {

@@ -54,6 +54,9 @@ pub fn render(spec: &Value, placement: Option<&Placement>) -> Result<Value, Stri
     } else {
         spec.clone()
     };
+    if let Some(object) = model.as_object_mut() {
+        object.remove("metadata");
+    }
     if let Some(p) = placement {
         if p.addresses.is_empty()
             || p.rank as usize >= p.addresses.len()
@@ -262,6 +265,28 @@ pub async fn select(
         let Ok((raw, mut state)) = dashboard_management::read(store.as_ref()).await else {
             return err(StatusCode::SERVICE_UNAVAILABLE, "catalog unavailable");
         };
+        let incompatible = state
+            .recipes
+            .get(&body.recipe_id)
+            .and_then(|versions| versions.iter().find(|r| r.digest == body.revision_digest))
+            .is_some_and(|revision| {
+                body.hosts.iter().any(|host| {
+                    !dashboard_management::matches_hardware(
+                        &revision.model_spec,
+                        host.endpoint_id
+                            .parse()
+                            .ok()
+                            .and_then(|endpoint| admin.registry().host_snapshot(endpoint))
+                            .as_ref(),
+                    )
+                })
+            });
+        if body.desired_state == "ready" && incompatible {
+            return err(
+                StatusCode::CONFLICT,
+                "recipe GPU families do not match selected hosts' detected hardware, or a host observation is unavailable",
+            );
+        }
         let result = match apply(&mut state, &body, &group) {
             Ok(result) => result,
             Err(message) => return err(StatusCode::CONFLICT, &message),
