@@ -7,7 +7,7 @@ use crate::dashboard_mesh::{authorize_mesh_admin_read, authorize_mesh_mutation};
 use crate::engine::Gateway;
 use axum::{
     Extension, Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::Response,
 };
@@ -1384,4 +1384,156 @@ pub async fn adopt(
         StatusCode::CONFLICT,
         &serde_json::json!({"error":"catalog changed; retry"}),
     )
+}
+
+/// Retire an observed-unloaded single-host placement while retaining recipe evidence.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RemoveDeployment {
+    pub expected_generation: u64,
+}
+fn remove_unloaded(
+    state: &mut ManagementState,
+    id: &str,
+    generation: u64,
+) -> Result<(), &'static str> {
+    let d = state.deployments.get(id).ok_or("deployment not found")?;
+    if d.generation != generation {
+        return Err("generation changed");
+    }
+    if d.desired_state != "unloaded"
+        || d.observed
+            .as_ref()
+            .and_then(|v| v.pointer("/status/phase"))
+            .and_then(Value::as_str)
+            != Some("unloaded")
+        || d.observed
+            .as_ref()
+            .and_then(|v| v.pointer("/desired/generation"))
+            .and_then(Value::as_u64)
+            != Some(generation)
+    {
+        return Err("wait for the current generation to be observed unloaded");
+    }
+    if d.placement.as_ref().is_some_and(|p| {
+        p.addresses.len() != 1
+            || state
+                .deployments
+                .values()
+                .filter(|x| {
+                    x.placement
+                        .as_ref()
+                        .is_some_and(|q| q.group_id == p.group_id)
+                })
+                .count()
+                != 1
+    }) {
+        return Err("removing distributed placements is unsupported");
+    }
+    state.deployments.remove(id);
+    Ok(())
+}
+#[utoipa::path(delete,path="/dashboard/api/management/deployments/{id}",params(("id"=String,Path),("expected_generation"=u64,Query)),responses((status=200),(status=403),(status=409),(status=503)),tag="dashboard")]
+pub async fn remove_deployment(
+    State(gateway): State<Arc<Gateway>>,
+    Extension(auth): Extension<Arc<DashboardAuth>>,
+    Extension(session): Extension<AuthSession>,
+    Path(id): Path<String>,
+    Query(body): Query<RemoveDeployment>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(response) = authorize_mesh_mutation(&auth, &session, &headers).await {
+        return response;
+    }
+    let Some(store) = gateway.persistence_store() else {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "SQL persistence is required",
+        );
+    };
+    for _ in 0..4 {
+        let Ok((raw, mut state)) = read(store.as_ref()).await else {
+            return error(StatusCode::SERVICE_UNAVAILABLE, "catalog unavailable");
+        };
+        if let Err(message) = remove_unloaded(&mut state, &id, body.expected_generation) {
+            return error(StatusCode::CONFLICT, message);
+        }
+        match commit(store.as_ref(), raw.as_deref(), &state).await {
+            Ok(true) => return json_no_store(StatusCode::OK, &serde_json::json!({"removed":id})),
+            Ok(false) => continue,
+            Err(_) => {
+                return error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "could not retire deployment",
+                );
+            }
+        }
+    }
+    error(StatusCode::CONFLICT, "catalog changed; retry")
+}
+#[cfg(test)]
+mod retirement_tests {
+    use super::*;
+    use serde_json::json;
+    fn fixture() -> ManagementState {
+        let mut state = ManagementState::default();
+        state.recipes.insert("recipe".into(), vec![]);
+        state.deployments.insert(
+            "diagnostic".into(),
+            DesiredDeployment {
+                generation: 4,
+                placement: None,
+                endpoint_id: "host".into(),
+                recipe_id: "recipe".into(),
+                revision_digest: "pinned".into(),
+                desired_state: "unloaded".into(),
+                updated_at_ms: 0,
+                observed_at_ms: Some(1),
+                observed: Some(json!({"desired":{"generation":4},"status":{"phase":"unloaded"}})),
+                error: None,
+            },
+        );
+        state
+    }
+    #[test]
+    fn retirement_preserves_catalog_and_rejects_active_or_stale_observations() {
+        let mut state = fixture();
+        assert!(remove_unloaded(&mut state, "diagnostic", 3).is_err());
+        state
+            .deployments
+            .get_mut("diagnostic")
+            .unwrap()
+            .desired_state = "ready".into();
+        assert!(remove_unloaded(&mut state, "diagnostic", 4).is_err());
+        state
+            .deployments
+            .get_mut("diagnostic")
+            .unwrap()
+            .desired_state = "unloaded".into();
+        state.deployments.get_mut("diagnostic").unwrap().observed =
+            Some(json!({"desired":{"generation":3},"status":{"phase":"unloaded"}}));
+        assert!(remove_unloaded(&mut state, "diagnostic", 4).is_err());
+        assert_eq!(state.deployments.len(), 1);
+        state = fixture();
+        remove_unloaded(&mut state, "diagnostic", 4).unwrap();
+        assert!(state.deployments.is_empty());
+        assert!(state.recipes.contains_key("recipe"));
+    }
+    #[test]
+    fn retirement_does_not_remove_part_of_a_distributed_group_and_query_round_trips() {
+        let mut state = fixture();
+        state.deployments.get_mut("diagnostic").unwrap().placement =
+            Some(crate::dashboard_deployment_groups::Placement {
+                group_id: "group".into(),
+                rank: 0,
+                addresses: vec!["one".into(), "two".into()],
+                gpus: None,
+                gpu_uuids: None,
+            });
+        assert!(remove_unloaded(&mut state, "diagnostic", 4).is_err());
+        assert_eq!(state.deployments.len(), 1);
+        let input = json!({"expected_generation":4});
+        let value: RemoveDeployment = serde_json::from_value(input.clone()).unwrap();
+        assert_eq!(serde_json::to_value(value).unwrap(), input);
+    }
 }

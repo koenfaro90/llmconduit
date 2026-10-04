@@ -319,7 +319,8 @@ fn protected_routes(gateway: Arc<Gateway>, auth: Arc<DashboardAuth>) -> Router<A
         )
         .route(
             "/dashboard/api/management/deployments/{id}",
-            axum::routing::put(crate::dashboard_management::select_deployment),
+            axum::routing::put(crate::dashboard_management::select_deployment)
+                .delete(crate::dashboard_management::remove_deployment),
         )
         .route("/dashboard/api/flows", get(dashboard_flows))
         .route(

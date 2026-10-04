@@ -113,3 +113,10 @@ Explicit physical GPU selections are resolved to host-reported NVIDIA GPU UUIDs.
 Fleet still reserves physical host indices, while CUDA_VISIBLE_DEVICES uses the
 pinned UUIDs so privileged containers and differing CUDA enumeration orders select
 the same hardware. Stop preserves those identities even if the host is offline.
+
+Administrators can retire a single-host desired placement with
+`DELETE /dashboard/api/management/deployments/{id}?expected_generation=N`.
+The current generation must be positively observed unloaded. This removes only
+the desired record; immutable recipe revisions and validation evidence remain.
+Distributed groups cannot be partially removed. Use a fresh ID for a later
+deployment; Fleet retains the retired ID's accepted generation.
