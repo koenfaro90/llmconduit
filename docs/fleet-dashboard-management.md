@@ -153,3 +153,20 @@ The current generation must be positively observed unloaded. This removes only
 the desired record; immutable recipe revisions and validation evidence remain.
 Distributed groups cannot be partially removed. Use a fresh ID for a later
 deployment; Fleet retains the retired ID's accepted generation.
+
+## Host sampling and PCIe
+
+Fleet exposes independently configurable local host/GPU/container collection
+intervals. Host details show the configured cadence, GPU backend/read duration
+and separate GPU/container sample timestamps. Hosts graph selectors include GPU
+PCIe RX/TX totals; the detail view includes current/max generation/width and raw
+replay, correctable error and recovery counters. Unsupported values remain
+unavailable. RX enters the physical GPU, TX leaves it; charts scale NVML KB/s to
+decimal MB/s. Rates describe the driver's short sampling window, not the stored
+chart bucket. Totals require every device to provide the metric; a missing device
+does not appear as a lower measured total. Recoveries include normal power
+management, and an idle low-generation link is normal.
+
+Local 100 ms collection does not change five-second mesh reporting or
+fifteen-second SQL history collection. Fast intermediate observations are not
+retained. See Fleet's `docs/telemetry.md` for settings and measurement costs.

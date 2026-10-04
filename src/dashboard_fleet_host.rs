@@ -5,6 +5,8 @@ use utoipa::ToSchema;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
 pub struct FleetHostSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection: Option<HostCollection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub managed_capacity: Option<ManagedCapacity>,
     pub schema_version: u32,
     pub sampled_at: String,
@@ -20,6 +22,16 @@ pub struct FleetHostSnapshot {
     pub errors: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub engine_observations: Vec<EngineObservation>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
+pub struct HostCollection {
+    pub host_interval_ms: u64,
+    pub gpu_interval_ms: u64,
+    pub container_interval_ms: u64,
+    pub gpu_backend: String,
+    pub gpu_sampled_at: Option<String>,
+    pub containers_sampled_at: Option<String>,
+    pub gpu_duration_ms: Option<f64>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
 pub struct ManagedCapacity {
@@ -73,6 +85,24 @@ pub struct HostGpu {
     pub clock_mhz: Option<f64>,
     #[serde(default)]
     pub memory_clock_mhz: Option<f64>,
+    #[serde(default)]
+    pub pcie_rx_kb_per_second: Option<f64>,
+    #[serde(default)]
+    pub pcie_tx_kb_per_second: Option<f64>,
+    #[serde(default)]
+    pub pcie_link_generation: Option<f64>,
+    #[serde(default)]
+    pub pcie_link_width: Option<f64>,
+    #[serde(default)]
+    pub pcie_max_link_generation: Option<f64>,
+    #[serde(default)]
+    pub pcie_max_link_width: Option<f64>,
+    #[serde(default)]
+    pub pcie_replay_count: Option<f64>,
+    #[serde(default)]
+    pub pcie_recovery_count: Option<f64>,
+    #[serde(default)]
+    pub pcie_correctable_error_count: Option<f64>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
 pub struct HostContainer {
@@ -164,7 +194,14 @@ impl FleetHostSnapshot {
         let text = |s: &str, max| s.len() <= max && !s.chars().any(char::is_control);
         let metric = |v: Option<f64>| v.is_none_or(|v| v.is_finite() && v >= 0.0);
         let percent = |v: Option<f64>| metric(v) && v.is_none_or(|v| v <= 100.0);
-        self.engine_observations.len()<=4 && self.engine_observations.iter().all(EngineObservation::validate)
+        self.collection.as_ref().is_none_or(|c|
+            (100..=60000).contains(&c.host_interval_ms)
+            && (100..=60000).contains(&c.gpu_interval_ms)
+            && (1000..=60000).contains(&c.container_interval_ms)
+            && matches!(c.gpu_backend.as_str(), "" | "nvml" | "nvidia-smi")
+            && [&c.gpu_sampled_at, &c.containers_sampled_at].iter().all(|v| v.as_ref().is_none_or(|v| chrono::DateTime::parse_from_rfc3339(v).is_ok()))
+            && metric(c.gpu_duration_ms))
+            && self.engine_observations.len()<=4 && self.engine_observations.iter().all(EngineObservation::validate)
             && self.schema_version == 1
             && chrono::DateTime::parse_from_rfc3339(&self.sampled_at).is_ok()
             && !self.hostname.is_empty() && text(&self.hostname, 128)
@@ -178,7 +215,7 @@ impl FleetHostSnapshot {
                 && metric(n.rx_bytes_per_second) && metric(n.tx_bytes_per_second))
             && self.gpus.len() <= 16 && self.gpus.iter().all(|g| text(&g.uuid, 128) && text(&g.name, 256)
                 && metric(g.memory_total_mib) && metric(g.memory_used_mib)
-                && percent(g.utilization_percent) && metric(g.temperature_celsius) && metric(g.power_watts) && metric(g.clock_mhz) && metric(g.memory_clock_mhz))
+                && percent(g.utilization_percent) && metric(g.temperature_celsius) && metric(g.power_watts) && metric(g.clock_mhz) && metric(g.memory_clock_mhz) && metric(g.pcie_rx_kb_per_second) && metric(g.pcie_tx_kb_per_second) && metric(g.pcie_link_generation) && metric(g.pcie_link_width) && metric(g.pcie_max_link_generation) && metric(g.pcie_max_link_width) && metric(g.pcie_replay_count) && metric(g.pcie_recovery_count) && metric(g.pcie_correctable_error_count))
             && self.containers.len() <= 64 && self.containers.iter().all(|c|
                 text(&c.id, 128) && text(&c.name, 256) && text(&c.image, 512)
                 && text(&c.state, 64) && text(&c.status, 256)
@@ -216,6 +253,40 @@ mod tests {
             sample,
             serde_json::from_slice(&serde_json::to_vec(&sample).unwrap()).unwrap()
         );
+    }
+
+    #[test]
+    fn pcie_and_sampling_cadence_survive_wire_and_invalid_values_are_rejected() {
+        let mut value = serde_json::to_value(fixture()).unwrap();
+        value["collection"] = serde_json::json!({"host_interval_ms":100,"gpu_interval_ms":100,"container_interval_ms":5000,"gpu_backend":"nvml","gpu_sampled_at":"2026-10-03T12:00:00Z","containers_sampled_at":null,"gpu_duration_ms":45.0});
+        for field in [
+            "pcie_rx_kb_per_second",
+            "pcie_tx_kb_per_second",
+            "pcie_link_generation",
+            "pcie_link_width",
+            "pcie_max_link_generation",
+            "pcie_max_link_width",
+            "pcie_replay_count",
+            "pcie_correctable_error_count",
+            "pcie_recovery_count",
+        ] {
+            value["gpus"][0][field] = serde_json::json!(123.0);
+        }
+        let sample: super::FleetHostSnapshot = serde_json::from_value(value).unwrap();
+        assert!(sample.validate());
+        assert_eq!(
+            sample,
+            serde_json::from_slice(&serde_json::to_vec(&sample).unwrap()).unwrap()
+        );
+        let mut bad = sample.clone();
+        bad.gpus[0].pcie_rx_kb_per_second = Some(-1.0);
+        assert!(!bad.validate());
+        bad = sample.clone();
+        bad.collection.as_mut().unwrap().container_interval_ms = 100;
+        assert!(!bad.validate());
+        bad = sample;
+        bad.collection.as_mut().unwrap().gpu_sampled_at = Some("invalid".into());
+        assert!(!bad.validate());
     }
 
     use super::*;

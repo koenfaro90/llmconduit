@@ -33,3 +33,12 @@ describe('HostTelemetry', () => {
     expect(screen.getByText('Host telemetry unavailable.')).toBeInTheDocument();
   });
 });
+
+it('shows PCIe measurements and independent collection timestamps',()=>{
+ const measured:MeshNode={...node,host_snapshot:{...node.host_snapshot!,collection:{host_interval_ms:100,gpu_interval_ms:100,container_interval_ms:5000,gpu_backend:'nvml',gpu_sampled_at:'2026-10-03T12:00:00Z',containers_sampled_at:null,gpu_duration_ms:45},gpus:[{...node.host_snapshot!.gpus[0]!,pcie_rx_kb_per_second:1000000,pcie_tx_kb_per_second:0,pcie_link_generation:5,pcie_link_width:16,pcie_replay_count:0}]}};
+ render(<HostTelemetry nodes={[measured]} now={now}/>);
+ expect(screen.getByTestId('host-telemetry')).toHaveTextContent('PCIe RX 1000.00 MB/s · TX 0.00 MB/s');
+ expect(screen.getByTestId('host-telemetry')).toHaveTextContent('link Gen5 ×16');
+ expect(screen.getByTestId('host-telemetry')).toHaveTextContent('GPU 100 ms (nvml)');
+ expect(screen.getByTestId('host-telemetry')).toHaveTextContent('correctable errors —');
+});

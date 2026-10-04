@@ -2286,6 +2286,7 @@ export function assertNever(value: never): never {
 export interface EngineObservation {instance:string;model:string;engine:string;source:string;sampled_at:string;received_at:string;running:number;waiting:number;requests:Array<{id:string;gateway_request_id?:string;state:string;prompt_tokens:number;computed_tokens:number;output_tokens:number;preemptions:number}>}
 export interface ManagedCapacity {memory_budget_mib:number;memory_reserved_mib:number;gpu_sharing_enabled:boolean;gpus:Array<{index:number;total_mib:number;budget_mib:number;reserved_mib:number;unified_memory:boolean;exclusive_deployment?:string}>}
 export interface FleetHostSnapshot {
+  collection?: {host_interval_ms:number;gpu_interval_ms:number;container_interval_ms:number;gpu_backend:string;gpu_sampled_at:string|null;containers_sampled_at:string|null;gpu_duration_ms:number|null};
   managed_capacity?: ManagedCapacity;
   engine_observations?: EngineObservation[];
   schema_version: number;
@@ -2297,7 +2298,7 @@ export interface FleetHostSnapshot {
   memory: { total_bytes: number; available_bytes: number; used_bytes: number } | null;
   disk: { total_bytes: number; available_bytes: number; used_bytes: number } | null;
   network: { name: string; rx_bytes: number; tx_bytes: number; rx_bytes_per_second: number | null; tx_bytes_per_second: number | null }[];
-  gpus: { index: number; uuid: string; name: string; unified_memory: boolean; memory_total_mib: number | null; memory_used_mib: number | null; utilization_percent: number | null; temperature_celsius: number | null; power_watts: number | null; clock_mhz?: number | null; memory_clock_mhz?: number | null }[];
+  gpus: { index: number; uuid: string; name: string; unified_memory: boolean; memory_total_mib: number | null; memory_used_mib: number | null; utilization_percent: number | null; temperature_celsius: number | null; power_watts: number | null; clock_mhz?: number | null; memory_clock_mhz?: number | null; pcie_rx_kb_per_second?: number | null; pcie_tx_kb_per_second?: number | null; pcie_link_generation?: number | null; pcie_link_width?: number | null; pcie_max_link_generation?: number | null; pcie_max_link_width?: number | null; pcie_replay_count?: number | null; pcie_recovery_count?: number | null; pcie_correctable_error_count?: number | null; }[];
   containers: { id: string; name: string; image: string; state: string; status: string; cpu_percent: number | null; memory_bytes: number | null; pids: number | null }[];
   errors: string[];
 }
