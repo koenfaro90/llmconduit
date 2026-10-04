@@ -20,6 +20,8 @@ pub mod dashboard_host_history;
 pub mod dashboard_management;
 pub mod dashboard_mesh;
 pub mod dashboard_recipe_evidence;
+mod dashboard_recipe_sizes;
+mod dashboard_resource_admission;
 pub mod dashboard_traffic;
 pub mod dashboard_ui;
 pub mod dashboard_ws;

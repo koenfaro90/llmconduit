@@ -13,7 +13,7 @@ export function gpuFamily(name:string,unified=false):string {
 export function hostFamilies(node:MeshNode){return [...new Set(node.host_snapshot?.gpus.map(g=>gpuFamily(g.name,g.unified_memory))??[])];}
 export function hardwareLabel(node:MeshNode){const families=hostFamilies(node);return families.map(f=>GPU_FAMILIES[f as keyof typeof GPU_FAMILIES]??f).join(' / ')||'GPU type unavailable';}
 export function rankSpecs(spec:Record<string,unknown>):Record<string,unknown>[]{return Array.isArray(spec.distributed)?spec.distributed as Record<string,unknown>[]:[spec];}
-export interface RecipeMetadata {gpu_families?:string[];image_sources?:Record<string,string>;image_source_urls?:Record<string,string>}
+export interface RecipeMetadata {size_name?:string;size_source_digest?:string;memory_estimate_note?:string;gpu_families?:string[];image_sources?:Record<string,string>;image_source_urls?:Record<string,string>}
 export function metadata(spec:Record<string,unknown>):RecipeMetadata {return spec.metadata&&typeof spec.metadata==='object'?spec.metadata as RecipeMetadata:{};}
 export function gpuDevices(spec:Record<string,unknown>):number[]|null {
   const value=String(spec.gpus??''); const match=value.match(/^device=([0-9,]+)$/);
@@ -35,7 +35,7 @@ export function vramLabel(node:MeshNode){const gpus=node.host_snapshot?.gpus??[]
 export function sampleTime(value:string|undefined){const time=Date.parse(value??'');return Number.isFinite(time)?new Date(time).toLocaleString(undefined,{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}):'—';}
 /** Catalog annotations do not change the executable configuration or invalidate its evidence. */
 export function executionKey(spec:Record<string,unknown>):string {
-  function withoutAnnotations(model:Record<string,unknown>):Record<string,unknown>{const copy={...model};delete copy.metadata;if(Array.isArray(copy.distributed))copy.distributed=copy.distributed.map(rank=>withoutAnnotations(rank as Record<string,unknown>));return copy;}
+  function withoutAnnotations(model:Record<string,unknown>):Record<string,unknown>{const copy={...model};delete copy.metadata;delete copy.sizes;if(Array.isArray(copy.distributed))copy.distributed=copy.distributed.map(rank=>withoutAnnotations(rank as Record<string,unknown>));return copy;}
   function canonical(value:unknown):unknown {if(Array.isArray(value))return value.map(canonical);if(value&&typeof value==='object')return Object.fromEntries(Object.entries(value).sort(([a],[b])=>compareNames(a,b)).map(([key,item])=>[key,canonical(item)]));return value;}
   return JSON.stringify(canonical(withoutAnnotations(spec)));
 }

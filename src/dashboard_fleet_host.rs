@@ -4,6 +4,8 @@ use utoipa::ToSchema;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
 pub struct FleetHostSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_capacity: Option<ManagedCapacity>,
     pub schema_version: u32,
     pub sampled_at: String,
     pub hostname: String,
@@ -18,6 +20,23 @@ pub struct FleetHostSnapshot {
     pub errors: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub engine_observations: Vec<EngineObservation>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
+pub struct ManagedCapacity {
+    pub memory_budget_mib: u64,
+    pub memory_reserved_mib: u64,
+    pub gpu_sharing_enabled: bool,
+    pub gpus: Vec<ManagedGpuCapacity>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
+pub struct ManagedGpuCapacity {
+    pub index: u32,
+    pub total_mib: u64,
+    pub budget_mib: u64,
+    pub reserved_mib: u64,
+    pub unified_memory: bool,
+    #[serde(default)]
+    pub exclusive_deployment: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
 pub struct HostCpu {
@@ -126,6 +145,22 @@ impl EngineObservation {
 }
 impl FleetHostSnapshot {
     pub fn validate(&self) -> bool {
+        if self.managed_capacity.as_ref().is_some_and(|c| {
+            c.memory_budget_mib > 1 << 30
+                || c.memory_reserved_mib > c.memory_budget_mib
+                || c.gpus.len() > 16
+                || c.gpus.iter().any(|g| {
+                    g.budget_mib > g.total_mib
+                        || g.total_mib > 1 << 30
+                        || g.reserved_mib > g.budget_mib
+                        || g.exclusive_deployment.len() > 40
+                        || !g.exclusive_deployment.bytes().all(|b| {
+                            b.is_ascii_lowercase() || b.is_ascii_digit() || b"-_".contains(&b)
+                        })
+                })
+        }) {
+            return false;
+        }
         let text = |s: &str, max| s.len() <= max && !s.chars().any(char::is_control);
         let metric = |v: Option<f64>| v.is_none_or(|v| v.is_finite() && v >= 0.0);
         let percent = |v: Option<f64>| metric(v) && v.is_none_or(|v| v <= 100.0);
@@ -186,6 +221,26 @@ mod tests {
     use super::*;
     #[test]
     fn fleet_host_round_trip_preserves_unavailable_unified_memory() {
+        let mut shared = fixture();
+        shared.managed_capacity = Some(ManagedCapacity {
+            memory_budget_mib: 116000,
+            memory_reserved_mib: 40960,
+            gpu_sharing_enabled: true,
+            gpus: vec![ManagedGpuCapacity {
+                index: 0,
+                total_mib: 124000,
+                budget_mib: 116000,
+                reserved_mib: 32768,
+                unified_memory: true,
+                exclusive_deployment: String::new(),
+            }],
+        });
+        assert!(shared.validate());
+        let roundtrip: FleetHostSnapshot =
+            serde_json::from_value(serde_json::to_value(&shared).unwrap()).unwrap();
+        assert_eq!(shared, roundtrip);
+        shared.managed_capacity.as_mut().unwrap().gpus[0].reserved_mib = 200000;
+        assert!(!shared.validate());
         let sample = fixture();
         assert!(sample.validate());
         let raw = serde_json::to_vec(&sample).unwrap();

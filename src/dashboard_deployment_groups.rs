@@ -24,15 +24,17 @@ pub struct Placement {
     pub rank: u32,
     pub addresses: Vec<String>,
 }
-#[derive(utoipa::ToSchema, Deserialize)]
+#[derive(Clone, utoipa::ToSchema, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Host {
     pub endpoint_id: String,
     pub address: String,
 }
-#[derive(utoipa::ToSchema, Deserialize)]
+#[derive(Clone, utoipa::ToSchema, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Selection {
+    #[serde(default)]
+    pub size: Option<String>,
     pub group_id: Option<String>,
     pub recipe_id: String,
     pub revision_digest: String,
@@ -56,6 +58,7 @@ pub fn render(spec: &Value, placement: Option<&Placement>) -> Result<Value, Stri
     };
     if let Some(object) = model.as_object_mut() {
         object.remove("metadata");
+        object.remove("sizes");
     }
     if let Some(p) = placement {
         if p.addresses.is_empty()
@@ -265,10 +268,26 @@ pub async fn select(
         let Ok((raw, mut state)) = dashboard_management::read(store.as_ref()).await else {
             return err(StatusCode::SERVICE_UNAVAILABLE, "catalog unavailable");
         };
+        let revision = match crate::dashboard_recipe_sizes::pin(
+            &mut state,
+            &body.recipe_id,
+            &body.revision_digest,
+            body.size.as_deref(),
+        ) {
+            Ok(revision) => revision,
+            Err(message) => return err(StatusCode::BAD_REQUEST, message),
+        };
+        let mut resolved_body = body.clone();
+        resolved_body.revision_digest = revision.digest;
+        resolved_body.size = None;
         let incompatible = state
             .recipes
             .get(&body.recipe_id)
-            .and_then(|versions| versions.iter().find(|r| r.digest == body.revision_digest))
+            .and_then(|versions| {
+                versions
+                    .iter()
+                    .find(|r| r.digest == resolved_body.revision_digest)
+            })
             .is_some_and(|revision| {
                 body.hosts.iter().any(|host| {
                     !dashboard_management::matches_hardware(
@@ -287,10 +306,25 @@ pub async fn select(
                 "recipe GPU families do not match selected hosts' detected hardware, or a host observation is unavailable",
             );
         }
-        let result = match apply(&mut state, &body, &group) {
+        let result = match apply(&mut state, &resolved_body, &group) {
             Ok(result) => result,
             Err(message) => return err(StatusCode::CONFLICT, &message),
         };
+        for (id, deployment) in &result {
+            if let Err(message) = crate::dashboard_resource_admission::check(
+                &state,
+                id,
+                deployment,
+                deployment
+                    .endpoint_id
+                    .parse()
+                    .ok()
+                    .and_then(|endpoint| admin.registry().host_snapshot(endpoint))
+                    .as_ref(),
+            ) {
+                return err(StatusCode::CONFLICT, &message);
+            }
+        }
         match dashboard_management::commit(store.as_ref(), raw.as_deref(), &state).await {
             Ok(true) => {
                 return json_no_store(
@@ -339,6 +373,7 @@ mod tests {
             }],
         );
         let body = Selection {
+            size: None,
             group_id: Some("group".into()),
             recipe_id: "recipe".into(),
             revision_digest: "a".repeat(64),

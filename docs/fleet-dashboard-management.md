@@ -21,3 +21,56 @@ The catalog exposes Copy and New JSON recipe actions, readable image provenance,
 Deployment host selection appears after choosing a recipe. Hosts sort by name, filter by detected compatible GPU family and show unreserved GPU counts plus measured free dedicated VRAM; Sparks show available unified system RAM. Stale observations cannot authorize a new placement. Hardware-declared recipes are also checked against live detected GPU names by the single/group selection API. Unload operations remain available regardless of hardware observations. Capacity is advisory; Fleet remains responsible for reservations and execution. Model and deployment placement columns show linked short host names.
 
 Benchmark concurrency and context matrices use preset chips and bounded custom numeric values. The recipe-comparison preset measures C1/C4/C16 at 8k/32k. Prefill has a prominent, context-sorted result table that includes planned depths before results arrive and preserves pending, skipped, disabled and unmeasured states. Zero context does not fabricate a prefill measurement.
+
+## Named recipe sizes and memory admission
+
+Executable recipes can contain up to 16 `sizes`, keyed by a lowercase name. A size
+contains `description`, `overrides` (executable settings such as RAM, environment
+and GPU reservations) and `vllm` (typed overrides for GPU utilization, KV bytes,
+model length, sequence count and batched tokens). Overrides must match an existing
+literal command flag or recognized environment setting; arbitrary shell values
+are rejected. Environment patches retain unrelated variables. Example:
+
+```json
+{
+  "sizes": {
+    "shared": {
+      "description": "Share a Spark with other small services",
+      "overrides": {
+        "memory_limit": "40g",
+        "gpu_memory": {"mode": "shared", "mib_per_device": 32768}
+      },
+      "vllm": {"gpu_memory_utilization": 0.3, "kv_cache_memory_bytes": "8G"}
+    }
+  }
+}
+```
+
+Use Add size in the recipe editor, then edit its JSON; Deployment offers a size
+selector and previews each host's budget and the requested estimate. Selecting a
+size materializes a distinct immutable revision, deduplicated by digest and
+annotated with `size_name` and `size_source_digest`. Deployments, readiness, smoke
+results and benchmarks pin that resolved revision; editing a size does not change
+running containers. Catalog rows retain the latest parent family; resolved sizes
+remain in revision history and are visible on Models and Deployment.
+
+GPU reservation per device is `max(mib_per_device, ceil(fraction * total_mib))`.
+A typed utilization override also sets that fraction. Use the MiB floor for
+weights, explicit KV, workspaces and a safety margin, including startup peaks.
+Explicit KV sizing changes vLLM's actual allocation; this formula intentionally
+remains conservative rather than claiming an exact footprint. Unspecified recipes
+remain exclusive, and sharing must be permitted by the host's Fleet policy.
+Docker RAM limits reserve host memory separately. On GB10 the GPU estimate must
+fit inside that RAM reservation; unified memory is not counted twice.
+
+Fleet reports host-owned `managed_capacity`: RAM budget/reservations and each
+GPU's total, usable budget, reservations and exclusive owner. Central API admission
+checks fresh capacity and durable desired placements before committing changes;
+Fleet atomically checks local reservations again. Ready/pending/stopping workloads
+hold resources, including after restart. The UI distinguishes measured available
+memory from unreserved budgets. GPU reservations are estimates, not CUDA quotas.
+
+Single-host deployment IDs may move only after the old host has positively
+reported unload. Its durable local desire remains unloaded; new generations and
+observations belong to the new host. Changing revisions also requires observed
+unload. Distributed group moves still require a new placement.

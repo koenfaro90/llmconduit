@@ -43,6 +43,8 @@ pub struct CreateRecipeRevision {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SelectDeployment {
+    #[serde(default)]
+    pub size: Option<String>,
     pub expected_generation: u64,
     pub endpoint_id: String,
     pub recipe_id: String,
@@ -128,6 +130,12 @@ pub(crate) fn source_has_credentials(value: &serde_yaml::Value) -> bool {
 #[serde(deny_unknown_fields)]
 pub(crate) struct RecipeMetadata {
     #[serde(default)]
+    pub size_name: Option<String>,
+    #[serde(default)]
+    pub size_source_digest: Option<String>,
+    #[serde(default)]
+    pub memory_estimate_note: Option<String>,
+    #[serde(default)]
     pub gpu_families: Vec<String>,
     #[serde(default)]
     pub image_sources: BTreeMap<String, String>,
@@ -168,6 +176,18 @@ fn validate_metadata(spec: &serde_json::Map<String, Value>) -> Result<(), &'stat
     };
     let metadata: RecipeMetadata =
         serde_json::from_value(value.clone()).map_err(|_| "invalid recipe metadata")?;
+    if metadata.size_name.as_ref().is_some_and(|v| !valid_id(v))
+        || metadata
+            .size_source_digest
+            .as_ref()
+            .is_some_and(|v| v.len() != 64 || !v.bytes().all(|b| b.is_ascii_hexdigit()))
+        || metadata
+            .memory_estimate_note
+            .as_ref()
+            .is_some_and(|v| v.len() > 1024 || v.chars().any(char::is_control))
+    {
+        return Err("invalid size/memory metadata");
+    }
     if metadata.gpu_families.len() > 8
         || metadata
             .gpu_families
@@ -227,13 +247,14 @@ pub(crate) fn validate_recipe(body: &CreateRecipeRevision) -> Result<String, &'s
         return Err("model_spec must be an object");
     };
     validate_metadata(spec)?;
+    crate::dashboard_recipe_sizes::validate(&body.model_spec)?;
     if let Some(ranks) = spec.get("distributed") {
         let Some(ranks) = ranks.as_array() else {
             return Err("distributed must be an array of rank specifications");
         };
         if spec
             .keys()
-            .any(|key| !matches!(key.as_str(), "distributed" | "metadata"))
+            .any(|key| !matches!(key.as_str(), "distributed" | "metadata" | "sizes"))
             || !(2..=8).contains(&ranks.len())
             || ranks
                 .iter()
@@ -277,6 +298,8 @@ pub(crate) fn validate_recipe(body: &CreateRecipeRevision) -> Result<String, &'s
     }
     let allowed = [
         "metadata",
+        "sizes",
+        "gpu_memory",
         "description",
         "image",
         "command",
@@ -306,6 +329,27 @@ pub(crate) fn validate_recipe(body: &CreateRecipeRevision) -> Result<String, &'s
     ];
     if spec.keys().any(|key| !allowed.contains(&key.as_str())) {
         return Err("unknown or host-owned model field");
+    }
+    if let Some(memory) = spec.get("gpu_memory") {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Memory {
+            mode: String,
+            #[serde(default)]
+            mib_per_device: u64,
+            #[serde(default)]
+            fraction: f64,
+        }
+        let memory: Memory =
+            serde_json::from_value(memory.clone()).map_err(|_| "invalid GPU memory reservation")?;
+        if !matches!(memory.mode.as_str(), "exclusive" | "shared")
+            || memory.mib_per_device > 1 << 30
+            || !memory.fraction.is_finite()
+            || !(0.0..=1.0).contains(&memory.fraction)
+            || memory.mode == "shared" && memory.mib_per_device == 0 && memory.fraction == 0.0
+        {
+            return Err("invalid GPU memory reservation");
+        }
     }
     let Some(image) = spec.get("image").and_then(Value::as_str) else {
         return Err("an image is required");
@@ -651,10 +695,15 @@ pub async fn select_deployment(
                 "render the source recipe into an executable revision before deployment",
             );
         }
-        let revision = state.recipes[&body.recipe_id]
-            .iter()
-            .find(|r| r.digest == body.revision_digest)
-            .unwrap();
+        let revision = match crate::dashboard_recipe_sizes::pin(
+            &mut state,
+            &body.recipe_id,
+            &body.revision_digest,
+            body.size.as_deref(),
+        ) {
+            Ok(revision) => revision,
+            Err(message) => return error(StatusCode::BAD_REQUEST, message),
+        };
         if body.desired_state == "ready"
             && !matches_hardware(
                 &revision.model_spec,
@@ -677,27 +726,21 @@ pub async fn select_deployment(
         if current.map_or(0, |d| d.generation) != body.expected_generation {
             return error(StatusCode::CONFLICT, "deployment generation changed");
         }
-        if let Some(current) = current {
-            if current.endpoint_id != body.endpoint_id {
-                return error(
-                    StatusCode::CONFLICT,
-                    "a deployment cannot move hosts; unload it and create a new deployment",
-                );
-            }
-            if current.revision_digest != body.revision_digest
-                && (current.desired_state != "unloaded"
-                    || current
-                        .observed
-                        .as_ref()
-                        .and_then(|v| v.pointer("/status/phase"))
-                        .and_then(Value::as_str)
-                        != Some("unloaded"))
-            {
-                return error(
-                    StatusCode::CONFLICT,
-                    "wait for the host to unload before selecting a different recipe revision",
-                );
-            }
+        if let Some(current) = current
+            && (current.revision_digest != revision.digest
+                || current.endpoint_id != body.endpoint_id)
+            && (current.desired_state != "unloaded"
+                || current
+                    .observed
+                    .as_ref()
+                    .and_then(|v| v.pointer("/status/phase"))
+                    .and_then(Value::as_str)
+                    != Some("unloaded"))
+        {
+            return error(
+                StatusCode::CONFLICT,
+                "wait for the host to unload before selecting a different recipe revision or host",
+            );
         }
         let Some(generation) = body.expected_generation.checked_add(1) else {
             return error(StatusCode::CONFLICT, "generation exhausted");
@@ -707,13 +750,25 @@ pub async fn select_deployment(
             placement: current.and_then(|d| d.placement.clone()),
             endpoint_id: body.endpoint_id.clone(),
             recipe_id: body.recipe_id.clone(),
-            revision_digest: body.revision_digest.clone(),
+            revision_digest: revision.digest.clone(),
             desired_state: body.desired_state.clone(),
             updated_at_ms: crate::mesh::store::now_ms(),
             observed_at_ms: None,
             observed: None,
             error: None,
         };
+        if let Err(message) = crate::dashboard_resource_admission::check(
+            &state,
+            &id,
+            &deployment,
+            body.endpoint_id
+                .parse()
+                .ok()
+                .and_then(|endpoint| admin.registry().host_snapshot(endpoint))
+                .as_ref(),
+        ) {
+            return error(StatusCode::CONFLICT, &message);
+        }
         state.deployments.insert(id.clone(), deployment.clone());
         match commit(store.as_ref(), raw.as_deref(), &state).await {
             Ok(true) => return json_no_store(StatusCode::ACCEPTED, &deployment),

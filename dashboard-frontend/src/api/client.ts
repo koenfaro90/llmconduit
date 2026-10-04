@@ -375,7 +375,7 @@ export class DashboardClient {
 
   benchmarks(): Promise<BenchmarkRun[]> {return this.request('/benchmarks',undefined,(v):v is BenchmarkRun[]=>Array.isArray(v)&&v.every(isBenchmarkRun));}
   recipeEvidence(): Promise<Array<{id:string;recipe_id:string;revision_digest:string;endpoint_id:string;kind:string;recorded_at_ms:number;data:Record<string,unknown>}>> {return this.request('/management/recipe-evidence');}
-  deployGroup(body:{group_id?:string;recipe_id:string;revision_digest:string;hosts:Array<{endpoint_id:string;address:string}>;expected_generations?:Record<string,number>;desired_state:'ready'|'unloaded'}):Promise<{group_id:string;deployments:Record<string,DesiredDeployment>}> {return this.mutate('/management/deployment-groups','POST',body);}
+  deployGroup(body:{size?:string;group_id?:string;recipe_id:string;revision_digest:string;hosts:Array<{endpoint_id:string;address:string}>;expected_generations?:Record<string,number>;desired_state:'ready'|'unloaded'}):Promise<{group_id:string;deployments:Record<string,DesiredDeployment>}> {return this.mutate('/management/deployment-groups','POST',body);}
 
   hostHistory(id: string, since: number, until?: number): Promise<{samples: FleetHostSnapshot[]; bucket_ms:number}> {
     return this.request(`/hosts/${encodeURIComponent(id)}/history?since_ms=${since}${until ? `&until_ms=${until}` : ''}`);

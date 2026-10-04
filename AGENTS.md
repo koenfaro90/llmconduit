@@ -7,7 +7,8 @@ Guidance for AI coding agents working in this repo.
 Rust LLM API gateway. Accepts OpenAI Responses, OpenAI Chat Completions, and Anthropic Messages on the front; forwards to OpenAI-compatible `/v1/chat/completions` upstream, and proxies legacy `/v1/completions`, embeddings/rerank and dedicated image/video/audio
 task APIs (JSON/multipart/binary streaming). Video handles persist owner/backend
 routing in SQL. See `docs/media-api.md`. Infrastructure pages separate Hosts, Recipes,
-Models, Deployment, Benchmarks and opt-in Traffic policies; Providers retains upstream/mesh administration. Host history is collected into SQL independently of browsers; recipes use Monaco JSON editing and portable distributed placement. See `docs/fleet-dashboard-management.md` and `docs/production-traffic.md`. Adds server-side Brave web search, per-model defaults, nested failover/model routing across upstreams, replay caching, request-log analysis, and an optional debug UI.
+Models, Deployment, Benchmarks and opt-in Traffic policies; Providers retains upstream/mesh administration. Host history is collected into SQL independently of browsers; recipes use Monaco JSON editing and portable distributed placement. Recipes offer named sizes with immutable resolved revisions;
+opt-in shared GPU admission uses host-owned RAM/VRAM reservations and fresh capacity reports. See `docs/fleet-dashboard-management.md` and `docs/production-traffic.md`. Adds server-side Brave web search, per-model defaults, nested failover/model routing across upstreams, replay caching, request-log analysis, and an optional debug UI.
 
 Use the code layout below as the architecture map when touching unfamiliar areas.
 
