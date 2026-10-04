@@ -1,5 +1,5 @@
 import {it,expect} from 'vitest';
-import {gpuEstimate,placementFit,sizeSpec,defaultGpuSelection} from './recipeSizes';
+import {gpuEstimate,placementFit,sizeSpec,defaultGpuSelection,resourceLabel} from './recipeSizes';
 import type {MeshNode,RecipeRevision,ManagementState} from '../../api/types';
 const revision:RecipeRevision={digest:'base',revision:1,description:'',created_at_ms:1,model_spec:{image:'pinned',gpus:'device=0',memory_limit:'100g',sizes:{shared:{overrides:{memory_limit:'40g',gpu_memory:{mode:'shared',mib_per_device:32768}},vllm:{gpu_memory_utilization:0.3}}}}};
 const node=()=>({endpoint_id:'host',enabled:true,managed_deployments:true,host_snapshot:{sampled_at:new Date().toISOString(),gpus:[{index:0,name:'GB10',unified_memory:true}],managed_capacity:{memory_budget_mib:116000,memory_reserved_mib:40960,gpu_sharing_enabled:true,gpus:[{index:0,total_mib:124000,budget_mib:116000,reserved_mib:37200,unified_memory:true}]}}}) as MeshNode;
@@ -15,4 +15,9 @@ it('offers different physical GPUs and reserves pending placement on the actual 
  expect(placementFit({...shared.model_spec,gpus:'device=1'},host,state).fits).toBe(false);
  expect(placementFit({...shared.model_spec,gpus:'device=0'},host,state).fits).toBe(true);
  expect(defaultGpuSelection(shared.model_spec,host,state)).toEqual([0]);
+});
+it('shows fixed measured budgets separately from utilization targets ignored with explicit KV bytes',()=>{
+ expect(resourceLabel({memory_limit:'28g',gpu_memory:{mode:'shared',mib_per_device:17408,fraction:0}})).toBe('28.0 GiB RAM · shared GPU: 17.0 GiB / device');
+ expect(resourceLabel({command:['vllm','serve','model','--gpu-memory-utilization','0.3','--kv-cache-memory-bytes','4G']})).toContain('fixed KV cache');
+ expect(resourceLabel({command:['vllm','serve','model','--gpu-memory-utilization','0.3','--kv-cache-memory-bytes','4G']})).not.toContain('target 30%');
 });

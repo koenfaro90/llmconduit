@@ -206,6 +206,7 @@ mod tests {
             rank: 0,
             addresses: vec!["host".into()],
             gpus: Some(vec![1]),
+            gpu_uuids: None,
         });
         assert!(check(&state, "second", &placed, Some(&h)).is_ok());
         state.deployments.insert("second".into(), placed.clone());

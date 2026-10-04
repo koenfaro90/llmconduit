@@ -108,3 +108,8 @@ fraction override, the typed utilization setting still sets the reservation frac
 Measurements apply to the recorded image, settings, GPU family and tested workload;
 changes require validation again. Sampled peaks include startup and inference; a
 budget adds a visible margin rather than treating idle usage as the requirement.
+
+Explicit physical GPU selections are resolved to host-reported NVIDIA GPU UUIDs.
+Fleet still reserves physical host indices, while CUDA_VISIBLE_DEVICES uses the
+pinned UUIDs so privileged containers and differing CUDA enumeration orders select
+the same hardware. Stop preserves those identities even if the host is offline.

@@ -26,6 +26,9 @@ pub struct Placement {
     /// Physical host indices; absence retains the pinned recipe's device selection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpus: Option<Vec<u32>>,
+    /// Authoritative GPU identities keep CUDA masks correct across privileged containers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_uuids: Option<Vec<String>>,
 }
 #[derive(Clone, utoipa::ToSchema, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -96,15 +99,43 @@ pub fn render(spec: &Value, placement: Option<&Placement>) -> Result<Value, Stri
             {
                 return Err("select distinct GPUs matching the recipe's device count".into());
             }
-            if selected != &original {
-                let csv = selected
-                    .iter()
-                    .map(u32::to_string)
-                    .collect::<Vec<_>>()
-                    .join(",");
-                model["gpus"] = json!(format!("device={csv}"));
-                // NVIDIA uses physical host IDs; CUDA indexes the devices exposed inside
-                // this container. Keep the engine's local tensor-parallel numbering.
+            let csv = selected
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            model["gpus"] = json!(format!("device={csv}"));
+            if let Some(identities) = &p.gpu_uuids {
+                if identities.len() != selected.len()
+                    || identities.iter().any(|id| {
+                        !id.strip_prefix("GPU-")
+                            .is_some_and(|s| uuid::Uuid::parse_str(s).is_ok())
+                    })
+                    || identities
+                        .iter()
+                        .collect::<std::collections::HashSet<_>>()
+                        .len()
+                        != identities.len()
+                {
+                    return Err(
+                        "GPU placement identities must uniquely match selected devices".into(),
+                    );
+                }
+                if model.get("environment").is_none() {
+                    model["environment"] = json!({});
+                }
+                let env = model
+                    .get_mut("environment")
+                    .and_then(Value::as_object_mut)
+                    .ok_or("GPU placement requires an environment object")?;
+                // Privileged containers can see all host devices despite DeviceRequests;
+                // CUDA ordinals and NVIDIA host indices need not match. UUIDs do.
+                env.insert("CUDA_VISIBLE_DEVICES".into(), json!(identities.join(",")));
+                if env.contains_key("NVIDIA_VISIBLE_DEVICES") {
+                    env.insert("NVIDIA_VISIBLE_DEVICES".into(), json!(csv));
+                }
+            } else if selected != &original {
+                // Compatibility for placements persisted before UUID pinning.
                 if let Some(env) = model.get_mut("environment").and_then(Value::as_object_mut) {
                     if env.contains_key("NVIDIA_VISIBLE_DEVICES") {
                         env.insert("NVIDIA_VISIBLE_DEVICES".into(), json!(csv));
@@ -169,6 +200,7 @@ fn apply(
     state: &mut dashboard_management::ManagementState,
     body: &Selection,
     group: &str,
+    gpu_uuids: &BTreeMap<String, Vec<String>>,
 ) -> Result<Vec<(String, DesiredDeployment)>, String> {
     if !dashboard_management::valid_id(group)
         || group.len() > 32
@@ -228,6 +260,7 @@ fn apply(
             rank: rank as u32,
             addresses: addresses.clone(),
             gpus: host.gpus.clone(),
+            gpu_uuids: gpu_uuids.get(&host.endpoint_id).cloned(),
         };
         if let Some(current) = current {
             if current.endpoint_id != host.endpoint_id {
@@ -363,7 +396,49 @@ pub async fn select(
                 "recipe GPU families do not match selected hosts' detected hardware, or a host observation is unavailable",
             );
         }
-        let result = match apply(&mut state, &resolved_body, &group) {
+        let mut identities = BTreeMap::new();
+        for host in &body.hosts {
+            let Some(indices) = &host.gpus else {
+                continue;
+            };
+            // Unload must remain possible if a host is offline. Preserve the old mask.
+            if body.desired_state == "unloaded" {
+                if let Some(ids) = state
+                    .deployments
+                    .values()
+                    .find(|d| {
+                        d.endpoint_id == host.endpoint_id
+                            && d.placement.as_ref().is_some_and(|p| {
+                                p.group_id == group && p.gpus.as_ref() == Some(indices)
+                            })
+                    })
+                    .and_then(|d| d.placement.as_ref())
+                    .and_then(|p| p.gpu_uuids.clone())
+                {
+                    identities.insert(host.endpoint_id.clone(), ids);
+                }
+                continue;
+            }
+            let snapshot = host
+                .endpoint_id
+                .parse()
+                .ok()
+                .and_then(|e| admin.registry().host_snapshot(e));
+            let ids = indices
+                .iter()
+                .map(|index| {
+                    snapshot
+                        .as_ref()
+                        .and_then(|s| s.gpus.iter().find(|g| g.index == *index))
+                        .map(|g| g.uuid.clone())
+                })
+                .collect::<Option<Vec<_>>>();
+            let Some(ids) = ids else {
+                return err(StatusCode::CONFLICT, "selected GPU identity is unavailable");
+            };
+            identities.insert(host.endpoint_id.clone(), ids);
+        }
+        let result = match apply(&mut state, &resolved_body, &group, &identities) {
             Ok(result) => result,
             Err(message) => return err(StatusCode::CONFLICT, &message),
         };
@@ -473,6 +548,40 @@ mod tests {
         );
     }
     #[test]
+    fn uuid_masks_select_physical_devices_even_for_privileged_recipes() {
+        let ids = vec![
+            "GPU-11111111-1111-1111-1111-111111111111",
+            "GPU-22222222-2222-2222-2222-222222222222",
+        ];
+        let input =
+            json!({"group_id":"g","rank":0,"addresses":["one"],"gpus":[3,7],"gpu_uuids":ids});
+        let placement: Placement = serde_json::from_value(input.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&placement).unwrap(), input);
+        let spec = json!({"gpus":"device=0,1","privileged":true,"environment":{"CUDA_VISIBLE_DEVICES":"0,1","NVIDIA_VISIBLE_DEVICES":"all"}});
+        let rendered = render(&spec, Some(&placement)).unwrap();
+        assert_eq!(rendered["gpus"], "device=3,7");
+        assert_eq!(
+            rendered["environment"]["CUDA_VISIBLE_DEVICES"],
+            ids.join(",")
+        );
+        assert_eq!(rendered["environment"]["NVIDIA_VISIBLE_DEVICES"], "3,7");
+        let mut same_indices = placement.clone();
+        same_indices.gpus = Some(vec![0, 1]);
+        assert_eq!(
+            render(&spec, Some(&same_indices)).unwrap()["environment"]["CUDA_VISIBLE_DEVICES"],
+            ids.join(",")
+        );
+        assert_eq!(
+            render(&json!({"gpus":"device=0,1"}), Some(&placement)).unwrap()["environment"]["CUDA_VISIBLE_DEVICES"],
+            ids.join(",")
+        );
+        for invalid in [vec![], vec![ids[0]], vec![ids[0], ids[0]], vec!["0", "1"]] {
+            let mut p = placement.clone();
+            p.gpu_uuids = Some(invalid.into_iter().map(str::to_owned).collect());
+            assert!(render(&spec, Some(&p)).is_err());
+        }
+    }
+    #[test]
     fn distributed_render_preserves_rank_specs_and_binds_addresses() {
         let spec = json!({"distributed":[{"command":["--master-addr","{{head_address}}","--host","{{host_address}}"]},{"command":["--node-rank","{{node_rank}}","--nnodes","{{num_nodes}}"],"environment":{"VLLM_HOST_IP":"{{host_address}}"}}]});
         let p = Placement {
@@ -480,6 +589,7 @@ mod tests {
             rank: 1,
             addresses: vec!["192.168.37.107".into(), "192.168.37.108".into()],
             gpus: None,
+            gpu_uuids: None,
         };
         let rendered = render(&spec, Some(&p)).unwrap();
         assert_eq!(
@@ -524,7 +634,7 @@ mod tests {
             expected_generations: BTreeMap::new(),
             desired_state: "ready".into(),
         };
-        assert!(apply(&mut state, &body, "group").is_err());
+        assert!(apply(&mut state, &body, "group", &BTreeMap::new()).is_err());
         assert!(state.deployments.is_empty());
     }
 }

@@ -24,5 +24,12 @@ export function runtimeSpec(row:DeploymentRow):Record<string,unknown>{
 }
 export function placedSpec(spec:Record<string,unknown>,deployment:Pick<DesiredDeployment,'placement'>):Record<string,unknown>{
  const rank=Array.isArray(spec.distributed)?spec.distributed[deployment.placement?.rank??0] as Record<string,unknown>??{}:spec;
- return deployment.placement?.gpus?{...rank,gpus:`device=${deployment.placement.gpus.join(',')}`}:rank;
+ const placement=deployment.placement;
+ if(!placement?.gpus)return rank;
+ const environment={...(rank.environment as Record<string,unknown>??{})};
+ const selection=`device=${placement.gpus.join(',')}`;
+ if(placement.gpu_uuids)environment.CUDA_VISIBLE_DEVICES=placement.gpu_uuids.join(',');
+ else if(selection!==rank.gpus&&'CUDA_VISIBLE_DEVICES' in environment)environment.CUDA_VISIBLE_DEVICES=placement.gpus.map((_,i)=>i).join(',');
+ if((placement.gpu_uuids||selection!==rank.gpus)&&'NVIDIA_VISIBLE_DEVICES' in environment)environment.NVIDIA_VISIBLE_DEVICES=placement.gpus.join(',');
+ return {...rank,gpus:`device=${placement.gpus.join(',')}`,environment};
 }

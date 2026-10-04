@@ -12,6 +12,8 @@ opt-in shared GPU admission uses host-owned RAM/VRAM reservations and fresh capa
 Physical GPU selections belong to per-rank deployment placement, must preserve the recipe's
 device count and require observed unload before changes. Rendering, admission, Start/Stop,
 model details and UI capacity must all use selected devices rather than recipe defaults.
+Explicit placements pin host-reported GPU UUIDs in CUDA_VISIBLE_DEVICES to avoid
+ordinal ambiguity in privileged containers; unload preserves the existing mask offline.
 Memory validation evidence records measured startup/load peaks and explicit margins per
 resolved revision and tested hardware; do not label an untested size as calibrated.
 See `docs/fleet-dashboard-management.md` and `docs/production-traffic.md`. Adds server-side Brave web search, per-model defaults, nested failover/model routing across upstreams, replay caching, request-log analysis, and an optional debug UI.
