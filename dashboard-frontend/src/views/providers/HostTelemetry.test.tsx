@@ -50,3 +50,9 @@ it('shows independent metric intervals and disabled container resource sampling'
  const table=screen.getByRole('table',{hidden:true});
  expect(table).toHaveTextContent('container cpu');expect(table).toHaveTextContent('Off');expect(table).toHaveTextContent('30000 ms');
 });
+
+it('shows fan percentages per physical GPU without clamping or inventing unavailable readings',()=>{
+ const measured:MeshNode={...node,host_snapshot:{...node.host_snapshot!,gpus:[{...node.host_snapshot!.gpus[0]!,fan_speed_percent:123},{...node.host_snapshot!.gpus[0]!,index:1,uuid:'second',fan_speed_percent:0},{...node.host_snapshot!.gpus[0]!,index:2,uuid:'third',fan_speed_percent:null}]}};
+ render(<HostTelemetry nodes={[measured]} now={now}/>);
+ const panel=screen.getByTestId('host-telemetry');expect(panel).toHaveTextContent('Fan 123.0%');expect(panel).toHaveTextContent('Fan 0.0%');expect(panel).toHaveTextContent('Fan —');
+});

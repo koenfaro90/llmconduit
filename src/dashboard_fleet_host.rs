@@ -44,8 +44,8 @@ impl HostMetricCollection {
     fn validate(&self, name: &str) -> bool {
         let minimum = match name {
             "cpu" | "memory" | "network" | "disk" | "gpu_utilization" | "gpu_memory"
-            | "gpu_temperature" | "gpu_power" | "gpu_clock" | "gpu_memory_clock" | "pcie_rx"
-            | "pcie_tx" | "pcie_link" | "pcie_errors" => 100,
+            | "gpu_temperature" | "gpu_power" | "gpu_clock" | "gpu_memory_clock" | "gpu_fan"
+            | "pcie_rx" | "pcie_tx" | "pcie_link" | "pcie_errors" => 100,
             "container_inventory" | "container_cpu" | "container_memory" | "container_pids" => 1000,
             _ => return false,
         };
@@ -107,6 +107,8 @@ pub struct HostGpu {
     pub clock_mhz: Option<f64>,
     #[serde(default)]
     pub memory_clock_mhz: Option<f64>,
+    #[serde(default)]
+    pub fan_speed_percent: Option<f64>,
     #[serde(default)]
     pub pcie_rx_kb_per_second: Option<f64>,
     #[serde(default)]
@@ -223,7 +225,7 @@ impl FleetHostSnapshot {
             && matches!(c.gpu_backend.as_str(), "" | "nvml" | "nvidia-smi")
             && [&c.gpu_sampled_at, &c.containers_sampled_at].iter().all(|v| v.as_ref().is_none_or(|v| chrono::DateTime::parse_from_rfc3339(v).is_ok()))
             && metric(c.gpu_duration_ms)
-            && c.metrics.len() <= 18 && c.metrics.iter().all(|(name, value)| value.validate(name)))
+            && c.metrics.len() <= 19 && c.metrics.iter().all(|(name, value)| value.validate(name)))
             && self.engine_observations.len()<=4 && self.engine_observations.iter().all(EngineObservation::validate)
             && self.schema_version == 1
             && chrono::DateTime::parse_from_rfc3339(&self.sampled_at).is_ok()
@@ -238,7 +240,7 @@ impl FleetHostSnapshot {
                 && metric(n.rx_bytes_per_second) && metric(n.tx_bytes_per_second))
             && self.gpus.len() <= 16 && self.gpus.iter().all(|g| text(&g.uuid, 128) && text(&g.name, 256)
                 && metric(g.memory_total_mib) && metric(g.memory_used_mib)
-                && percent(g.utilization_percent) && metric(g.temperature_celsius) && metric(g.power_watts) && metric(g.clock_mhz) && metric(g.memory_clock_mhz) && metric(g.pcie_rx_kb_per_second) && metric(g.pcie_tx_kb_per_second) && metric(g.pcie_link_generation) && metric(g.pcie_link_width) && metric(g.pcie_max_link_generation) && metric(g.pcie_max_link_width) && metric(g.pcie_replay_count) && metric(g.pcie_recovery_count) && metric(g.pcie_correctable_error_count))
+                && percent(g.utilization_percent) && metric(g.temperature_celsius) && metric(g.power_watts) && metric(g.clock_mhz) && metric(g.memory_clock_mhz) && metric(g.fan_speed_percent) && metric(g.pcie_rx_kb_per_second) && metric(g.pcie_tx_kb_per_second) && metric(g.pcie_link_generation) && metric(g.pcie_link_width) && metric(g.pcie_max_link_generation) && metric(g.pcie_max_link_width) && metric(g.pcie_replay_count) && metric(g.pcie_recovery_count) && metric(g.pcie_correctable_error_count))
             && self.containers.len() <= 64 && self.containers.iter().all(|c|
                 text(&c.id, 128) && text(&c.name, 256) && text(&c.image, 512)
                 && text(&c.state, 64) && text(&c.status, 256)
@@ -264,6 +266,25 @@ pub(crate) fn fixture() -> FleetHostSnapshot {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fan_telemetry_preserves_unavailable_and_above_100_with_own_interval() {
+        let mut sample = fixture();
+        assert!(sample.gpus[0].fan_speed_percent.is_none());
+        sample.gpus[0].fan_speed_percent = Some(123.0);
+        sample.collection=Some(serde_json::from_value(serde_json::json!({"host_interval_ms":5000,"gpu_interval_ms":5000,"container_interval_ms":5000,"gpu_backend":"nvml","gpu_sampled_at":null,"containers_sampled_at":null,"gpu_duration_ms":null,"metrics":{"gpu_fan":{"interval_ms":1000,"sampled_at":"2026-10-03T12:00:00Z"}}})).unwrap());
+        assert!(sample.validate());
+        let decoded: FleetHostSnapshot =
+            serde_json::from_slice(&serde_json::to_vec(&sample).unwrap()).unwrap();
+        assert_eq!(decoded.gpus[0].fan_speed_percent, Some(123.0));
+        assert_eq!(
+            decoded.collection.unwrap().metrics["gpu_fan"].interval_ms,
+            1000
+        );
+        sample.gpus[0].fan_speed_percent = Some(-1.0);
+        assert!(!sample.validate());
+        sample.gpus[0].fan_speed_percent = Some(f64::INFINITY);
+        assert!(!sample.validate());
+    }
     #[test]
     fn per_metric_collection_survives_mesh_and_rejects_invalid_overrides() {
         let mut value = serde_json::to_value(fixture()).unwrap();

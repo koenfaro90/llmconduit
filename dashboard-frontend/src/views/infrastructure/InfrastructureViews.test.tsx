@@ -68,3 +68,18 @@ it('shows the largest compatible memory peak alongside newer ordinary smoke evid
  await waitFor(()=>expect(screen.getByTestId('recipe-revisions')).toHaveTextContent('Measured peak: 12.0 GiB GPU · 24.0 GiB unified'));
  expect(screen.getByRole('button',{name:'Review small evidence'})).toBeInTheDocument();
 });
+
+it('plots selected host history by physical GPU and can hide one device independently',async()=>{
+ const client=getConnection().client;const mesh=await client.mesh();
+ const sample:FleetHostSnapshot={schema_version:1,sampled_at:new Date().toISOString(),hostname:'gpu-test',architecture:'amd64',uptime_seconds:1,cpu:null,memory:null,disk:null,network:[],containers:[],errors:[],gpus:[0,1].map(index=>({index,uuid:`physical-${index}`,name:'RTX',unified_memory:false,memory_total_mib:96000,memory_used_mib:1000,utilization_percent:index?70:20,temperature_celsius:45,power_watts:100,fan_speed_percent:50}))};
+ vi.spyOn(client,'mesh').mockResolvedValue({...mesh,nodes:[{endpoint_id:'gpu-host',enabled:true,joined_at_ms:1,host_snapshot:sample}]});
+ vi.spyOn(client,'hostHistory').mockResolvedValue({samples:[sample],bucket_ms:15000});
+ const previous=window.location.hash;window.location.hash='#/hosts/gpu-host';
+ try {
+  renderWithQuery(<HostsView/>);
+  const gpu0=await screen.findByRole('checkbox',{name:'GPU 0 RTX'});await screen.findByRole('checkbox',{name:'GPU 1 RTX'});
+  await waitFor(()=>expect(screen.getByRole('img',{name:/GPU 0 · GPU utilization.*GPU 1 · GPU utilization/})).toBeInTheDocument());
+  fireEvent.click(gpu0);expect(screen.getByRole('img',{name:/GPU 1 · GPU utilization/})).toBeInTheDocument();expect(screen.queryByRole('img',{name:/GPU 0 · GPU utilization/})).toBeNull();
+  fireEvent.click(screen.getByRole('checkbox',{name:'GPU fan speed %'}));expect(screen.getByRole('img',{name:/GPU 1 · GPU fan speed/})).toBeInTheDocument();
+ }finally{window.location.hash=previous;}
+});

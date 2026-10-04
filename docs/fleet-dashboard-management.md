@@ -180,3 +180,11 @@ Fleet uses bounded Docker Engine one-shot reads instead of the `docker stats` CL
 Disabling all three container resource metrics leaves inventory intact and makes
 zero Engine stats requests. Per-metric metadata survives Fleet, worker/controller
 mesh serialization, SQL history and the dashboard API; legacy agents omit it.
+
+Host details graph each physical GPU separately, selected by UUID and displayed
+in index order; CPU/RAM/network remain host measurements. Individual GPU selectors
+reuse the shared history charts and legends. The fleet overview keeps host-level
+GPU averages and PCIe totals. GPU fan speed is available in the graph selector and
+per-GPU details, with its own `gpu_fan` interval/off setting. Unsupported sensors
+remain unavailable and legitimate zero readings stay zero. NVML reports intended
+operating percentages rather than actual RPM; values above 100% are preserved.

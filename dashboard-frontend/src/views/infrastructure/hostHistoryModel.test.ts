@@ -19,3 +19,21 @@ it('honors individual disabled and stale metric timestamps in stored history',()
  expect(HOST_METRICS.clock.read(host)).toBeNull();expect(HOST_METRICS.ram.read(host)).toBe(40);expect(HOST_METRICS.gpu.read(host)).toBeNull();
  host.collection.metrics!.memory!.sampled_at='bad';expect(HOST_METRICS.ram.read(host)).toBeNull();
 });
+
+it('retains per-GPU fan, clocks, temperature, utilization and PCIe history by physical UUID',()=>{
+ const host=sample(1000);host.gpus[0]!.fan_speed_percent=0;host.gpus[0]!.memory_clock_mhz=12000;host.gpus[0]!.pcie_rx_kb_per_second=1000;
+ host.gpus.push({...host.gpus[0]!,index:1,uuid:'second',utilization_percent:70,temperature_celsius:55,clock_mhz:1800,fan_speed_percent:123,pcie_rx_kb_per_second:5000});
+ expect(historyPoints([host],'gpu',15000,'second')).toEqual([[1000,70]]);
+ expect(historyPoints([host],'clock',15000,'second')).toEqual([[1000,1800]]);
+ expect(historyPoints([host],'memory_clock',15000,'second')).toEqual([[1000,12000]]);
+ expect(historyPoints([host],'temperature',15000,'second')).toEqual([[1000,55]]);
+ expect(historyPoints([host],'pcie_rx',15000,'second')).toEqual([[1000,5]]);
+ expect(historyPoints([host],'fan',15000,'second')).toEqual([[1000,123]]);
+ expect(historyPoints([host],'fan',15000,'gpu')).toEqual([[1000,0]]);
+ expect(historyPoints([host],'fan',15000,'missing')).toEqual([[1000,null]]);
+});
+it('leaves unsupported fan speeds unavailable and honors fan off timestamps',()=>{
+ const host=sample(1000);expect(HOST_METRICS.fan.read(host)).toBeNull();
+ host.gpus[0]!.fan_speed_percent=50;host.collection={host_interval_ms:5000,gpu_interval_ms:5000,container_interval_ms:5000,gpu_backend:'nvml',gpu_sampled_at:null,containers_sampled_at:null,gpu_duration_ms:null,metrics:{gpu_fan:{interval_ms:0,sampled_at:null}}};
+ expect(HOST_METRICS.fan.read(host)).toBeNull();
+});
