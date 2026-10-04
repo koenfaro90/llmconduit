@@ -10,6 +10,31 @@ const preview = { source_format: 'compose' as const, services: ['test'], model_s
 beforeEach(() => resetWorld({ mock: true }));
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 describe('Recipe conversion', () => {
+  it('loads a LiL URL, maps caches and requires review before saving or deploying', async () => {
+    const client = getConnection().client;
+    vi.spyOn(client, 'management').mockResolvedValue({ recipes: {}, deployments: {} });
+    const url = 'https://docker.local-inference-lab.ai/?build=pinned&model=qwen38-flash-next';
+    const fetch = vi.spyOn(client, 'fetchRecipeSource').mockResolvedValue({ source_url: url, source_format: 'compose', source_content: source, suggested_id: 'lil-qwen', named_volumes: ['hf', 'runtime'] });
+    const convert = vi.spyOn(client, 'convertRecipe').mockResolvedValue(preview);
+    const save = vi.spyOn(client, 'createRecipeRevision');
+    const deploy = vi.spyOn(client, 'deployGroup');
+    renderWithQuery(<RecipeManagement nodes={[]} mutationsEnabled mode="recipes" />);
+    fireEvent.click(screen.getByRole('button', { name: 'Import LiL URL' }));
+    fireEvent.change(screen.getByLabelText('Local Inference Lab URL'), { target: { value: url + '#step-configure' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Load LiL recipe' }));
+    await screen.findByLabelText('Host path for hf');
+    expect(fetch).toHaveBeenCalledWith(url + '#step-configure');
+    expect(screen.getByLabelText('Recipe ID')).toHaveValue('lil-qwen');
+    expect(screen.getByLabelText('Recipe specification')).toHaveValue(source);
+    fireEvent.change(screen.getByLabelText('Host path for hf'), { target: { value: '/home/koen/.cache/huggingface' } });
+    fireEvent.change(screen.getByLabelText('Host path for runtime'), { target: { value: '/home/koen/compose/inference-cache/qwen' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Preview conversion' }));
+    await screen.findByLabelText('Converted Fleet specification');
+    expect(convert).toHaveBeenCalledWith({ source_format: 'compose', source_content: source, options: { source_url: url, volume_paths: { hf: '/home/koen/.cache/huggingface', runtime: '/home/koen/compose/inference-cache/qwen' }, variables: {}, environment: {} } });
+    expect(save).not.toHaveBeenCalled(); expect(deploy).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText('Host path for runtime'), { target: { value: '/other/cache' } });
+    expect(screen.getByRole('button', { name: 'Save converted revision' })).toBeDisabled();
+  });
   it('accepts raw YAML in the management editor and saves source and executable revisions explicitly', async () => {
     const client = getConnection().client;
     vi.spyOn(client, 'management').mockResolvedValue({ recipes: {}, deployments: {} });

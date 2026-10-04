@@ -408,6 +408,13 @@ export class DashboardClient {
       return result;
     });
   }
+  fetchRecipeSource(url: string): Promise<import('./types').ImportedRecipeSource> {
+    return this.mutate('/management/recipes/source', 'POST', { url }).then((value) => {
+      const result = value as import('./types').ImportedRecipeSource;
+      if (!result || result.source_format !== 'compose' || typeof result.source_url !== 'string' || typeof result.source_content !== 'string' || typeof result.suggested_id !== 'string' || !Array.isArray(result.named_volumes) || result.named_volumes.some(name => typeof name !== 'string')) throw new Error('Recipe source returned an invalid response');
+      return result;
+    });
+  }
   createRecipeRevision(id: string, body: { description: string; model_spec: Record<string, unknown> }): Promise<RecipeRevision> {
     return this.mutate(`/management/recipes/${encodeURIComponent(id)}/revisions`, 'POST', body) as Promise<RecipeRevision>;
   }

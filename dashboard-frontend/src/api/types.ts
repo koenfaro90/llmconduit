@@ -2335,6 +2335,8 @@ export interface SelectDeployment {
 }
 
 export interface RecipeImportOptions {
+  source_url?: string;
+  volume_paths?: Record<string, string>;
   service?: string;
   image?: string;
   user?: string;
@@ -2364,6 +2366,13 @@ export interface ConvertedRecipe {
   model_spec: Record<string, unknown>;
   required_inputs: string[];
   warnings: string[];
+}
+export interface ImportedRecipeSource {
+  source_url: string;
+  source_format: 'compose';
+  source_content: string;
+  suggested_id: string;
+  named_volumes: string[];
 }
 
 export interface ModelActivity { model: string; backend: string | null; last_request_at_ms: number; requests: [number, number, number, number, number]; }

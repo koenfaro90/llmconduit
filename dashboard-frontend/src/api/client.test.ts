@@ -248,6 +248,16 @@ describe('DashboardClient — central recipe management', () => {
 });
 
 describe('DashboardClient — recipe conversion', () => {
+  it('fetches LiL source with CSRF and rejects malformed responses', async () => {
+    const result = {source_url:'https://docker.local-inference-lab.ai/?build=x&model=x',source_format:'compose',source_content:'services: {}',suggested_id:'lil-x',named_volumes:['hf']};
+    const fetchImpl = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(result), { status: 200 }));
+    const client = new DashboardClient({ fetchImpl, getCsrfToken: () => 'test-csrf' });
+    expect(await client.fetchRecipeSource(result.source_url)).toEqual(result);
+    expect(fetchImpl.mock.calls[0]![0]).toBe('/dashboard/api/management/recipes/source');
+    expect(new Headers(fetchImpl.mock.calls[0]![1]?.headers).get('X-CSRF-Token')).toBe('test-csrf');
+    fetchImpl.mockResolvedValueOnce(new Response('{}', { status: 200 }));
+    await expect(client.fetchRecipeSource(result.source_url)).rejects.toThrow('invalid response');
+  });
   it('sends bounded source/options with CSRF and validates the preview shape', async () => {
     const calls: Array<{ path: string; init: RequestInit | undefined }> = [];
     const response = { source_format: 'compose', services: ['model'], model_spec: { ports: [{ host_port: 8001, container_port: 8000 }] }, required_inputs: ['Set memory_limit'], warnings: [] };

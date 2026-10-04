@@ -310,6 +310,10 @@ fn protected_routes(gateway: Arc<Gateway>, auth: Arc<DashboardAuth>) -> Router<A
             post(crate::dashboard_management::convert_recipe),
         )
         .route(
+            "/dashboard/api/management/recipes/source",
+            post(crate::dashboard_management::fetch_recipe_source),
+        )
+        .route(
             "/dashboard/api/management",
             get(crate::dashboard_management::management_state),
         )

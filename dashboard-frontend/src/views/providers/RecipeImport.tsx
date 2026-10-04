@@ -1,22 +1,38 @@
 import { useState, type ChangeEvent } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { getConnection } from '../../api/connection';
-import type { ConvertedRecipe, ConvertRecipeRequest, RecipeImportOptions } from '../../api/types';
+import type { ConvertedRecipe, ConvertRecipeRequest, RecipeImportOptions, ImportedRecipeSource } from '../../api/types';
 import { Button } from '../../components/ui/Button';
 const input = 'rounded border border-line bg-bg px-2 py-1.5 text-xs text-text';
 
-export function RecipeImport({ recipeId, description, sourceFormat, sourceContent, mutationsEnabled, onSaved }: {
+export function LilSourceImport({ mutationsEnabled, onLoaded }: { mutationsEnabled: boolean; onLoaded: (source: ImportedRecipeSource) => void }) {
+  const [url, setUrl] = useState('');
+  const load = useMutation({ mutationFn: (value: string) => getConnection().client.fetchRecipeSource(value), onSuccess: onLoaded });
+  return <div className="space-y-2 rounded border border-line p-3">
+    <label className="block space-y-1"><span>Local Inference Lab configuration URL</span><input aria-label="Local Inference Lab URL" type="url" className={`${input} w-full`} placeholder="https://docker.local-inference-lab.ai/?build=…&model=…" value={url} onChange={e => setUrl(e.target.value)} /></label>
+    <p className="text-text-muted">Paste a saved build/model configuration. Its Compose file and selected options are loaded for review; deployment uses the Fleet controls.</p>
+    <Button onClick={() => load.mutate(url.trim())} disabled={!mutationsEnabled || load.isPending || !url.trim()}>{load.isPending ? 'Loading source…' : 'Load LiL recipe'}</Button>
+    {load.error && <p role="alert">{String(load.error)}</p>}
+  </div>;
+}
+
+export function RecipeImport({ recipeId, description, sourceFormat, sourceContent, sourceUrl, namedVolumes = [], mutationsEnabled, onSaved }: {
   recipeId: string; description: string; sourceFormat: 'compose' | 'sparkrun'; sourceContent: string;
+  sourceUrl?: string; namedVolumes?: string[];
   mutationsEnabled: boolean; onSaved: () => void;
 }) {
   const { client } = getConnection();
   const [options, setOptions] = useState<Record<string, string>>({});
   const [variables, setVariables] = useState('{}');
   const [environment, setEnvironment] = useState('{}');
+  const [volumePaths, setVolumePaths] = useState<Record<string, string>>({});
   const [preview, setPreview] = useState<{ request: ConvertRecipeRequest; response: ConvertedRecipe } | null>(null);
   const [message, setMessage] = useState('');
   function request(): ConvertRecipeRequest {
     const parsed: RecipeImportOptions = {};
+    if (sourceUrl) parsed.source_url = sourceUrl;
+    const mappings = Object.fromEntries(Object.entries(volumePaths).filter(([, path]) => path.trim()).map(([name, path]) => [name, path.trim()]));
+    if (Object.keys(mappings).length) parsed.volume_paths = mappings;
     for (const [key, value] of Object.entries(options)) {
       if (!value.trim()) continue;
       if (key === 'environment_files' || key === 'devices') parsed[key] = value.split('\n').map((s) => s.trim()).filter(Boolean);
@@ -66,7 +82,9 @@ export function RecipeImport({ recipeId, description, sourceFormat, sourceConten
   if (sourceFormat === 'sparkrun') fields.push(['runtime_cache_directory', 'Runtime cache directory', 'Optional existing approved cache path'], ['num_nodes', 'Distributed node count', 'Defaults to the recipe minimum'], ['node_rank', 'Distributed node rank', 'Leave blank to convert all ranks into one portable recipe'], ['head_address', 'Distributed head address', 'Head fabric IP'], ['host_address', 'Distributed host address', 'This rank’s fabric IP']);
   return <div className="space-y-2" data-testid="recipe-import">
     <p className="text-text-muted">Convert YAML to a Fleet recipe. Preview preserves commands, environment, bind paths and ports. Missing settings and unsupported features block saving a deployable revision.</p>
+    {sourceUrl && <p className="break-all text-text-muted">Loaded from <a className="text-accent" href={sourceUrl} target="_blank" rel="noreferrer">{sourceUrl}</a></p>}
     <div className="grid gap-2 md:grid-cols-2">{fields.filter(([key]) => key !== 'service' || sourceFormat === 'compose').map(([key, label, placeholder]) => <label key={key} className="space-y-1"><span>{label}</span><input aria-label={label} className={`${input} block w-full`} placeholder={placeholder} value={options[key] ?? ''} onChange={change(key)} /></label>)}</div>
+    {sourceFormat === 'compose' && namedVolumes.length > 0 && <fieldset className="space-y-2 rounded border border-line p-3"><legend>Cache volume paths</legend><p className="text-text-muted">Map each named volume to an approved absolute directory on the selected hosts. Existing Docker volume contents are not copied.</p><div className="grid gap-2 md:grid-cols-2">{namedVolumes.map(name => <label key={name}>{name}<input aria-label={`Host path for ${name}`} placeholder="/home/koen/…" className={`${input} block w-full`} value={volumePaths[name] ?? ''} onChange={e => setVolumePaths(old => ({ ...old, [name]: e.target.value }))} /></label>)}</div></fieldset>}
     <details><summary className="cursor-pointer">Variables, environment and secret files</summary><div className="space-y-2 pt-2">
       <label className="block">Variables / sparkrun overrides (JSON)<textarea aria-label="Conversion variables" className={`${input} block w-full font-mono`} rows={3} value={variables} onChange={(e) => setVariables(e.target.value)} /></label>
       <label className="block">Environment overrides (JSON)<textarea aria-label="Conversion environment" className={`${input} block w-full font-mono`} rows={3} value={environment} onChange={(e) => setEnvironment(e.target.value)} /></label>

@@ -130,6 +130,8 @@ pub(crate) fn source_has_credentials(value: &serde_yaml::Value) -> bool {
 #[serde(deny_unknown_fields)]
 pub(crate) struct RecipeMetadata {
     #[serde(default)]
+    pub source_url: Option<String>,
+    #[serde(default)]
     pub size_name: Option<String>,
     #[serde(default)]
     pub size_source_digest: Option<String>,
@@ -176,6 +178,13 @@ fn validate_metadata(spec: &serde_json::Map<String, Value>) -> Result<(), &'stat
     };
     let metadata: RecipeMetadata =
         serde_json::from_value(value.clone()).map_err(|_| "invalid recipe metadata")?;
+    if metadata
+        .source_url
+        .as_ref()
+        .is_some_and(|v| crate::recipe_import::lil_source_url(v).is_err())
+    {
+        return Err("invalid recipe source URL");
+    }
     if metadata.size_name.as_ref().is_some_and(|v| !valid_id(v))
         || metadata
             .size_source_digest
@@ -476,6 +485,25 @@ pub async fn convert_recipe(
             json_no_store(StatusCode::OK, &preview)
         }
         Err(message) => error(StatusCode::BAD_REQUEST, &message),
+    }
+}
+
+#[utoipa::path(post,path="/dashboard/api/management/recipes/source",request_body=crate::recipe_import::FetchRecipeSource,responses((status=200,body=crate::recipe_import::ImportedRecipeSource),(status=400),(status=401),(status=403),(status=502)),tag="dashboard")]
+pub async fn fetch_recipe_source(
+    Extension(auth): Extension<Arc<DashboardAuth>>,
+    Extension(session): Extension<AuthSession>,
+    headers: HeaderMap,
+    Json(body): Json<crate::recipe_import::FetchRecipeSource>,
+) -> Response {
+    if let Some(response) = authorize_mesh_mutation(&auth, &session, &headers).await {
+        return response;
+    }
+    if let Err(message) = crate::recipe_import::lil_source_url(&body.url) {
+        return error(StatusCode::BAD_REQUEST, &message);
+    }
+    match crate::recipe_import::fetch_lil_source(&body.url).await {
+        Ok(source) => json_no_store(StatusCode::OK, &source),
+        Err(message) => error(StatusCode::BAD_GATEWAY, &message),
     }
 }
 
@@ -1178,6 +1206,31 @@ mod tests {
             source_content: "services: {x: {image: tagged}}".into(),
             options: Default::default(),
         };
+        let source_request = crate::recipe_import::FetchRecipeSource {
+            url: "https://localhost/".into(),
+        };
+        assert_eq!(
+            fetch_recipe_source(
+                Extension(auth.clone()),
+                Extension(session(false)),
+                HeaderMap::new(),
+                Json(source_request.clone())
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            fetch_recipe_source(
+                Extension(auth.clone()),
+                Extension(session(true)),
+                HeaderMap::new(),
+                Json(source_request.clone())
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
         assert_eq!(
             convert_recipe(
                 Extension(auth.clone()),
@@ -1206,6 +1259,17 @@ mod tests {
         headers.insert(
             axum::http::header::COOKIE,
             format!("{CSRF_COOKIE}={csrf}").parse().unwrap(),
+        );
+        assert_eq!(
+            fetch_recipe_source(
+                Extension(auth.clone()),
+                Extension(session(true)),
+                headers.clone(),
+                Json(source_request)
+            )
+            .await
+            .status(),
+            StatusCode::BAD_REQUEST
         );
         let response = convert_recipe(
             Extension(auth.clone()),

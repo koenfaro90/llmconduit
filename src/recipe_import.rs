@@ -1,5 +1,6 @@
 //! Bounded, side-effect-free conversion of recipe sources to Fleet model fields.
 //! Missing host choices stay visible in the preview rather than guessed or executed.
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::{
@@ -8,9 +9,142 @@ use std::{
 };
 use utoipa::ToSchema;
 
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FetchRecipeSource {
+    pub url: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ImportedRecipeSource {
+    pub source_url: String,
+    pub source_format: String,
+    pub source_content: String,
+    pub suggested_id: String,
+    pub named_volumes: Vec<String>,
+}
+/// Only the configurator's fixed HTTPS origin is fetched. Never follow a redirect
+/// or accept an arbitrary download URL from remote HTML.
+pub(crate) fn lil_source_url(text: &str) -> Result<url::Url, String> {
+    if text.len() > 8192 {
+        return Err("configuration URL exceeds 8 KiB".into());
+    }
+    let mut url = url::Url::parse(text).map_err(|_| "invalid configuration URL")?;
+    if url.scheme() != "https"
+        || url.host_str() != Some("docker.local-inference-lab.ai")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+        || !matches!(url.path(), "/" | "/compose.yaml")
+    {
+        return Err("use an HTTPS configuration URL from docker.local-inference-lab.ai".into());
+    }
+    let pairs = url.query_pairs().collect::<Vec<_>>();
+    for key in ["build", "model"] {
+        if pairs
+            .iter()
+            .filter(|(k, v)| k == key && !v.is_empty())
+            .count()
+            != 1
+        {
+            return Err("configuration URL must select one build and model".into());
+        }
+    }
+    if pairs.iter().any(|(key, value)| {
+        credential(key)
+            || regex::Regex::new(r"hf_[A-Za-z0-9]{16,}")
+                .unwrap()
+                .is_match(value)
+    }) {
+        return Err("configuration URL must not contain credentials".into());
+    }
+    url.set_fragment(None);
+    url.set_path("/");
+    Ok(url)
+}
+pub(crate) async fn fetch_lil_source(text: &str) -> Result<ImportedRecipeSource, String> {
+    let source_url = lil_source_url(text)?;
+    let mut download = source_url.clone();
+    download.set_path("/compose.yaml");
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|_| "source downloader unavailable")?;
+    let response = client
+        .get(download)
+        .send()
+        .await
+        .map_err(|_| "could not download LiL Compose source")?;
+    if !response.status().is_success() {
+        return Err("LiL Compose download did not succeed".into());
+    }
+    if response.content_length().is_some_and(|n| n > 32 * 1024) {
+        return Err("source exceeds 32 KiB".into());
+    }
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| "could not read LiL Compose source")?;
+        if bytes.len() + chunk.len() > 32 * 1024 {
+            return Err("source exceeds 32 KiB".into());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    imported_lil_source(
+        source_url.as_str(),
+        &String::from_utf8(bytes).map_err(|_| "source must be UTF-8")?,
+    )
+}
+fn imported_lil_source(url: &str, content: &str) -> Result<ImportedRecipeSource, String> {
+    let yaml: serde_yaml::Value =
+        serde_yaml::from_str(content).map_err(|_| "source must be valid Compose YAML")?;
+    if content.is_empty()
+        || content.len() > 32 * 1024
+        || crate::dashboard_management::source_has_credentials(&yaml)
+        || regex::Regex::new(r"hf_[A-Za-z0-9]{16,}")
+            .unwrap()
+            .is_match(content)
+    {
+        return Err("source must be bounded and use host-local credential references".into());
+    }
+    let root = serde_json::to_value(yaml).map_err(|_| "invalid Compose keys")?;
+    if !root.get("services").is_some_and(Value::is_object) {
+        return Err("source must contain Compose services".into());
+    }
+    let named_volumes = root
+        .get("volumes")
+        .and_then(Value::as_object)
+        .map(|v| v.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    if named_volumes.len() > 32 || named_volumes.iter().any(|name| name.len() > 128) {
+        return Err("too many or oversized named volumes".into());
+    }
+    let name = root
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("lil-import");
+    let suggested_id = name
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .take(40)
+        .collect();
+    Ok(ImportedRecipeSource {
+        source_url: url.into(),
+        source_format: "compose".into(),
+        source_content: content.into(),
+        suggested_id,
+        named_volumes,
+    })
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ImportOptions {
+    pub source_url: Option<String>,
+    /// Named Compose volume -> approved absolute host bind path.
+    #[serde(default)]
+    pub volume_paths: BTreeMap<String, String>,
     pub service: Option<String>,
     pub image: Option<String>,
     pub user: Option<String>,
@@ -269,7 +403,11 @@ impl<'a> Conversion<'a> {
                         .and_then(Value::as_array)
                         .is_some_and(|v| !v.is_empty())
                 {
-                    self.need(format!("Provide a host-local environment file for {key}"));
+                    if raw.is_none() {
+                        self.warn(format!("Optional {key} passthrough is omitted; select a host-local environment file if authentication is required"));
+                    } else {
+                        self.need(format!("Provide a host-local environment file for {key}"));
+                    }
                 } else {
                     self.warn(format!(
                         "{key} is read only from the approved host-local environment file"
@@ -691,10 +829,13 @@ fn compose(c: &mut Conversion<'_>, root: &Value) -> Result<Vec<String>, String> 
     if let Some(v) = service.get("volumes") {
         let mut mounts = vec![];
         for volume in array(v)? {
-            let (source, target, ro) = if let Value::Object(v) = volume {
-                if v.get("type").and_then(Value::as_str) != Some("bind")
-                    || v.keys()
-                        .any(|k| !matches!(k.as_str(), "type" | "source" | "target" | "read_only"))
+            let (mut source, target, ro) = if let Value::Object(v) = volume {
+                if !matches!(
+                    v.get("type").and_then(Value::as_str),
+                    Some("bind" | "volume")
+                ) || v
+                    .keys()
+                    .any(|k| !matches!(k.as_str(), "type" | "source" | "target" | "read_only"))
                 {
                     c.need("Only bind volumes without additional options can be converted");
                     continue;
@@ -724,8 +865,13 @@ fn compose(c: &mut Conversion<'_>, root: &Value) -> Result<Vec<String>, String> 
                 )
             };
             if !source.starts_with(['/', '.', '~', '$']) {
-                c.need("Resolve named Compose volumes to explicit host bind paths");
-                continue;
+                if let Some(path) = c.options.volume_paths.get(&source) {
+                    c.warn(format!("Named volume {source} uses the selected host bind path; existing Docker volume contents are not migrated"));
+                    source = path.clone();
+                } else {
+                    c.need(format!("Set host bind path for named volume {source}"));
+                    continue;
+                }
             }
             if !target.starts_with('/') {
                 return Err("container mount targets must be absolute".into());
@@ -1208,6 +1354,19 @@ pub fn convert(body: &ConvertRecipeRequest) -> Result<ConvertedRecipe, String> {
     {
         return Err("conversion options exceed 16 KiB".into());
     }
+    if body.options.volume_paths.len() > 32
+        || body.options.volume_paths.iter().any(|(name, path)| {
+            name.is_empty()
+                || name.len() > 128
+                || path.len() > 4096
+                || !Path::new(path).is_absolute()
+        })
+    {
+        return Err("volume mappings require bounded names and absolute host paths".into());
+    }
+    if let Some(url) = &body.options.source_url {
+        lil_source_url(url)?;
+    }
     let mut yaml: serde_yaml::Value =
         serde_yaml::from_str(&body.source_content).map_err(|_| "source must be valid YAML")?;
     if crate::dashboard_management::source_has_credentials(&yaml)
@@ -1263,6 +1422,27 @@ pub fn convert(body: &ConvertRecipeRequest) -> Result<ConvertedRecipe, String> {
         _ => return Err("source_format must be compose or sparkrun".into()),
     };
     c.common()?;
+    if let Some(url) = &body.options.source_url {
+        let mut meta = json!({"source_url": lil_source_url(url)?.as_str()});
+        if let Some(image) = c.spec.get("image").and_then(Value::as_str) {
+            meta["image_source_urls"] = json!({image: "https://docker.local-inference-lab.ai/"});
+        }
+        if c.spec.get("entrypoint").and_then(Value::as_str) == Some("/usr/local/bin/lil-serve") {
+            let args = c
+                .spec
+                .get("command")
+                .map(strings)
+                .transpose()?
+                .unwrap_or_default();
+            if args
+                .windows(2)
+                .any(|p| p[0] == "--hardware" && p[1] == "rtx-pro-6000-pcie")
+            {
+                meta["gpu_families"] = json!(["rtx-pro-6000-blackwell"]);
+            }
+        }
+        c.spec.insert("metadata".into(), meta);
+    }
     let spec = Value::Object(c.spec);
     if serde_json::to_vec(&spec)
         .map_err(|_| "invalid converted recipe")?
@@ -1334,6 +1514,129 @@ pub fn convert_portable(body: &ConvertRecipeRequest) -> Result<ConvertedRecipe, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn lil_urls_keep_build_model_and_overrides_but_restrict_the_fetch_origin() {
+        let url = lil_source_url("https://docker.local-inference-lab.ai/?build=pinned&model=qwen38-flash-next&o.port=8123&preset=#step-configure").unwrap();
+        assert_eq!(url.fragment(), None);
+        assert!(url.as_str().contains("o.port=8123"));
+        for url in [
+            "http://docker.local-inference-lab.ai/?build=x&model=x",
+            "https://localhost/?build=x&model=x",
+            "https://docker.local-inference-lab.ai.evil.test/?build=x&model=x",
+            "https://secret@docker.local-inference-lab.ai/?build=x&model=x",
+            "https://docker.local-inference-lab.ai:444/?build=x&model=x",
+            "https://docker.local-inference-lab.ai/redirect?build=x&model=x",
+            "https://docker.local-inference-lab.ai/?model=x",
+            "https://docker.local-inference-lab.ai/?build=x&build=y&model=x",
+            "https://docker.local-inference-lab.ai/?build=x&model=x&e.HF_TOKEN=private",
+        ] {
+            assert!(lil_source_url(url).is_err(), "{url}");
+        }
+    }
+    #[test]
+    fn lil_source_and_named_cache_bindings_preserve_the_pinned_launch() {
+        let source = "name: lil-qwen\nservices:\n  model:\n    image: ghcr.io/local-inference-lab/vllm@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n    entrypoint: [/usr/local/bin/lil-serve]\n    command: [--profile, qwen38-flash-next, --hardware, rtx-pro-6000-pcie, --, --cache-mode, vram]\n    volumes: [hf:/root/.cache/huggingface, {type: volume, source: runtime, target: /cache, read_only: false}]\nvolumes: {hf: {}, runtime: {}}\n";
+        let url = "https://docker.local-inference-lab.ai/?build=pinned&model=qwen38-flash-next";
+        let loaded = imported_lil_source(url, source).unwrap();
+        assert_eq!(loaded.named_volumes, ["hf", "runtime"]);
+        assert_eq!(loaded.suggested_id, "lil-qwen");
+        let value = serde_json::to_value(&loaded).unwrap();
+        assert_eq!(
+            serde_json::to_value(
+                serde_json::from_value::<ImportedRecipeSource>(value.clone()).unwrap()
+            )
+            .unwrap(),
+            value
+        );
+        let fetch = FetchRecipeSource { url: url.into() };
+        let value = serde_json::to_value(&fetch).unwrap();
+        assert_eq!(
+            serde_json::to_value(
+                serde_json::from_value::<FetchRecipeSource>(value.clone()).unwrap()
+            )
+            .unwrap(),
+            value
+        );
+        let mut body = request("compose", source);
+        body.options.image = None;
+        let unresolved = convert(&body).unwrap();
+        assert!(
+            unresolved
+                .required_inputs
+                .iter()
+                .any(|m| m.contains("named volume hf"))
+        );
+        body.options.source_url = Some(url.into());
+        body.options.volume_paths = BTreeMap::from([
+            ("hf".into(), "/home/koen/.cache/huggingface".into()),
+            (
+                "runtime".into(),
+                "/home/koen/compose/inference-cache/qwen".into(),
+            ),
+        ]);
+        let converted = convert(&body).unwrap();
+        assert!(
+            converted.required_inputs.is_empty(),
+            "{:?}",
+            converted.required_inputs
+        );
+        assert_eq!(converted.model_spec["command"][0], "--profile");
+        assert_eq!(converted.model_spec["mounts"][1]["target"], "/cache");
+        assert_eq!(converted.model_spec["metadata"]["source_url"], url);
+        assert_eq!(
+            converted.model_spec["metadata"]["gpu_families"][0],
+            "rtx-pro-6000-blackwell"
+        );
+        crate::dashboard_management::validate_recipe(
+            &crate::dashboard_management::CreateRecipeRevision {
+                description: String::new(),
+                model_spec: converted.model_spec,
+            },
+        )
+        .unwrap();
+        let value = serde_json::to_value(&body.options).unwrap();
+        assert_eq!(
+            serde_json::to_value(serde_json::from_value::<ImportOptions>(value.clone()).unwrap())
+                .unwrap(),
+            value
+        );
+        body.options
+            .volume_paths
+            .insert("hf".into(), "relative/path".into());
+        assert!(convert(&body).is_err());
+        assert!(
+            imported_lil_source(url, "services: {model: {environment: {HF_TOKEN: private}}}")
+                .is_err()
+        );
+        assert!(imported_lil_source(url, "<html>no Compose</html>").is_err());
+    }
+    #[test]
+    fn optional_secret_passthrough_never_reads_controller_credentials() {
+        let optional = convert(&request(
+            "compose",
+            "services: {model: {environment: [HF_TOKEN]}}",
+        ))
+        .unwrap();
+        assert!(optional.required_inputs.is_empty());
+        assert!(optional.model_spec["environment"].get("HF_TOKEN").is_none());
+        assert!(
+            optional
+                .warnings
+                .iter()
+                .any(|s| s.contains("Optional HF_TOKEN"))
+        );
+        let required = convert(&request(
+            "compose",
+            "services: {model: {environment: {HF_TOKEN: '${HF_TOKEN}'}}}",
+        ))
+        .unwrap();
+        assert!(
+            required
+                .required_inputs
+                .iter()
+                .any(|s| s.contains("host-local environment file"))
+        );
+    }
     fn request(format: &str, source: &str) -> ConvertRecipeRequest {
         ConvertRecipeRequest {
             source_format: format.into(),
@@ -1496,7 +1799,7 @@ services:
     #[test]
     fn unsupported_features_are_blocking_not_silently_dropped() {
         let p=convert(&request("compose","services: {x: {image: x, build: ., volumes: [cache:/cache], tmpfs: [/tmp], deploy: {replicas: 2}}}")).unwrap();
-        for field in ["build", "tmpfs", "named Compose volumes", "replicas"] {
+        for field in ["build", "tmpfs", "named volume cache", "replicas"] {
             assert!(
                 p.required_inputs.iter().any(|s| s.contains(field)),
                 "{:?}",
