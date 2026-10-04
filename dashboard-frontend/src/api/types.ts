@@ -2286,7 +2286,7 @@ export function assertNever(value: never): never {
 export interface EngineObservation {instance:string;model:string;engine:string;source:string;sampled_at:string;received_at:string;running:number;waiting:number;requests:Array<{id:string;gateway_request_id?:string;state:string;prompt_tokens:number;computed_tokens:number;output_tokens:number;preemptions:number}>}
 export interface ManagedCapacity {memory_budget_mib:number;memory_reserved_mib:number;gpu_sharing_enabled:boolean;gpus:Array<{index:number;total_mib:number;budget_mib:number;reserved_mib:number;unified_memory:boolean;exclusive_deployment?:string}>}
 export interface FleetHostSnapshot {
-  collection?: {host_interval_ms:number;gpu_interval_ms:number;container_interval_ms:number;gpu_backend:string;gpu_sampled_at:string|null;containers_sampled_at:string|null;gpu_duration_ms:number|null};
+  collection?: {metrics?:Record<string,{interval_ms:number;sampled_at:string|null}>;host_interval_ms:number;gpu_interval_ms:number;container_interval_ms:number;gpu_backend:string;gpu_sampled_at:string|null;containers_sampled_at:string|null;gpu_duration_ms:number|null};
   managed_capacity?: ManagedCapacity;
   engine_observations?: EngineObservation[];
   schema_version: number;

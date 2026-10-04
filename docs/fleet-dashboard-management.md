@@ -157,7 +157,10 @@ deployment; Fleet retains the retired ID's accepted generation.
 ## Host sampling and PCIe
 
 Fleet exposes independently configurable local host/GPU/container collection
-intervals. Host details show the configured cadence, GPU backend/read duration
+intervals, plus per-metric overrides and `off` via `FLEET_METRIC_INTERVALS`.
+Host details include a sortable/filterable sampling table showing each metric's
+effective interval and last observation. Disabled/stale readings remain unavailable
+in history graphs. Host details also show GPU backend/read duration
 and separate GPU/container sample timestamps. Hosts graph selectors include GPU
 PCIe RX/TX totals; the detail view includes current/max generation/width and raw
 replay, correctable error and recovery counters. Unsupported values remain
@@ -170,3 +173,10 @@ management, and an idle low-generation link is normal.
 Local 100 ms collection does not change five-second mesh reporting or
 fifteen-second SQL history collection. Fast intermediate observations are not
 retained. See Fleet's `docs/telemetry.md` for settings and measurement costs.
+
+Container names/images/state come from independent inventory collection. CPU/RAM/PIDs
+are optional informational readings; readiness and placement use separate data.
+Fleet uses bounded Docker Engine one-shot reads instead of the `docker stats` CLI.
+Disabling all three container resource metrics leaves inventory intact and makes
+zero Engine stats requests. Per-metric metadata survives Fleet, worker/controller
+mesh serialization, SQL history and the dashboard API; legacy agents omit it.

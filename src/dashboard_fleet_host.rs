@@ -25,6 +25,8 @@ pub struct FleetHostSnapshot {
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
 pub struct HostCollection {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub metrics: std::collections::BTreeMap<String, HostMetricCollection>,
     pub host_interval_ms: u64,
     pub gpu_interval_ms: u64,
     pub container_interval_ms: u64,
@@ -32,6 +34,26 @@ pub struct HostCollection {
     pub gpu_sampled_at: Option<String>,
     pub containers_sampled_at: Option<String>,
     pub gpu_duration_ms: Option<f64>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
+pub struct HostMetricCollection {
+    pub interval_ms: u64,
+    pub sampled_at: Option<String>,
+}
+impl HostMetricCollection {
+    fn validate(&self, name: &str) -> bool {
+        let minimum = match name {
+            "cpu" | "memory" | "network" | "disk" | "gpu_utilization" | "gpu_memory"
+            | "gpu_temperature" | "gpu_power" | "gpu_clock" | "gpu_memory_clock" | "pcie_rx"
+            | "pcie_tx" | "pcie_link" | "pcie_errors" => 100,
+            "container_inventory" | "container_cpu" | "container_memory" | "container_pids" => 1000,
+            _ => return false,
+        };
+        (self.interval_ms == 0 || (minimum..=60000).contains(&self.interval_ms))
+            && self.sampled_at.as_ref().is_none_or(|at| {
+                self.interval_ms != 0 && chrono::DateTime::parse_from_rfc3339(at).is_ok()
+            })
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
 pub struct ManagedCapacity {
@@ -200,7 +222,8 @@ impl FleetHostSnapshot {
             && (1000..=60000).contains(&c.container_interval_ms)
             && matches!(c.gpu_backend.as_str(), "" | "nvml" | "nvidia-smi")
             && [&c.gpu_sampled_at, &c.containers_sampled_at].iter().all(|v| v.as_ref().is_none_or(|v| chrono::DateTime::parse_from_rfc3339(v).is_ok()))
-            && metric(c.gpu_duration_ms))
+            && metric(c.gpu_duration_ms)
+            && c.metrics.len() <= 18 && c.metrics.iter().all(|(name, value)| value.validate(name)))
             && self.engine_observations.len()<=4 && self.engine_observations.iter().all(EngineObservation::validate)
             && self.schema_version == 1
             && chrono::DateTime::parse_from_rfc3339(&self.sampled_at).is_ok()
@@ -241,6 +264,32 @@ pub(crate) fn fixture() -> FleetHostSnapshot {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn per_metric_collection_survives_mesh_and_rejects_invalid_overrides() {
+        let mut value = serde_json::to_value(fixture()).unwrap();
+        value["collection"] = serde_json::json!({"host_interval_ms":100,"gpu_interval_ms":100,"container_interval_ms":5000,"gpu_backend":"nvml","gpu_sampled_at":null,"containers_sampled_at":null,"gpu_duration_ms":null,"metrics":{"cpu":{"interval_ms":100,"sampled_at":"2026-10-03T12:00:00Z"},"container_cpu":{"interval_ms":0,"sampled_at":null}}});
+        let snapshot: FleetHostSnapshot = serde_json::from_value(value.clone()).unwrap();
+        assert!(snapshot.validate());
+        assert_eq!(
+            serde_json::to_value(snapshot).unwrap()["collection"]["metrics"],
+            value["collection"]["metrics"]
+        );
+        for (name, interval, at) in [
+            ("unknown", 5000, None),
+            ("container_cpu", 100, None),
+            ("cpu", 61000, None),
+            ("cpu", 0, Some("2026-10-03T12:00:00Z")),
+            ("cpu", 100, Some("bad")),
+        ] {
+            value["collection"]["metrics"] =
+                serde_json::json!({name:{"interval_ms":interval,"sampled_at":at}});
+            assert!(
+                !serde_json::from_value::<FleetHostSnapshot>(value.clone())
+                    .unwrap()
+                    .validate()
+            );
+        }
+    }
     #[test]
     fn engine_observations_and_gpu_clocks_survive_wire_round_trip() {
         let mut value = serde_json::to_value(fixture()).unwrap();

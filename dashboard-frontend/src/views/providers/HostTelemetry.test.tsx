@@ -39,6 +39,14 @@ it('shows PCIe measurements and independent collection timestamps',()=>{
  render(<HostTelemetry nodes={[measured]} now={now}/>);
  expect(screen.getByTestId('host-telemetry')).toHaveTextContent('PCIe RX 1000.00 MB/s · TX 0.00 MB/s');
  expect(screen.getByTestId('host-telemetry')).toHaveTextContent('link Gen5 ×16');
- expect(screen.getByTestId('host-telemetry')).toHaveTextContent('GPU 100 ms (nvml)');
+ expect(screen.getByTestId('host-telemetry')).toHaveTextContent('GPU tick 100 ms (nvml)');
  expect(screen.getByTestId('host-telemetry')).toHaveTextContent('correctable errors —');
+});
+
+it('shows independent metric intervals and disabled container resource sampling',()=>{
+ const measured:MeshNode={...node,host_snapshot:{...node.host_snapshot!,collection:{host_interval_ms:100,gpu_interval_ms:100,container_interval_ms:5000,gpu_backend:'nvml',gpu_sampled_at:null,containers_sampled_at:null,gpu_duration_ms:null,metrics:{pcie_rx:{interval_ms:100,sampled_at:'2026-10-03T12:00:00Z'},container_cpu:{interval_ms:0,sampled_at:null},memory:{interval_ms:30000,sampled_at:'2026-10-03T11:59:40Z'}}}}};
+ render(<HostTelemetry nodes={[measured]} now={now}/>);
+ expect(screen.getByText('Metric sampling intervals')).toBeInTheDocument();
+ const table=screen.getByRole('table',{hidden:true});
+ expect(table).toHaveTextContent('container cpu');expect(table).toHaveTextContent('Off');expect(table).toHaveTextContent('30000 ms');
 });

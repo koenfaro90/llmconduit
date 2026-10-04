@@ -13,3 +13,9 @@ it('plots GPU PCIe totals without manufacturing missing device measurements',()=
  expect(HOST_METRICS.pcie_rx.read(host)).toBeNull();
  host.gpus[1]!.pcie_rx_kb_per_second=500000;expect(HOST_METRICS.pcie_rx.read(host)).toBe(1500);
 });
+
+it('honors individual disabled and stale metric timestamps in stored history',()=>{
+ const host=sample(121000);host.collection={host_interval_ms:100,gpu_interval_ms:100,container_interval_ms:5000,gpu_backend:'nvml',gpu_sampled_at:null,containers_sampled_at:null,gpu_duration_ms:null,metrics:{gpu_clock:{interval_ms:0,sampled_at:null},memory:{interval_ms:60000,sampled_at:new Date(1000).toISOString()},gpu_utilization:{interval_ms:100,sampled_at:new Date(1000).toISOString()}}};
+ expect(HOST_METRICS.clock.read(host)).toBeNull();expect(HOST_METRICS.ram.read(host)).toBe(40);expect(HOST_METRICS.gpu.read(host)).toBeNull();
+ host.collection.metrics!.memory!.sampled_at='bad';expect(HOST_METRICS.ram.read(host)).toBeNull();
+});
