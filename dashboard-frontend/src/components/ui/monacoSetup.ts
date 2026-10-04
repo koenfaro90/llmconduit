@@ -1,3 +1,6 @@
+// Initialize contributions before the first editor: JSON mode also loads them,
+// and late singleton registration leaves subsequent editors with missing services.
+import 'monaco-editor/editor/editor.main.js';
 import * as monaco from 'monaco-editor/editor/editor.api.js';
 import {jsonDefaults} from 'monaco-editor/languages/features/json/register.js';
 import EditorWorker from 'monaco-editor/editor/editor.worker.js?worker';

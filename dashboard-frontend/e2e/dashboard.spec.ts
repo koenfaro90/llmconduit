@@ -1,6 +1,20 @@
 import { test, expect, VIEWS, installDeterminism, login, openView } from './harness';
 
 test.describe('Argus dashboard', () => {
+  test('recipe JSON editors can be closed and reopened without missing Monaco services', async ({ page, consoleErrors }) => {
+    await login(page);
+    await openView(page, VIEWS.find(view=>view.name==='recipes')!);
+    for(let i=0;i<3;i++){
+      await page.getByRole('button',{name:'New JSON recipe',exact:true}).click();
+      await expect(page.locator('.monaco-editor')).toBeVisible();
+      await page.getByRole('button',{name:'Format JSON',exact:true}).click();
+      await expect(page.locator('.monaco-editor .view-lines')).toContainText('image');
+      await page.getByRole('button',{name:'Close editor',exact:true}).click();
+      await expect(page.locator('.monaco-editor')).toHaveCount(0);
+    }
+    expect(consoleErrors).toEqual([]);
+  });
+
   test('login shell renders before auth', async ({ page, consoleErrors }) => {
     await installDeterminism(page);
     await page.goto('/dashboard/?mock=1', { waitUntil: 'networkidle' });
