@@ -63,3 +63,8 @@ it('explains a model profile on hover and keyboard focus without changing config
  const change=vi.fn();render(<SettingsField schema={schemaFor('/control_plane/operational/model_profiles')} value={[]} onChange={change}/>);
  const help=screen.getByRole('button',{name:'Help: Model profiles'});fireEvent.mouseEnter(help.parentElement!);expect(screen.getByRole('tooltip')).toHaveTextContent('A model profile combines');fireEvent.mouseLeave(help.parentElement!);expect(screen.queryByRole('tooltip')).toBeNull();fireEvent.focus(help);expect(screen.getByRole('tooltip')).toBeVisible();fireEvent.keyDown(help,{key:'Escape'});expect(screen.queryByRole('tooltip')).toBeNull();expect(change).not.toHaveBeenCalled();
 });
+
+it('keeps tapped help open when synthetic touch hover ends and closes on a second tap',()=>{
+ render(<SettingsField schema={schemaFor('/control_plane/operational/model_profiles')} value={[]} onChange={()=>{}}/>);
+ const help=screen.getByRole('button',{name:'Help: Model profiles'});fireEvent.click(help);fireEvent.mouseLeave(help.parentElement!);expect(screen.getByRole('tooltip')).toHaveTextContent('A model profile combines');fireEvent.click(help);expect(screen.queryByRole('tooltip')).toBeNull();
+});

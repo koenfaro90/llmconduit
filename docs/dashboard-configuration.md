@@ -139,7 +139,7 @@ sampling and policy files on restart; use the page or central telemetry helper t
 ## Validation
 
 Rust suite and OpenAPI route inventory, Clippy, SQL migration/key-scope tests,
-Fleet race/vet checks, 801 frontend tests, typed/linted frontend build and desktop
+Fleet race/vet checks, 802 frontend tests, typed/linted frontend build and desktop
 page baselines cover these APIs. Browser workflows cover explicit stage/apply,
 direct row actions, nested typed fields, help and header placement and all nine pages at 390px.
 Native/live rollout results are recorded in the operations repository.
