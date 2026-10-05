@@ -26,16 +26,116 @@ const CONNECTION_SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 const CONTROL_STREAM_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 const INITIAL_CONTROL_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 
+use crate::mesh::protocol::WorkerAdvertisement;
+
 type MeshModelAllowlist = BTreeMap<String, BTreeMap<String, Vec<String>>>;
+
+#[derive(Debug, Default)]
+struct LiveModelPolicy {
+    allowlist: std::sync::RwLock<MeshModelAllowlist>,
+    advertisements:
+        std::sync::Mutex<std::collections::HashMap<iroh::EndpointId, WorkerAdvertisement>>,
+}
+impl LiveModelPolicy {
+    fn worker(
+        &self,
+        id: iroh::EndpointId,
+        approvals: &MeshModelAllowlist,
+        advertisement: WorkerAdvertisement,
+    ) -> WorkerAdvertisement {
+        self.advertisements
+            .lock()
+            .expect("mesh advertisements")
+            .insert(id, advertisement.clone());
+        filter_worker_advertisement(id, approvals, advertisement)
+    }
+    fn resource(
+        &self,
+        id: iroh::EndpointId,
+        approvals: &MeshModelAllowlist,
+        update: crate::mesh::protocol::ResourceAdvertisement,
+    ) -> crate::mesh::protocol::ResourceAdvertisement {
+        if let Some(advertisement) = self
+            .advertisements
+            .lock()
+            .expect("mesh advertisements")
+            .get_mut(&id)
+            && let Some(resource) = advertisement
+                .resources
+                .iter_mut()
+                .find(|r| r.resource_id == update.resource_id)
+        {
+            *resource = update.clone();
+        }
+        filter_resource_update(id, approvals, update)
+    }
+    fn catalog(
+        &self,
+        id: iroh::EndpointId,
+        resource_id: &str,
+        models: Vec<crate::mesh::protocol::ModelAdvertisement>,
+        revision: u64,
+        approvals: &MeshModelAllowlist,
+    ) -> Vec<crate::mesh::protocol::ModelAdvertisement> {
+        if let Some(advertisement) = self
+            .advertisements
+            .lock()
+            .expect("mesh advertisements")
+            .get_mut(&id)
+            && let Some(resource) = advertisement
+                .resources
+                .iter_mut()
+                .find(|r| r.resource_id == resource_id)
+        {
+            resource.models = models.clone();
+            resource.revision = revision;
+        }
+        filter_model_catalog(id, approvals, resource_id, models)
+    }
+    fn switching(
+        &self,
+        id: iroh::EndpointId,
+        approvals: &MeshModelAllowlist,
+        update: crate::mesh::protocol::ModelSwitchingAdvertisement,
+    ) -> Option<crate::mesh::protocol::ModelSwitchingAdvertisement> {
+        if let Some(advertisement) = self
+            .advertisements
+            .lock()
+            .expect("mesh advertisements")
+            .get_mut(&id)
+        {
+            advertisement.model_switching = Some(update.clone());
+        }
+        filter_model_switching(id, approvals, update)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub(crate) struct MeshAdmin {
     store: MeshStore,
     registry: Arc<MeshRegistry>,
     initialized: Arc<tokio::sync::OnceCell<()>>,
+    policy: Arc<LiveModelPolicy>,
 }
 
 impl MeshAdmin {
+    pub(crate) fn apply_runtime_policy(&self, config: &MeshControllerConfig) {
+        self.registry
+            .set_heartbeat_timeout(Duration::from_secs(config.heartbeat_timeout_secs));
+        let mut approvals = self.policy.allowlist.write().expect("mesh approval policy");
+        *approvals = config.model_allowlist.clone();
+        for (id, raw) in self
+            .policy
+            .advertisements
+            .lock()
+            .expect("mesh advertisements")
+            .iter()
+        {
+            let filtered = filter_worker_advertisement(*id, &config.model_allowlist, raw.clone());
+            self.registry.apply_advertisement(*id, filtered);
+        }
+    }
+
     pub(crate) fn store(&self) -> &MeshStore {
         &self.store
     }
@@ -101,6 +201,10 @@ pub(crate) fn spawn_controller(config: &MeshControllerConfig) -> AppResult<Arc<M
         store: store.clone(),
         registry: Arc::clone(&registry),
         initialized: Arc::new(tokio::sync::OnceCell::new()),
+        policy: Arc::new(LiveModelPolicy {
+            allowlist: std::sync::RwLock::new(config.model_allowlist.clone()),
+            advertisements: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }),
     });
     let config = config.clone();
     let registry_for_task = Arc::clone(&registry);
@@ -148,8 +252,8 @@ async fn run_controller(
         "mesh controller listening"
     );
     let connection_slots = Arc::new(Semaphore::new(MAX_CONTROLLER_CONNECTION_TASKS));
-    let model_allowlist = Arc::new(config.model_allowlist.clone());
-    if model_allowlist.is_empty() {
+    let model_allowlist = admin.policy.clone();
+    if config.model_allowlist.is_empty() {
         tracing::warn!(
             "mesh controller model_allowlist is empty; workers may enroll but no mesh models will be routable"
         );
@@ -210,7 +314,7 @@ async fn run_controller(
 async fn handle_connection(
     registry: Arc<MeshRegistry>,
     authorizer: Arc<MeshAuthorizer>,
-    model_allowlist: Arc<MeshModelAllowlist>,
+    model_allowlist: Arc<LiveModelPolicy>,
     connection: iroh::endpoint::Connection,
     alpn: &[u8],
 ) -> AppResult<()> {
@@ -238,10 +342,6 @@ async fn handle_connection(
                 "mesh worker did not start with hello",
             ));
         };
-        validate_worker_advertisement(&advertisement)
-            .map_err(|err| AppError::bad_request(format!("invalid mesh worker hello: {err}")))?;
-        let advertisement =
-            filter_worker_advertisement(endpoint_id, model_allowlist.as_ref(), advertisement);
         validate_worker_advertisement(&advertisement)
             .map_err(|err| AppError::bad_request(format!("invalid mesh worker hello: {err}")))?;
         return handle_worker_control(
@@ -313,13 +413,23 @@ async fn finish_enrollment_response(send: &mut iroh::endpoint::SendStream) -> Ap
 async fn handle_worker_control(
     registry: Arc<MeshRegistry>,
     authorizer: Arc<MeshAuthorizer>,
-    model_allowlist: Arc<MeshModelAllowlist>,
+    model_allowlist: Arc<LiveModelPolicy>,
     connection: iroh::endpoint::Connection,
     endpoint_id: iroh::EndpointId,
     mut streams: MeshControlStreams,
     advertisement: crate::mesh::protocol::WorkerAdvertisement,
 ) -> AppResult<()> {
-    let session = registry.register(endpoint_id, connection.clone(), advertisement);
+    let session = {
+        let approvals = model_allowlist
+            .allowlist
+            .read()
+            .expect("mesh approval policy");
+        registry.register(
+            endpoint_id,
+            connection.clone(),
+            model_allowlist.worker(endpoint_id, &approvals, advertisement),
+        )
+    };
     write_control(
         &mut streams.send,
         &HubToWorker::HelloAck {
@@ -347,8 +457,8 @@ async fn handle_worker_control(
                     validate_resource_advertisement(&update).map_err(|err| {
                         AppError::bad_request(format!("invalid mesh resource update: {err}"))
                     })?;
-                    let update =
-                        filter_resource_update(endpoint_id, model_allowlist.as_ref(), update);
+                    let approvals = model_allowlist.allowlist.read().expect("mesh approval policy");
+                    let update = model_allowlist.resource(endpoint_id, &approvals, update);
                     validate_resource_advertisement(&update).map_err(|err| {
                         AppError::bad_request(format!("invalid mesh resource update: {err}"))
                     })?;
@@ -370,12 +480,8 @@ async fn handle_worker_control(
                     validate_model_catalog(&resource_id, &models).map_err(|err| {
                         AppError::bad_request(format!("invalid mesh model catalog update: {err}"))
                     })?;
-                    let models = filter_model_catalog(
-                        endpoint_id,
-                        model_allowlist.as_ref(),
-                        &resource_id,
-                        models,
-                    );
+                    let approvals = model_allowlist.allowlist.read().expect("mesh approval policy");
+                    let models = model_allowlist.catalog(endpoint_id, &resource_id, models, revision, &approvals);
                     validate_model_catalog(&resource_id, &models).map_err(|err| {
                         AppError::bad_request(format!("invalid mesh model catalog update: {err}"))
                     })?;
@@ -386,11 +492,8 @@ async fn handle_worker_control(
                     validate_model_switching(&update).map_err(|err| {
                         AppError::bad_request(format!("invalid mesh switching update: {err}"))
                     })?;
-                    if let Some(update) = filter_model_switching(
-                        endpoint_id,
-                        model_allowlist.as_ref(),
-                        update,
-                    ) {
+                    let approvals = model_allowlist.allowlist.read().expect("mesh approval policy");
+                    if let Some(update) = model_allowlist.switching(endpoint_id, &approvals, update) {
                         session.update_model_switching(update);
                     } else {
                         tracing::warn!(
@@ -404,11 +507,8 @@ async fn handle_worker_control(
                     validate_worker_advertisement(&advertisement).map_err(|err| {
                         AppError::bad_request(format!("invalid mesh worker hello: {err}"))
                     })?;
-                    let advertisement = filter_worker_advertisement(
-                        endpoint_id,
-                        model_allowlist.as_ref(),
-                        advertisement,
-                    );
+                    let approvals = model_allowlist.allowlist.read().expect("mesh approval policy");
+                    let advertisement = model_allowlist.worker(endpoint_id, &approvals, advertisement);
                     validate_worker_advertisement(&advertisement).map_err(|err| {
                         AppError::bad_request(format!("invalid mesh worker hello: {err}"))
                     })?;
@@ -428,7 +528,21 @@ async fn handle_worker_control(
         }
     }
     .await;
-    registry.remove_generation(endpoint_id, session.generation);
+    {
+        // Serialize cleanup with registration so an old connection cannot erase
+        // the raw advertisement of a newly registered generation.
+        let _approvals = model_allowlist
+            .allowlist
+            .write()
+            .expect("mesh approval policy");
+        if registry.remove_generation(endpoint_id, session.generation) {
+            model_allowlist
+                .advertisements
+                .lock()
+                .expect("mesh advertisements")
+                .remove(&endpoint_id);
+        }
+    }
     connection.close(0u32.into(), b"mesh control stream ended");
     result
 }
@@ -614,7 +728,7 @@ mod tests {
                 handle_connection(
                     registry,
                     authorizer,
-                    Arc::new(BTreeMap::new()),
+                    Arc::new(LiveModelPolicy::default()),
                     server,
                     ENROLL_ALPN,
                 )
@@ -721,6 +835,50 @@ mod tests {
 
     fn temp_db(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("llmconduit-{name}-{}.sqlite", Uuid::new_v4()))
+    }
+
+    #[test]
+    fn live_mesh_policy_preserves_sessions_and_active_capacity() {
+        let registry = Arc::new(MeshRegistry::new(Duration::from_secs(30)));
+        let id = SecretKey::generate().public();
+        let policy = Arc::new(LiveModelPolicy::default());
+        *policy.allowlist.write().unwrap() = BTreeMap::from([(
+            id.to_string(),
+            BTreeMap::from([("gpu-a".into(), vec!["allowed-model".into()])]),
+        )]);
+        let raw = advertisement();
+        let session = registry.register_test(
+            id,
+            policy.worker(id, &policy.allowlist.read().unwrap(), raw),
+        );
+        let reservation = registry.reserve("allowed-model").unwrap();
+        let admin = MeshAdmin {
+            store: MeshStore::at_path(temp_db("unused-policy")),
+            registry: registry.clone(),
+            initialized: Arc::new(tokio::sync::OnceCell::new()),
+            policy,
+        };
+        let mut config = MeshControllerConfig {
+            heartbeat_timeout_secs: 60,
+            ..Default::default()
+        };
+        config.model_allowlist = BTreeMap::from([(
+            id.to_string(),
+            BTreeMap::from([("gpu-a".into(), vec!["surprise-model".into()])]),
+        )]);
+        admin.apply_runtime_policy(&config);
+        assert!(registry.reserve("allowed-model").is_none());
+        assert!(
+            registry.reserve("surprise-model").is_none(),
+            "old request must keep its capacity reservation"
+        );
+        drop(reservation);
+        let next = registry.reserve("surprise-model").unwrap();
+        assert_eq!(next.resource.generation, session.generation);
+        drop(next);
+        config.model_allowlist.clear();
+        admin.apply_runtime_policy(&config);
+        assert!(registry.reserve("surprise-model").is_none());
     }
 
     #[test]
@@ -839,6 +997,7 @@ mod tests {
             store: store.clone(),
             registry: Arc::clone(&registry),
             initialized: Arc::new(tokio::sync::OnceCell::new()),
+            policy: Arc::new(LiveModelPolicy::default()),
         };
         admin.initialize().await.expect("initial load");
         store

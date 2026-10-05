@@ -16,7 +16,7 @@ use subtle::ConstantTimeEq;
 
 pub const KEY_HASH_PREFIX: &str = "sha256:";
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct VirtualKeySpec {
     pub id: String,
     pub label: Option<String>,

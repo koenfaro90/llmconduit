@@ -604,7 +604,7 @@ fn token_unavailable() -> FleetProxyError {
 }
 
 fn read_nonempty_env(name: &str) -> Option<String> {
-    std::env::var(name)
+    crate::runtime_configuration::var(name)
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())

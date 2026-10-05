@@ -182,6 +182,33 @@ async fn ready(
     }
     false
 }
+async fn apply_live(spec: &Specification, token: &str, revision: u64) -> Result<(), String> {
+    let mut address = bind(spec)?;
+    if address.ip().is_unspecified() {
+        address.set_ip(if address.is_ipv4() {
+            std::net::Ipv4Addr::LOCALHOST.into()
+        } else {
+            std::net::Ipv6Addr::LOCALHOST.into()
+        });
+    }
+    let response = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .no_proxy()
+        .build()
+        .map_err(|_| "Could not build live apply client")?
+        .post(format!("http://{address}/internal/configuration-apply"))
+        .bearer_auth(token)
+        .json(&serde_json::json!({"revision":revision}))
+        .send()
+        .await
+        .map_err(|_| "Live apply acknowledgement unavailable")?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err("Live apply rejected; inspect saved configuration status".into())
+    }
+}
+
 async fn connected_hosts(spec: &Specification, token: &str) -> Vec<String> {
     let Ok(mut address) = bind(spec) else {
         return vec![];
@@ -436,6 +463,51 @@ pub async fn run(
     loop {
         tokio::select! {_=term.recv()=>{stop(&mut child).await;return Ok(())},_=interrupt.recv()=>{stop(&mut child).await;return Ok(())},_=timer.tick()=>{}}
         let (raw, mut state) = settings::read(store.as_ref()).await?;
+        if state.pending
+            && crate::runtime_configuration::restart_reasons(&state.active, &state.draft).is_empty()
+        {
+            if child
+                .try_wait()
+                .map_err(|_| "Could not inspect gateway")?
+                .is_some()
+            {
+                let (replacement, token) = launch(
+                    &state.active,
+                    state.applied_revision,
+                    &dir,
+                    backend,
+                    url,
+                    debug,
+                )
+                .await?;
+                child = replacement;
+                if !ready(
+                    &mut child,
+                    &state.active,
+                    &token,
+                    state.applied_revision,
+                    &[],
+                )
+                .await
+                {
+                    return Err("Gateway recovery failed readiness".into());
+                }
+                current_token = token;
+            }
+            if let Err(failure) = preflight(&state.draft, &dir, backend, url).await {
+                state.pending = false;
+                state.status = "rolled_back".into();
+                state.error = Some(failure);
+                settings::write(store.as_ref(), Some(&raw), &state).await?;
+            } else if let Err(error) =
+                apply_live(&state.active, &current_token, state.revision).await
+            {
+                // The child owns publication + SQL acknowledgement. A lost response
+                // is retried idempotently, never converted into a disruptive restart.
+                tracing::warn!(revision = state.revision, %error, "Live apply did not acknowledge; retrying saved pending state");
+            }
+            continue;
+        }
         if state.pending {
             let result = preflight(&state.draft, &dir, backend, url).await;
             let mut failure = result.err();

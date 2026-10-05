@@ -10,7 +10,7 @@ then managed settings own those fields. Files remain bootstrap and recovery inpu
 | --- | --- |
 | Infrastructure → Aliases | Public names, ordered profile fallback; live SQL management |
 | Infrastructure → Profiles & routing | Operational and legacy profiles, served-model remapping, ordered backend choices, templates, context/capability defaults, unknown-model handling |
-| Infrastructure → Provider settings | Bootstrap backends, credentials, upstream/fallback chains; staged restart |
+| Infrastructure → Provider settings | Backends, credentials, upstream/fallback chains; staged live apply |
 | Infrastructure → Providers | SQL provider discovery, create/edit/disable, credential replace/clear; live revisioned updates |
 | Infrastructure → Host settings | Per-metric interval/off, RAM/VRAM admission budgets, sharing and container allowlists; Fleet applies locally |
 | Admin → Access activation | Enable/disable policy-backed authorization, migrate existing virtual keys, policy database path |
@@ -33,12 +33,37 @@ Reads require administrator access; writes also require the existing session and
 CSRF protection. Configuration administration remains available when ordinary
 mutations are disabled, so an administrator can reenable them through Authentication.
 
-The supervisor validates the complete candidate with its exact environment,
-drains the child gateway for up to 35 seconds, starts the candidate, and checks
-its private revision-specific readiness endpoint. Previously connected mesh hosts
-must reconnect when the controller remains enabled. Failure restores the last
-applied revision. The page polls for the result after reconnecting. This is a
-single-controller restart with a brief availability interruption, not HA rollout.
+The supervisor validates the complete candidate with its exact environment and
+classifies its **effective** resource changes. Ordinary edits apply live: the child
+prepares a complete immutable router/gateway generation and atomically publishes it
+for new requests. Existing HTTP/SSE/WebSocket/media requests retain their original
+configuration, clients, timeouts and routing. No drain, cancellation or gateway
+restart occurs. Private revisioned acknowledgement makes a lost response retryable;
+failed preparation leaves the previous generation active.
+
+Only changes to these resources use the restart/migration path:
+
+- Listener bind address/port.
+- Database connection URL (including connection credentials).
+- Storage backend/directory, persistence queue capacity, policy database path or
+  mesh state database path.
+- Mesh transport enablement, bind address, controller identity file or worker
+  connection target/identity.
+
+For these changes the supervisor drains the gateway child for up to 35 seconds,
+starts the candidate and checks its private revision-specific readiness endpoint.
+Previously connected hosts must reconnect when the controller remains enabled.
+Failure restores the last applied revision. This path briefly interrupts the single
+controller. The page displays the actual pending restart reasons across all staged
+pages. Explicit defaults and document changes hidden by unchanged environment
+overrides do not accidentally require a restart.
+
+Live generations preserve flow history, cancellation handles, metrics, session
+lineage/display counters, traffic admission/affinity state and connected mesh
+sessions. Periodic collectors/reconcilers are replaced independently; old inference
+tasks are never retired with them. Retention, logging/capture, session detection,
+mesh heartbeat timeout and model approval rules also apply live. Mesh approvals
+preserve active capacity reservations and do not reset host liveness.
 
 Settings show document values, running scalar values where available, environment
 source overrides and applied revision. Editing a matching field removes its
@@ -102,3 +127,9 @@ Native/live rollout results are recorded in the operations repository.
 The native lifecycle harness is reproducible with a built release binary:
 `python3 tests/managed_settings_runtime.py`. It uses a temporary private SQLite
 store and fake loopback upstream; it reads no production credentials or configuration.
+
+The native harness additionally holds one streaming and one buffered inference
+request for more than 35 seconds while applying routine settings, reducing the
+new-request timeout to two seconds, changing profiles/credentials and deliberately
+failing resource preparation. It checks the unchanged gateway child PID, complete
+old responses and the new request's settings/credentials.

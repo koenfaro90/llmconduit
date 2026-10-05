@@ -82,6 +82,8 @@ multer = "3.1"
 uuid = { version = "1", features = ["serde", "v4"] }
 utoipa = { version = "5", features = ["axum_extras"] }
 
+tower = { version = "0.5", features = ["util"] }
+
 [dev-dependencies]
 pretty_assertions = "1"
 tempfile = "3"
@@ -91,7 +93,6 @@ tempfile = "3"
 # handshake test (`axum::serve` + a raw upgrade request) that exercises the
 # `/dashboard/ws` cookie+Origin auth gate end-to-end (D7b).
 tokio = { version = "1", features = ["test-util", "net", "io-util"] }
-tower = { version = "0.5", features = ["util"] }
 wiremock = "0.6"
 # D5: criterion benches the zero-cost `MetricsLayer::disabled()` path (no work, no
 # lock) vs the enabled record path, and per-domain seq updates under contention.

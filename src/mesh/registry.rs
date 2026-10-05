@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Clone)]
 pub(crate) struct MeshRegistry {
     inner: Arc<Mutex<RegistryState>>,
-    heartbeat_timeout: Duration,
+    heartbeat_timeout: Arc<AtomicU64>,
     next_generation: Arc<AtomicU64>,
 }
 
@@ -73,8 +73,38 @@ impl MeshRegistry {
     pub(crate) fn new(heartbeat_timeout: Duration) -> Self {
         Self {
             inner: Arc::new(Mutex::new(RegistryState::default())),
-            heartbeat_timeout,
+            heartbeat_timeout: Arc::new(AtomicU64::new(heartbeat_timeout.as_millis() as u64)),
             next_generation: Arc::new(AtomicU64::new(1)),
+        }
+    }
+
+    fn heartbeat_timeout(&self) -> Duration {
+        Duration::from_millis(self.heartbeat_timeout.load(Ordering::Relaxed))
+    }
+    pub(crate) fn set_heartbeat_timeout(&self, timeout: Duration) {
+        self.heartbeat_timeout
+            .store(timeout.as_millis() as u64, Ordering::Relaxed);
+    }
+    pub(crate) fn apply_advertisement(&self, id: EndpointId, advertisement: WorkerAdvertisement) {
+        let session = self
+            .inner
+            .lock()
+            .expect("mesh registry")
+            .workers
+            .get(&id)
+            .cloned();
+        if let Some(session) = session {
+            let mut resources = session.resources.lock().expect("mesh resources");
+            for (id, resource) in resources.iter_mut() {
+                resource.models = advertisement
+                    .resources
+                    .iter()
+                    .find(|update| update.resource_id == *id)
+                    .map(|update| update.models.clone())
+                    .unwrap_or_default();
+            }
+            *session.model_switching.lock().expect("mesh switching") =
+                advertisement.model_switching;
         }
     }
 
@@ -131,7 +161,7 @@ impl MeshRegistry {
         session
     }
 
-    pub(crate) fn remove_generation(&self, endpoint_id: EndpointId, generation: u64) {
+    pub(crate) fn remove_generation(&self, endpoint_id: EndpointId, generation: u64) -> bool {
         let mut state = self.inner.lock().expect("mesh registry lock poisoned");
         let remove = state
             .workers
@@ -140,6 +170,7 @@ impl MeshRegistry {
         if remove {
             state.workers.remove(&endpoint_id);
         }
+        remove
     }
 
     pub(crate) fn remove_endpoint(&self, endpoint_id: EndpointId, reason: &'static [u8]) -> bool {
@@ -294,7 +325,7 @@ impl MeshRegistry {
         endpoint_id: EndpointId,
     ) -> Option<ModelSwitchingAdvertisement> {
         let session = self.current_session_any_generation(endpoint_id)?;
-        if session.is_stale(Instant::now(), self.heartbeat_timeout) {
+        if session.is_stale(Instant::now(), self.heartbeat_timeout()) {
             return None;
         }
         session
@@ -309,7 +340,7 @@ impl MeshRegistry {
         endpoint_id: EndpointId,
     ) -> Option<crate::dashboard_fleet_host::FleetHostSnapshot> {
         let session = self.current_session_any_generation(endpoint_id)?;
-        if session.is_stale(Instant::now(), self.heartbeat_timeout) {
+        if session.is_stale(Instant::now(), self.heartbeat_timeout()) {
             return None;
         }
         session
@@ -323,7 +354,7 @@ impl MeshRegistry {
         self.current_session_any_generation(endpoint_id)
             .is_some_and(|session| {
                 session.managed_deployments
-                    && !session.is_stale(Instant::now(), self.heartbeat_timeout)
+                    && !session.is_stale(Instant::now(), self.heartbeat_timeout())
             })
     }
 
@@ -335,7 +366,8 @@ impl MeshRegistry {
         let session = self
             .current_session_any_generation(endpoint_id)
             .ok_or_else(|| crate::error::AppError::upstream("mesh worker disconnected"))?;
-        if !session.managed_deployments || session.is_stale(Instant::now(), self.heartbeat_timeout)
+        if !session.managed_deployments
+            || session.is_stale(Instant::now(), self.heartbeat_timeout())
         {
             return Err(crate::error::AppError::upstream(
                 "worker management unavailable",
@@ -377,7 +409,7 @@ impl MeshRegistry {
         let session = self
             .current_session_any_generation(endpoint_id)
             .ok_or_else(|| crate::error::AppError::upstream("mesh worker is not connected"))?;
-        if session.is_stale(Instant::now(), self.heartbeat_timeout) {
+        if session.is_stale(Instant::now(), self.heartbeat_timeout()) {
             return Err(crate::error::AppError::upstream("mesh worker is stale"));
         }
         let advertised = session
@@ -458,7 +490,7 @@ impl MeshRegistry {
         let disabled = self.disabled_models_snapshot();
         let mut by_id: HashMap<String, Option<i64>> = HashMap::new();
         for session in sessions {
-            if session.is_stale(now, self.heartbeat_timeout) {
+            if session.is_stale(now, self.heartbeat_timeout()) {
                 continue;
             }
             let resources = session
@@ -505,7 +537,7 @@ impl MeshRegistry {
         let disabled = self.disabled_models_snapshot();
         let mut entries = Vec::new();
         for session in sessions {
-            let stale = session.is_stale(now, self.heartbeat_timeout);
+            let stale = session.is_stale(now, self.heartbeat_timeout());
             let provider_id = format!("mesh:{}", session.endpoint_id);
             let resources = session
                 .resources
@@ -590,7 +622,7 @@ impl MeshRegistry {
         let disabled = self.disabled_models_snapshot();
         let mut out = Vec::new();
         for session in sessions {
-            if session.is_stale(now, self.heartbeat_timeout) {
+            if session.is_stale(now, self.heartbeat_timeout()) {
                 continue;
             }
             let resources = session

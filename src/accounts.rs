@@ -146,7 +146,9 @@ pub async fn reload_client_keys(gateway: &Gateway) -> Result<usize, String> {
         specs = merge_key_specs(specs, specs_from_sql(store.api_key_auth_specs().await?));
     }
     let count = specs.len();
-    if std::env::var("LLMCONDUIT_AUTH_MIGRATE_LEGACY_KEYS").is_ok_and(|v| v == "true") {
+    if crate::runtime_configuration::var("LLMCONDUIT_AUTH_MIGRATE_LEGACY_KEYS")
+        .is_ok_and(|v| v == "true")
+    {
         gateway.authz().import_legacy_keys(&specs)?;
     }
     gateway
@@ -161,10 +163,10 @@ pub async fn bootstrap_admin_from_env(
     store: &Arc<dyn PersistenceStore>,
 ) -> Result<Option<UserRecord>, String> {
     let (Some(username), Some(password)) = (
-        std::env::var(ENV_ADMIN_USERNAME)
+        crate::runtime_configuration::var(ENV_ADMIN_USERNAME)
             .ok()
             .filter(|v| !v.trim().is_empty()),
-        std::env::var(ENV_ADMIN_PASSWORD)
+        crate::runtime_configuration::var(ENV_ADMIN_PASSWORD)
             .ok()
             .filter(|v| !v.is_empty()),
     ) else {

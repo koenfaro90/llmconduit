@@ -1,7 +1,6 @@
 use clap::Parser;
 use llmconduit::AppOptions;
 use llmconduit::ControlPlaneRuntime;
-use llmconduit::build_app_with_gateway_control_plane_runtime;
 use llmconduit::cli::Cli;
 use llmconduit::cli::Commands;
 use llmconduit::cli::JoinKeyCommands;
@@ -354,10 +353,15 @@ fn load_runtime_config(
             ControlPlaneSection::default(),
         )?
     };
+    load_runtime_document(document, route_specs)
+}
+fn load_runtime_document(
+    document: ControlPlaneConfig,
+    route_specs: &[String],
+) -> Result<LoadedRuntimeConfig, String> {
     let materialized = document.materialize()?;
     if document.migrated_legacy_root() {
         tracing::warn!(
-            path = %path.display(),
             "legacy root-level control-plane config was migrated in memory only; run `llmconduit migrate-config --config <path>` to atomically persist digested keys and the namespaced schema"
         );
     }
@@ -405,45 +409,75 @@ async fn run_server(
     let mut loaded = loaded;
     let (runtime, client_auth, flush_queue) = prepare_control_plane_runtime(&mut loaded).await?;
     let bind_addr = loaded.config.bind_addr;
-    let metrics_config = loaded.metrics.clone();
-    let vision_probe_config = loaded.vision_probe.clone();
-    // The legacy primary upstream is a probe target too when it names a model.
-    let primary_probe =
-        loaded
-            .config
-            .upstream_model
-            .clone()
-            .map(|model| llmconduit::vision_probe::ProbeTarget {
-                backend: "primary".to_string(),
-                base_url: loaded.config.upstream_base_url.to_string(),
-                api_key: loaded.config.upstream_api_key.clone(),
-                model,
-            });
-    let probe_targets =
-        llmconduit::vision_probe::targets_from_routes(&loaded.routes, primary_probe);
-    run_debug_log_cleanup(&loaded.config, &loaded.routes).await;
-    let (app, gateway) = build_app_with_gateway_control_plane_runtime(
-        loaded.config,
-        raw_output,
+    let baseline_runtime = runtime.clone();
+    let environment = Arc::new(std::env::vars().collect());
+    let initial = create_generation(
+        loaded,
+        raw_output.clone(),
         app_options,
-        loaded.routes,
-        loaded.unknown_model_policy,
-        client_auth,
         runtime,
-    )?;
-    if std::env::var("LLMCONDUIT_AUTH_MIGRATE_LEGACY_KEYS").is_ok_and(|v| v == "true") {
-        llmconduit::accounts::reload_client_keys(&gateway).await?;
-    }
-    if let Some(registry) = gateway.alias_registry() {
-        registry.snapshot().await?;
-    }
-    spawn_persistent_backend_metrics(Arc::clone(&gateway));
-    spawn_upstream_metrics_scraper(Arc::clone(&gateway), metrics_config);
-    llmconduit::vision_probe::spawn(
-        &vision_probe_config,
-        probe_targets,
-        gateway.native_vision_cache().clone(),
-    );
+        client_auth,
+        None,
+        environment,
+    )
+    .await?;
+    initial.activate();
+    let gateway = initial.gateway.clone();
+    let factory: Arc<llmconduit::runtime_configuration::Factory> =
+        Arc::new(move |previous, spec, revision| {
+            let mut runtime = baseline_runtime.clone();
+            let raw_output = raw_output.clone();
+            Box::pin(async move {
+                let environment = llmconduit::runtime_configuration::environment(&spec, revision);
+                let tasks = Arc::new(llmconduit::runtime_configuration::BackgroundTasks::default());
+                let loaded =
+                    llmconduit::runtime_configuration::scope(environment.clone(), tasks, async {
+                        load_runtime_document(
+                            ControlPlaneConfig::from_yaml_str(
+                                &serde_yaml::to_string(&spec.document)
+                                    .map_err(|_| "Invalid configuration")?,
+                            )?,
+                            &[],
+                        )
+                    })
+                    .await?;
+                runtime.persistence_keep_media = loaded.storage.keep_media;
+                runtime.conversation_id_header = loaded.conversation_id_header.clone();
+                runtime.harness_detector = Arc::new(
+                    llmconduit::harness::HarnessDetector::from_config(
+                        &loaded.sessions,
+                        &loaded.conversation_id_header,
+                    )
+                    .map_err(|e| e.to_string())?,
+                );
+                runtime.yaml_key_specs = loaded.client_auth_specs.clone();
+                runtime.client_auth_required = loaded.client_auth_required;
+                runtime.users_configured = previous.users_configured();
+                let mut specs = loaded.client_auth_specs.clone();
+                if let Some(store) = &runtime.persistence_store {
+                    specs = llmconduit::accounts::merge_key_specs(
+                        specs,
+                        llmconduit::accounts::specs_from_sql(store.api_key_auth_specs().await?),
+                    );
+                }
+                let client_auth = llmconduit::client_auth::ClientAuth::from_specs(
+                    loaded.client_auth_required,
+                    specs,
+                )?;
+                create_generation(
+                    loaded,
+                    raw_output,
+                    app_options,
+                    runtime,
+                    Some(client_auth),
+                    Some(previous),
+                    environment,
+                )
+                .await
+            })
+        });
+    let live_runtime = llmconduit::runtime_configuration::LiveRuntime::new(initial, factory);
+    let app = live_runtime.router();
     let listener = TcpListener::bind(bind_addr).await?;
     log_listening(bind_addr);
     log_debug_ui_status(&gateway, app_options, bind_addr);
@@ -503,6 +537,95 @@ async fn run_server(
     }
     serve_result?;
     Ok(())
+}
+
+async fn create_generation(
+    loaded: LoadedRuntimeConfig,
+    raw_output: Option<RawOutput>,
+    app_options: AppOptions,
+    runtime: ControlPlaneRuntime,
+    client_auth: Option<llmconduit::client_auth::ClientAuth>,
+    previous: Option<Arc<llmconduit::engine::Gateway>>,
+    environment: Arc<std::collections::BTreeMap<String, String>>,
+) -> Result<llmconduit::runtime_configuration::Generation, String> {
+    tracing_subscriber::EnvFilter::try_new(
+        environment
+            .get("RUST_LOG")
+            .map(String::as_str)
+            .unwrap_or("info"),
+    )
+    .map_err(|_| "Invalid logging filter")?;
+    let tasks = Arc::new(llmconduit::runtime_configuration::BackgroundTasks::default());
+    llmconduit::runtime_configuration::scope(environment.clone(), tasks.clone(), async {
+        let metrics_config = loaded.metrics.clone();
+        let vision_probe_config = loaded.vision_probe.clone();
+        // The legacy primary upstream is a probe target too when it names a model.
+        let primary_probe = loaded.config.upstream_model.clone().map(|model| {
+            llmconduit::vision_probe::ProbeTarget {
+                backend: "primary".to_string(),
+                base_url: loaded.config.upstream_base_url.to_string(),
+                api_key: loaded.config.upstream_api_key.clone(),
+                model,
+            }
+        });
+        let probe_targets =
+            llmconduit::vision_probe::targets_from_routes(&loaded.routes, primary_probe);
+        let cleanup_config = loaded.config.clone();
+        let cleanup_routes = loaded.routes.clone();
+        llmconduit::runtime_configuration::spawn(async move {
+            run_debug_log_cleanup(&cleanup_config, &cleanup_routes).await;
+        });
+        let retention = loaded.storage.retention_days;
+        let sql_retention = matches!(
+            loaded.storage.backend,
+            StorageBackend::Sqlite | StorageBackend::Postgres
+        );
+        let (app, gateway) = llmconduit::build_runtime_generation(
+            loaded.config,
+            raw_output,
+            app_options,
+            loaded.routes,
+            loaded.unknown_model_policy,
+            client_auth,
+            runtime,
+            previous,
+        )?;
+        if app_options.with_debug_ui && gateway.dashboard_auth().is_none() {
+            return Err("Dashboard authentication could not be prepared".into());
+        }
+        if llmconduit::runtime_configuration::var("LLMCONDUIT_AUTH_MIGRATE_LEGACY_KEYS")
+            .is_ok_and(|v| v == "true")
+        {
+            llmconduit::accounts::reload_client_keys(&gateway).await?;
+        }
+        if let Some(registry) = gateway.alias_registry() {
+            registry
+                .snapshot()
+                .await
+                .map_err(|_| "Could not prepare active aliases".to_owned())?;
+        }
+        spawn_persistent_backend_metrics(Arc::clone(&gateway));
+        spawn_upstream_metrics_scraper(Arc::clone(&gateway), metrics_config);
+        llmconduit::vision_probe::spawn(
+            &vision_probe_config,
+            probe_targets,
+            gateway.native_vision_cache().clone(),
+        );
+        if sql_retention && let Some(store) = gateway.persistence_store() {
+            spawn_sql_retention(
+                store,
+                NonZeroU64::new(retention).ok_or("Retention must be positive")?,
+            );
+        }
+        Ok(llmconduit::runtime_configuration::Generation {
+            router: app,
+            gateway,
+            environment: environment.clone(),
+            tasks: tasks.clone(),
+            retention_days: retention,
+        })
+    })
+    .await
 }
 
 async fn prepare_control_plane_runtime(
@@ -580,7 +703,6 @@ async fn prepare_control_plane_runtime(
                 );
             }
             let store: Arc<dyn PersistenceStore> = sql.clone();
-            spawn_sql_retention(Arc::clone(&store), retention_days);
             let writer: Arc<dyn PersistenceWriter> = sql;
             persistence_store = Some(store);
             tracing::info!(
@@ -741,7 +863,7 @@ fn apply_control_plane_env_overrides(
 }
 
 fn nonempty_env(name: &str) -> Option<String> {
-    std::env::var(name)
+    llmconduit::runtime_configuration::var(name)
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
@@ -791,7 +913,7 @@ async fn wait_for_shutdown_signal() {
 }
 
 fn spawn_sql_retention(store: Arc<dyn PersistenceStore>, retention_days: NonZeroU64) {
-    tokio::spawn(async move {
+    llmconduit::runtime_configuration::spawn(async move {
         const RETENTION_INTERVAL: Duration = Duration::from_secs(60 * 60);
         loop {
             let age_ms = retention_days.get().saturating_mul(24 * 60 * 60 * 1_000);
@@ -822,7 +944,7 @@ fn spawn_persistent_backend_metrics(gateway: Arc<llmconduit::engine::Gateway>) {
     let Some(store) = gateway.persistence_store() else {
         return;
     };
-    tokio::spawn(async move {
+    llmconduit::runtime_configuration::spawn(async move {
         const SAMPLE_INTERVAL: Duration = Duration::from_secs(60);
         let mut interval = tokio::time::interval(SAMPLE_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -972,7 +1094,7 @@ fn spawn_upstream_metrics_scraper(
         return;
     };
     let interval_secs = config.scrape_interval_secs.max(1);
-    tokio::spawn(async move {
+    llmconduit::runtime_configuration::spawn(async move {
         /// Skip a backend for this many intervals after repeated failures.
         const BACKOFF_INTERVALS: u32 = 20;
         const FAILURES_BEFORE_BACKOFF: u32 = 3;
@@ -1309,16 +1431,24 @@ fn active_request_log_paths(config: &Config) -> Vec<std::path::PathBuf> {
 }
 
 fn init_tracing(raw_active: bool) {
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-
-    if raw_active {
-        tracing_subscriber::fmt()
-            .with_env_filter(env_filter)
-            .with_writer(std::io::sink)
-            .init();
-    } else {
-        tracing_subscriber::fmt().with_env_filter(env_filter).init();
-    }
+    use tracing_subscriber::prelude::*;
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let (filter, reload) = tracing_subscriber::reload::Layer::new(filter);
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer().with_writer(move || {
+            if raw_active {
+                Box::new(std::io::sink()) as Box<dyn std::io::Write>
+            } else {
+                Box::new(std::io::stdout()) as Box<dyn std::io::Write>
+            }
+        }))
+        .init();
+    llmconduit::runtime_configuration::set_logging_reloader(Box::new(move |value| {
+        if let Ok(filter) = EnvFilter::try_new(value) {
+            let _ = reload.reload(filter);
+        }
+    }));
 }
 
 fn resolve_mesh_join_key(

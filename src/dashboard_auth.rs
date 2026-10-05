@@ -140,7 +140,7 @@ impl DashboardEnv {
     /// Read the dashboard env vars from the live process environment.
     pub fn from_process_env() -> Self {
         let read = |name: &str| {
-            std::env::var(name)
+            crate::runtime_configuration::var(name)
                 .ok()
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())
@@ -193,7 +193,7 @@ impl DashboardEnv {
 /// overridden.
 fn env_flag(name: &str) -> bool {
     matches!(
-        std::env::var(name)
+        crate::runtime_configuration::var(name)
             .ok()
             .map(|value| value.trim().to_ascii_lowercase())
             .as_deref(),

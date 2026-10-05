@@ -822,7 +822,7 @@ pub(crate) fn start_reconciler(gateway: Arc<Gateway>) {
     if gateway.mesh_admin().is_none() || gateway.persistence_store().is_none() {
         return;
     }
-    tokio::spawn(async move {
+    crate::runtime_configuration::spawn(async move {
         let mut timer = tokio::time::interval(Duration::from_secs(5));
         loop {
             timer.tick().await;

@@ -367,9 +367,9 @@ impl AuthzService {
         if config.mode == AuthMode::Disabled {
             return Ok(Self::default());
         }
-        let pepper = std::env::var("LLMCONDUIT_AUTH_PEPPER")
+        let pepper = crate::runtime_configuration::var("LLMCONDUIT_AUTH_PEPPER")
             .map_err(|_| "auth.mode=enforce requires LLMCONDUIT_AUTH_PEPPER".to_string())?;
-        let bootstrap = std::env::var("LLMCONDUIT_AUTH_BOOTSTRAP_KEY").ok();
+        let bootstrap = crate::runtime_configuration::var("LLMCONDUIT_AUTH_BOOTSTRAP_KEY").ok();
         Self::open_enforced(config, pepper.into_bytes(), bootstrap.as_deref())
     }
 
@@ -860,7 +860,7 @@ impl AuthzService {
         self.inner().map_err(|message| {
             crate::dashboard_access::AccessError::new(StatusCode::SERVICE_UNAVAILABLE, message)
         })?;
-        let management_key = std::env::var("OPENROUTER_API_KEY")
+        let management_key = crate::runtime_configuration::var("OPENROUTER_API_KEY")
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())

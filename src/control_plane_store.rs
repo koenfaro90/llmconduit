@@ -526,6 +526,8 @@ impl fmt::Debug for ApiKeyAuthSpec {
 
 #[async_trait]
 pub trait PersistenceWriter: Send + Sync {
+    fn set_retention_days(&self, _days: u64) {}
+
     async fn begin_request(&self, row: RequestRow) -> StoreResult<()>;
     async fn append_event(&self, event: EventRow) -> StoreResult<()>;
     async fn finish_request(&self, id: &str, finish: RequestFinish) -> StoreResult<()>;
@@ -756,7 +758,7 @@ pub trait PersistenceStore: PersistenceWriter {
 pub struct JsonlWriter {
     dir: PathBuf,
     lock: Arc<Mutex<()>>,
-    retention_days: Option<NonZeroU64>,
+    retention_days: Arc<AtomicU64>,
     last_prune_day: Arc<AtomicI64>,
 }
 
@@ -784,7 +786,7 @@ impl JsonlWriter {
         Ok(Self {
             dir,
             lock: Arc::new(Mutex::new(())),
-            retention_days,
+            retention_days: Arc::new(AtomicU64::new(retention_days.map_or(0, NonZeroU64::get))),
             last_prune_day: Arc::new(AtomicI64::new(i64::MIN)),
         })
     }
@@ -792,7 +794,7 @@ impl JsonlWriter {
     async fn append(&self, stem: &'static str, value: serde_json::Value) -> StoreResult<()> {
         let dir = self.dir.clone();
         let lock = Arc::clone(&self.lock);
-        let retention_days = self.retention_days;
+        let retention_days = NonZeroU64::new(self.retention_days.load(Ordering::Relaxed));
         let last_prune_day = Arc::clone(&self.last_prune_day);
         tokio::task::spawn_blocking(move || {
             let _guard = lock
@@ -903,6 +905,12 @@ fn open_private_append_file(path: &Path) -> std::io::Result<File> {
 
 #[async_trait]
 impl PersistenceWriter for JsonlWriter {
+    fn set_retention_days(&self, days: u64) {
+        if self.retention_days.swap(days, Ordering::Relaxed) != days {
+            self.last_prune_day.store(i64::MIN, Ordering::Relaxed);
+        }
+    }
+
     async fn begin_request(&self, row: RequestRow) -> StoreResult<()> {
         let mut value = serde_json::to_value(row).map_err(store_error)?;
         if let Some(object) = value.as_object_mut() {
@@ -4323,15 +4331,20 @@ struct QueueCounters {
 /// backpressure to an SSE/body stream.
 #[derive(Clone)]
 pub struct PersistenceQueue {
+    writer: Arc<dyn PersistenceWriter>,
     sender: mpsc::Sender<WriteCommand>,
     counters: Arc<QueueCounters>,
 }
 
 impl PersistenceQueue {
+    pub fn set_retention_days(&self, days: u64) {
+        self.writer.set_retention_days(days);
+    }
     pub fn spawn(store: Arc<dyn PersistenceWriter>, capacity: NonZeroUsize) -> Self {
         let (sender, mut receiver) = mpsc::channel(capacity.get());
         let counters = Arc::new(QueueCounters::default());
         let worker_counters = Arc::clone(&counters);
+        let writer = store.clone();
         tokio::spawn(async move {
             const FAILURE_WARN_INTERVAL: Duration = Duration::from_secs(30);
             let mut last_failure_warning: Option<std::time::Instant> = None;
@@ -4380,7 +4393,11 @@ impl PersistenceQueue {
                 );
             }
         });
-        Self { sender, counters }
+        Self {
+            sender,
+            counters,
+            writer,
+        }
     }
 
     pub fn try_begin(&self, row: RequestRow) -> Result<(), EnqueueError> {

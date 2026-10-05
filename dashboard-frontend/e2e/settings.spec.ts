@@ -6,6 +6,7 @@ test('gateway changes stage and apply explicitly',async({page,consoleErrors})=>{
  await page.getByLabel('request timeout secs',{exact:true}).fill('120');
  await page.getByRole('button',{name:'Validate & stage',exact:true}).click();
  await expect(page.getByText('Revision 1 · applied 0')).toBeVisible();
+ await expect(page.getByText(/No gateway restart or request drain/)).toBeVisible();
  await page.getByRole('button',{name:'Apply staged configuration',exact:true}).click();
  await expect(page.getByText('Revision 1 · applied 1')).toBeVisible();
  expect(consoleErrors).toEqual([]);

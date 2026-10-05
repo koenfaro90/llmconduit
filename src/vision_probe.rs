@@ -293,7 +293,7 @@ pub fn spawn(
         interval_secs,
         "native-vision probing enabled"
     );
-    Some(tokio::spawn(async move {
+    Some(crate::runtime_configuration::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {

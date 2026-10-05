@@ -80,7 +80,7 @@ const ENV_CAPTURE_UPSTREAM_RESPONSE: &str = "LLMCONDUIT_DASHBOARD_CAPTURE_UPSTRE
 /// rather than widening that one's visibility).
 fn capture_response_env_flag() -> bool {
     matches!(
-        std::env::var(ENV_CAPTURE_UPSTREAM_RESPONSE)
+        crate::runtime_configuration::var(ENV_CAPTURE_UPSTREAM_RESPONSE)
             .ok()
             .map(|value| value.trim().to_ascii_lowercase())
             .as_deref(),
@@ -1216,6 +1216,11 @@ pub struct DashboardFlowStore {
 }
 
 impl DashboardFlowStore {
+    pub(crate) fn with_capture_from_environment(mut self) -> Self {
+        self.response_capture_enabled = capture_response_env_flag();
+        self
+    }
+
     /// Enabled store (debug UI on). Uses the default 64 MiB summary-byte quota.
     /// Upstream RESPONSE/ERROR-body capture is armed ONLY when the separate
     /// [`ENV_CAPTURE_UPSTREAM_RESPONSE`] env flag is an explicit affirmative (OFF by

@@ -53,6 +53,7 @@ pub mod recipe_import;
 pub(crate) mod redaction;
 pub mod replay;
 pub mod request_log;
+pub mod runtime_configuration;
 pub mod search;
 pub mod session_hub;
 pub mod sessions;
@@ -116,7 +117,7 @@ const PROVIDER_METRICS_INTERVAL_ENV: &str = "LLMCONDUIT_PROVIDER_METRICS_INTERVA
 const DEFAULT_PROVIDER_METRICS_INTERVAL_SECS: u64 = 30;
 
 fn provider_metrics_interval_from_env() -> Duration {
-    let seconds = std::env::var(PROVIDER_METRICS_INTERVAL_ENV)
+    let seconds = crate::runtime_configuration::var(PROVIDER_METRICS_INTERVAL_ENV)
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(DEFAULT_PROVIDER_METRICS_INTERVAL_SECS)
@@ -132,7 +133,7 @@ fn spawn_provider_metrics_refresh(
     if targets.is_empty() {
         return;
     }
-    tokio::spawn(async move {
+    crate::runtime_configuration::spawn(async move {
         let scraper = crate::provider_metrics::ProviderMetricsScraper::default();
         let mut ticker = tokio::time::interval(interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -264,6 +265,29 @@ pub fn build_app_with_gateway_control_plane_runtime(
     client_auth: Option<crate::client_auth::ClientAuth>,
     runtime: ControlPlaneRuntime,
 ) -> Result<(axum::Router, Arc<Gateway>), String> {
+    build_runtime_generation(
+        config,
+        raw_output,
+        options,
+        operational_routes,
+        unknown_model_policy,
+        client_auth,
+        runtime,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_runtime_generation(
+    config: Config,
+    raw_output: Option<RawOutput>,
+    options: AppOptions,
+    operational_routes: Vec<crate::control_plane::OperationalRoutePlan>,
+    unknown_model_policy: crate::control_plane::UnknownModelPolicy,
+    client_auth: Option<crate::client_auth::ClientAuth>,
+    runtime: ControlPlaneRuntime,
+    previous: Option<Arc<Gateway>>,
+) -> Result<(axum::Router, Arc<Gateway>), String> {
     let conversation_id_header = runtime.conversation_id_header.trim();
     let conversation_id_header = if conversation_id_header.is_empty() {
         crate::control_plane::DEFAULT_CONVERSATION_ID_HEADER
@@ -303,14 +327,18 @@ pub fn build_app_with_gateway_control_plane_runtime(
         .build()
         .expect("reqwest client");
     let replay_store = ReplayStore::new(config.max_replay_entries);
-    let monitor = if options.with_debug_ui {
+    let monitor = if let Some(old) = &previous {
+        old.monitor().clone()
+    } else if options.with_debug_ui {
         MonitorHub::new(512)
     } else {
         MonitorHub::disabled()
     };
     // D1 dashboard FlowStore: enabled only when the debug UI is on, mirroring the
     // monitor's zero-overhead `disabled()` split.
-    let flow_store = if options.with_debug_ui {
+    let flow_store = if let Some(old) = &previous {
+        old.flow_store().clone().with_capture_from_environment()
+    } else if options.with_debug_ui {
         crate::dashboard_flow::DashboardFlowStore::new()
     } else {
         crate::dashboard_flow::DashboardFlowStore::disabled()
@@ -319,7 +347,9 @@ pub fn build_app_with_gateway_control_plane_runtime(
     // `disabled()` split). Attached to the Gateway via `with_metrics`; the 5 s
     // coordinated snapshot task is spawned below (on a live runtime) under the same
     // gate, so production runs no ring/histogram/snapshot work.
-    let metrics = if options.with_debug_ui {
+    let metrics = if let Some(old) = &previous {
+        old.metrics().clone()
+    } else if options.with_debug_ui {
         crate::metrics::MetricsLayer::new()
     } else {
         crate::metrics::MetricsLayer::disabled()
@@ -327,17 +357,24 @@ pub fn build_app_with_gateway_control_plane_runtime(
     // Live active-session hub (dashboard "sessions now" view): enabled only
     // when the debug UI is on, mirroring the FlowStore's zero-overhead
     // `disabled()` split. Fed at the persistence link/terminal seams.
-    let session_hub = if options.with_debug_ui {
+    let session_hub = if let Some(old) = &previous {
+        old.session_hub().clone()
+    } else if options.with_debug_ui {
         crate::session_hub::SessionHub::new()
     } else {
         crate::session_hub::SessionHub::disabled()
     };
-    let traffic = if runtime.persistence_store.is_some() {
+    let traffic = if let Some(old) = &previous {
+        old.traffic()
+    } else if runtime.persistence_store.is_some() {
         crate::traffic::TrafficController::loading()
     } else {
         crate::traffic::TrafficController::new()
     };
-    let provider_metrics = crate::provider_metrics::ProviderMetricsRegistry::default();
+    let provider_metrics = previous
+        .as_ref()
+        .map(|old| old.provider_metrics())
+        .unwrap_or_default();
     let provider_metrics_targets = if options.with_debug_ui {
         config.provider_metrics_targets.clone()
     } else {
@@ -351,7 +388,9 @@ pub fn build_app_with_gateway_control_plane_runtime(
         Some(dir) => crate::turn_capture::TurnCapture::enabled(dir),
         None => crate::turn_capture::TurnCapture::disabled(),
     };
-    let mesh_admin = if config.mesh.controller.enabled {
+    let mesh_admin = if let Some(old) = &previous {
+        old.mesh_admin()
+    } else if config.mesh.controller.enabled {
         Some(
             crate::mesh::controller::spawn_controller(&config.mesh.controller)
                 .expect("validated mesh controller configuration"),
@@ -668,8 +707,7 @@ pub fn build_app_with_gateway_control_plane_runtime(
     // a non-loopback bind without a token + validated https origin REFUSES to
     // register the protected routes (logged), unless `ALLOW_INSECURE=1`.
     let bind_addr = config.bind_addr;
-    let authz = crate::authz::AuthzService::from_config(&config.auth)
-        .unwrap_or_else(|err| panic!("inference auth startup validation failed: {err}"));
+    let authz = crate::authz::AuthzService::from_config(&config.auth)?;
     match config.auth.mode {
         crate::config::AuthMode::Disabled => {
             tracing::info!("inference authentication disabled");
@@ -734,6 +772,9 @@ pub fn build_app_with_gateway_control_plane_runtime(
         gateway = gateway.with_persistence_store(store);
     }
     gateway = gateway.with_conversation_id_header(conversation_id_header);
+    if let Some(old) = &previous {
+        gateway = gateway.share_live_state(old);
+    }
     let gateway = Arc::new(gateway);
     // D4: spawn the topology-health publication task ONLY when the debug UI is on,
     // so production keeps the zero-overhead path (no 1 s tick). Guard on a live

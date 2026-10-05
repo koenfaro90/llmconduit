@@ -183,6 +183,10 @@ pub fn build_router(gateway: Arc<Gateway>, options: RouterOptions) -> Router {
             "/internal/configuration-ready",
             get(crate::dashboard_settings::ready),
         )
+        .route(
+            "/internal/configuration-apply",
+            post(crate::runtime_configuration::unavailable),
+        )
         .route("/openapi.json", get(get_openapi))
         .route("/", {
             let dashboard = options.with_debug_ui && options.register_protected_routes;
@@ -2173,7 +2177,7 @@ const ENV_DASHBOARD_CLIENT_HEADER: &str = "LLMCONDUIT_DASHBOARD_CLIENT_HEADER";
 /// `None`/blank ⇒ the configured-header attribution source is simply skipped (the
 /// derivation falls through to the User-Agent fallback). Trimmed; blank ⇒ `None`.
 fn dashboard_client_header() -> Option<String> {
-    std::env::var(ENV_DASHBOARD_CLIENT_HEADER)
+    crate::runtime_configuration::var(ENV_DASHBOARD_CLIENT_HEADER)
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())

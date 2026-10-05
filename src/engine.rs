@@ -133,6 +133,7 @@ type UnknownToolCounterKey = (String, String, UnknownToolOutcome);
 #[derive(Clone)]
 pub struct Gateway {
     config: Config,
+    generation_environment: Arc<BTreeMap<String, String>>,
     /// Client-facing `/v1/*` virtual-key authentication. This is deliberately
     /// separate from env-only dashboard session authentication.
     client_auth: crate::client_auth::ClientAuth,
@@ -802,6 +803,7 @@ impl Gateway {
         };
         Self {
             config,
+            generation_environment: crate::runtime_configuration::current_environment(),
             client_auth: crate::client_auth::ClientAuth::open(),
             conversation_id_header: crate::control_plane::DEFAULT_CONVERSATION_ID_HEADER
                 .to_string(),
@@ -1397,6 +1399,39 @@ impl Gateway {
         self.abort_hub.abort(api_call_id)
     }
 
+    /// Keep process-wide observations, cancellation and session identity across live edits.
+    pub(crate) fn share_live_state(mut self, previous: &Self) -> Self {
+        self.abort_hub = previous.abort_hub.clone();
+        if self.config.auth == previous.config.auth
+            && self.generation_environment.get("LLMCONDUIT_AUTH_PEPPER")
+                == previous
+                    .generation_environment
+                    .get("LLMCONDUIT_AUTH_PEPPER")
+        {
+            self.authz = previous.authz.clone();
+        }
+        if self.client_auth_required == previous.client_auth_required
+            && self.yaml_key_specs == previous.yaml_key_specs
+        {
+            self.client_auth = previous.client_auth.clone();
+        }
+
+        self.provider_health = previous.provider_health.clone();
+        self.users_configured = previous.users_configured.clone();
+        self.unknown_tool_call_counts = previous.unknown_tool_call_counts.clone();
+        self.session_linker = Arc::new(
+            previous
+                .session_linker
+                .with_inference_policy(self.harness_detector.infer_sub_sessions()),
+        );
+        self
+    }
+    pub(crate) fn apply_live_mesh_policy(&self) {
+        if let Some(admin) = &self.mesh_admin {
+            admin.apply_runtime_policy(&self.config.mesh.controller);
+        }
+    }
+
     pub fn config(&self) -> &Config {
         &self.config
     }
@@ -1477,8 +1512,10 @@ impl Gateway {
         // Publish an initial snapshot immediately so a consumer that reads before
         // the first tick still sees the current health (version 1), not the empty
         // default.
-        publisher.publish(upstream.provider_health());
-        tokio::spawn(async move {
+        if !crate::runtime_configuration::background_is_staged() {
+            publisher.publish(upstream.provider_health());
+        }
+        crate::runtime_configuration::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
@@ -1522,6 +1559,10 @@ impl Gateway {
             .map(str::to_string)
             .unwrap_or_else(|| self.config.resolve_upstream_model(request_model));
         self.normalize_upstream_model(&configured_model).await
+    }
+
+    pub(crate) fn monitor(&self) -> &MonitorHub {
+        &self.monitor
     }
 
     pub fn subscribe_monitor(

@@ -59,6 +59,7 @@ pub const KNOWN_ENVIRONMENT: &[&str] = &[
     "LLMCONDUIT_PERSISTENCE_QUEUE_CAPACITY",
     "LLMCONDUIT_PERSISTENCE_RETENTION_DAYS",
     "LLMCONDUIT_PRICE_TABLE_JSON",
+    "LLMCONDUIT_PROVIDER_METRICS_INTERVAL_SECS",
     "LLMCONDUIT_REQUEST_TIMEOUT_SECS",
     "LLMCONDUIT_REQUIRE_AUTH",
     "LLMCONDUIT_STORAGE_BACKEND",
@@ -157,7 +158,7 @@ pub async fn connect(backend: &str, url: &str) -> Result<Arc<SqlStore>, String> 
         _ => return Err("Managed settings require SQL persistence".into()),
     }))
 }
-async fn owner() -> Result<Arc<SqlStore>, String> {
+pub(crate) async fn owner() -> Result<Arc<SqlStore>, String> {
     OWNER
         .get_or_try_init(|| async {
             let url = std::env::var("LLMCONDUIT_MANAGED_STORE_URL")
@@ -490,6 +491,9 @@ pub fn edit(settings: &mut Settings, scope: &str, body: Edit) -> Result<(), Stri
     Ok(())
 }
 pub fn validate(spec: &Specification) -> Result<(), String> {
+    crate::runtime_configuration::with_environment(spec, || validate_environment(spec))
+}
+fn validate_environment(spec: &Specification) -> Result<(), String> {
     if spec.document.to_string().len() > 1024 * 1024
         || spec.environment.len() > 128
         || spec
@@ -548,8 +552,18 @@ fn view(settings: &Settings, scope: &str) -> Option<Value> {
             )
         })
         .collect();
+    let restart_reasons =
+        crate::runtime_configuration::restart_reasons(&settings.active, &settings.draft);
+    let impact = if restart_reasons.is_empty() {
+        "Live apply; running requests keep their original configuration. No gateway restart or request drain.".to_owned()
+    } else {
+        format!(
+            "Gateway restart required: {}. Existing streams drain for up to 35 seconds; failed readiness rolls back.",
+            restart_reasons.join(", ")
+        )
+    };
     Some(
-        json!({"revision":settings.revision,"applied_revision":settings.applied_revision,"status":settings.status,"error":settings.error,"values":values,"active_values":active,"environment":environment,"impact":"Gateway restart; existing streams drain for up to 35 seconds. Failed readiness rolls back. Aliases and database records are retained.","source":"SQL managed settings","available_environment":KNOWN_ENVIRONMENT.iter().map(|s|s.to_string()).chain(referenced_environment(&settings.draft.document)).filter(|name|environment_scope(&settings.draft,name)==scope).collect::<std::collections::BTreeSet<_>>()}),
+        json!({"revision":settings.revision,"applied_revision":settings.applied_revision,"status":settings.status,"error":settings.error,"values":values,"active_values":active,"environment":environment,"impact":impact,"requires_restart":!restart_reasons.is_empty(),"restart_reasons":restart_reasons,"source":"SQL managed settings","available_environment":KNOWN_ENVIRONMENT.iter().map(|s|s.to_string()).chain(referenced_environment(&settings.draft.document)).filter(|name|environment_scope(&settings.draft,name)==scope).collect::<std::collections::BTreeSet<_>>()}),
     )
 }
 fn error(status: StatusCode, message: &str) -> Response {
@@ -714,24 +728,26 @@ pub async fn apply(
         Err(_) => error(StatusCode::SERVICE_UNAVAILABLE, "Could not schedule apply"),
     }
 }
-#[utoipa::path(get,path="/internal/configuration-ready",tag="internal",responses((status=200,body=Value),(status=404),(status=503)))]
-pub async fn ready(
-    State(gateway): State<Arc<crate::engine::Gateway>>,
-    headers: HeaderMap,
-) -> Response {
+pub(crate) fn internal_authorized(headers: &HeaderMap) -> bool {
     let expected = std::env::var("LLMCONDUIT_MANAGED_READY_TOKEN").ok();
     let provided = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
     use subtle::ConstantTimeEq;
-    if !expected
+    expected
         .as_deref()
         .zip(provided)
         .is_some_and(|(e, p)| e.as_bytes().ct_eq(p.as_bytes()).into())
-    {
+}
+#[utoipa::path(get,path="/internal/configuration-ready",tag="internal",responses((status=200,body=Value),(status=404),(status=503)))]
+pub async fn ready(
+    State(gateway): State<Arc<crate::engine::Gateway>>,
+    headers: HeaderMap,
+) -> Response {
+    if !internal_authorized(&headers) {
         return error(StatusCode::NOT_FOUND, "Not found");
-    };
+    }
     if std::env::var("LLMCONDUIT_MANAGED_REQUIRE_DASHBOARD").is_ok_and(|v| v == "true")
         && gateway.dashboard_auth().is_none()
     {
@@ -764,7 +780,7 @@ pub async fn ready(
     }
     json_no_store(
         StatusCode::OK,
-        &json!({"revision":std::env::var("LLMCONDUIT_MANAGED_REVISION").ok(),"connected_hosts":hosts}),
+        &json!({"revision":crate::runtime_configuration::var("LLMCONDUIT_MANAGED_REVISION").ok(),"connected_hosts":hosts}),
     )
 }
 #[cfg(test)]

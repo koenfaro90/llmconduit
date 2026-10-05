@@ -9,7 +9,6 @@ use serde_json::Map as JsonMap;
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
-use std::env;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -3206,152 +3205,153 @@ pub fn write_persisted_config(path: &Path, config: &PersistedConfig) -> Result<(
 }
 
 fn apply_env_overrides(config: &mut PersistedConfig) {
-    if let Ok(value) = env::var("LLMCONDUIT_BIND_ADDR")
+    if let Ok(value) = crate::runtime_configuration::var("LLMCONDUIT_BIND_ADDR")
         && !value.trim().is_empty()
     {
         config.bind_addr = value;
     }
-    if let Ok(value) = env::var("LLMCONDUIT_UPSTREAM_BASE_URL")
+    if let Ok(value) = crate::runtime_configuration::var("LLMCONDUIT_UPSTREAM_BASE_URL")
         && !value.trim().is_empty()
     {
         config.upstream_base_url = value;
     }
-    if let Ok(value) = env::var("LLMCONDUIT_UPSTREAM_API_KEY")
+    if let Ok(value) = crate::runtime_configuration::var("LLMCONDUIT_UPSTREAM_API_KEY")
         && !value.trim().is_empty()
     {
         config.upstream_api_key = Some(value);
     } else if config.upstream_api_key.is_none()
-        && let Ok(value) = env::var("OPENAI_API_KEY")
+        && let Ok(value) = crate::runtime_configuration::var("OPENAI_API_KEY")
         && !value.trim().is_empty()
     {
         config.upstream_api_key = Some(value);
     }
-    if let Ok(value) = env::var("LLMCONDUIT_UPSTREAM_MODEL")
+    if let Ok(value) = crate::runtime_configuration::var("LLMCONDUIT_UPSTREAM_MODEL")
         && !value.trim().is_empty()
     {
         config.upstream_model = Some(value);
     }
-    if let Ok(value) = env::var("LLMCONDUIT_TEMPLATE_FAMILY")
+    if let Ok(value) = crate::runtime_configuration::var("LLMCONDUIT_TEMPLATE_FAMILY")
         && !value.trim().is_empty()
     {
         config.template_family = Some(value);
     }
-    if let Ok(value) = env::var("LLMCONDUIT_SYSTEM_PROMPT_PREFIX")
+    if let Ok(value) = crate::runtime_configuration::var("LLMCONDUIT_SYSTEM_PROMPT_PREFIX")
         && !value.trim().is_empty()
     {
         config.system_prompt_prefix = Some(value);
     }
-    if let Ok(value) = env::var("LLMCONDUIT_UPSTREAM_REQUEST_LOG_PATH")
+    if let Ok(value) = crate::runtime_configuration::var("LLMCONDUIT_UPSTREAM_REQUEST_LOG_PATH")
         && !value.trim().is_empty()
     {
         config.upstream_request_log_path = Some(value);
     }
-    if let Ok(value) = env::var("LLMCONDUIT_TURN_CAPTURE_DIR")
+    if let Ok(value) = crate::runtime_configuration::var("LLMCONDUIT_TURN_CAPTURE_DIR")
         && !value.trim().is_empty()
     {
         config.turn_capture_dir = Some(value);
     }
-    if let Ok(value) = env::var("LLMCONDUIT_UPSTREAM_CHAT_KWARGS_JSON")
+    if let Ok(value) = crate::runtime_configuration::var("LLMCONDUIT_UPSTREAM_CHAT_KWARGS_JSON")
         && !value.trim().is_empty()
         && let Ok(parsed) = serde_json::from_str::<JsonMap<String, JsonValue>>(&value)
     {
         config.upstream_chat_kwargs = parsed;
     }
-    if let Ok(value) = env::var("LLMCONDUIT_UPSTREAM_FAILURE_COOLDOWN_SECS")
+    if let Ok(value) =
+        crate::runtime_configuration::var("LLMCONDUIT_UPSTREAM_FAILURE_COOLDOWN_SECS")
         && let Ok(parsed) = value.parse()
     {
         config.upstream_failure_cooldown_secs = parsed;
     }
-    if let Ok(value) = env::var("LLMCONDUIT_BRAVE_BASE_URL")
+    if let Ok(value) = crate::runtime_configuration::var("LLMCONDUIT_BRAVE_BASE_URL")
         && !value.trim().is_empty()
     {
         config.brave_base_url = value;
     }
-    if let Ok(value) = env::var("BRAVE_SEARCH_API_KEY")
+    if let Ok(value) = crate::runtime_configuration::var("BRAVE_SEARCH_API_KEY")
         && !value.trim().is_empty()
     {
         config.brave_api_key = Some(value);
     }
-    if let Ok(value) = env::var("LLMCONDUIT_BRAVE_MAX_RESULTS")
+    if let Ok(value) = crate::runtime_configuration::var("LLMCONDUIT_BRAVE_MAX_RESULTS")
         && let Ok(parsed) = value.parse()
     {
         config.brave_max_results = parsed;
     }
-    if let Ok(value) = env::var("LLMCONDUIT_REQUEST_TIMEOUT_SECS")
+    if let Ok(value) = crate::runtime_configuration::var("LLMCONDUIT_REQUEST_TIMEOUT_SECS")
         && let Ok(parsed) = value.parse()
     {
         config.request_timeout_secs = parsed;
     }
-    if let Ok(value) = env::var("LLMCONDUIT_CONNECT_TIMEOUT_SECS")
+    if let Ok(value) = crate::runtime_configuration::var("LLMCONDUIT_CONNECT_TIMEOUT_SECS")
         && let Ok(parsed) = value.parse()
     {
         config.connect_timeout_secs = parsed;
     }
-    if let Ok(value) = env::var("LLMCONDUIT_MAX_WEB_SEARCH_ROUNDS")
+    if let Ok(value) = crate::runtime_configuration::var("LLMCONDUIT_MAX_WEB_SEARCH_ROUNDS")
         && let Ok(parsed) = value.parse()
     {
         config.max_web_search_rounds = parsed;
     }
-    if let Ok(value) = env::var("LLMCONDUIT_FLATTEN_CONTENT")
+    if let Ok(value) = crate::runtime_configuration::var("LLMCONDUIT_FLATTEN_CONTENT")
         && let Ok(parsed) = value.parse()
     {
         config.flatten_content = parsed;
     }
-    if let Ok(value) = env::var("LLMCONDUIT_MAX_REPLAY_ENTRIES")
+    if let Ok(value) = crate::runtime_configuration::var("LLMCONDUIT_MAX_REPLAY_ENTRIES")
         && let Ok(parsed) = value.parse()
     {
         config.max_replay_entries = parsed;
     }
-    if let Ok(value) = env::var("LLMCONDUIT_DEBUG_LOG_MAX_AGE_HOURS")
+    if let Ok(value) = crate::runtime_configuration::var("LLMCONDUIT_DEBUG_LOG_MAX_AGE_HOURS")
         && let Ok(parsed) = value.trim().parse()
     {
         config.debug_log_max_age_hours = Some(parsed);
     }
-    if let Ok(value) = env::var("LLMCONDUIT_MIN_COMPLETION_TOKENS")
+    if let Ok(value) = crate::runtime_configuration::var("LLMCONDUIT_MIN_COMPLETION_TOKENS")
         && let Ok(parsed) = value.trim().parse::<i64>()
         && parsed >= 1
     {
         config.min_completion_tokens = parsed;
     }
-    if let Ok(value) = env::var("LLMCONDUIT_MAX_SSE_FRAME_BYTES")
+    if let Ok(value) = crate::runtime_configuration::var("LLMCONDUIT_MAX_SSE_FRAME_BYTES")
         && let Ok(parsed) = value.trim().parse::<usize>()
         && parsed >= 1
     {
         config.max_sse_frame_bytes = parsed;
     }
-    if let Ok(value) = env::var("LLMCONDUIT_MAX_REQUEST_BODY_BYTES")
+    if let Ok(value) = crate::runtime_configuration::var("LLMCONDUIT_MAX_REQUEST_BODY_BYTES")
         && let Ok(parsed) = value.trim().parse::<usize>()
         && parsed >= 1
     {
         config.max_request_body_bytes = parsed;
     }
-    if let Ok(value) = env::var("LLMCONDUIT_IMAGE_AGENT_ENABLED")
+    if let Ok(value) = crate::runtime_configuration::var("LLMCONDUIT_IMAGE_AGENT_ENABLED")
         && let Ok(parsed) = value.trim().parse::<bool>()
     {
         config.image_agent_enabled = parsed;
     }
-    if let Ok(value) = env::var("LLMCONDUIT_VISION_URL")
+    if let Ok(value) = crate::runtime_configuration::var("LLMCONDUIT_VISION_URL")
         && !value.trim().is_empty()
     {
         config.vision_url = Some(value);
     }
-    if let Ok(value) = env::var("LLMCONDUIT_VISION_MODEL")
+    if let Ok(value) = crate::runtime_configuration::var("LLMCONDUIT_VISION_MODEL")
         && !value.trim().is_empty()
     {
         config.vision_model = Some(value);
     }
-    if let Ok(value) = env::var("LLMCONDUIT_IMAGE_CACHE_MAX_SIZE")
+    if let Ok(value) = crate::runtime_configuration::var("LLMCONDUIT_IMAGE_CACHE_MAX_SIZE")
         && let Ok(parsed) = value.trim().parse::<usize>()
         && parsed >= 1
     {
         config.image_cache_max_size = parsed;
     }
-    if let Ok(value) = env::var("LLMCONDUIT_IMAGE_CACHE_TTL_SECS")
+    if let Ok(value) = crate::runtime_configuration::var("LLMCONDUIT_IMAGE_CACHE_TTL_SECS")
         && let Ok(parsed) = value.trim().parse::<u64>()
     {
         config.image_cache_ttl_secs = parsed;
     }
-    if let Ok(value) = env::var("LLMCONDUIT_UNSUPPORTED_IMAGE_POLICY") {
+    if let Ok(value) = crate::runtime_configuration::var("LLMCONDUIT_UNSUPPORTED_IMAGE_POLICY") {
         match value.trim().to_ascii_lowercase().as_str() {
             "placeholder" => config.unsupported_image_policy = UnsupportedImagePolicy::Placeholder,
             "reject" => config.unsupported_image_policy = UnsupportedImagePolicy::Reject,
@@ -3364,7 +3364,7 @@ fn apply_env_overrides(config: &mut PersistedConfig) {
     // via the environment (mirrors `LLMCONDUIT_UPSTREAM_CHAT_KWARGS_JSON`). The
     // env value REPLACES the YAML `price_table:` map when it parses; a malformed
     // value is ignored so a typo cannot wipe a configured table silently.
-    if let Ok(value) = env::var("LLMCONDUIT_PRICE_TABLE_JSON")
+    if let Ok(value) = crate::runtime_configuration::var("LLMCONDUIT_PRICE_TABLE_JSON")
         && !value.trim().is_empty()
         && let Ok(mut parsed) = serde_json::from_str::<HashMap<String, ModelPrice>>(&value)
     {

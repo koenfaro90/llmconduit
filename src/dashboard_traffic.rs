@@ -253,9 +253,9 @@ pub fn start(gateway: Arc<Gateway>) {
         return;
     };
     let traffic = gateway.traffic();
-    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+    if tokio::runtime::Handle::try_current().is_ok() {
         let jobs_gateway = gateway.clone();
-        handle.spawn(async move {
+        crate::runtime_configuration::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(2));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
@@ -263,7 +263,7 @@ pub fn start(gateway: Arc<Gateway>) {
                 crate::media_api::reconcile_traffic_jobs(&jobs_gateway).await;
             }
         });
-        handle.spawn(async move {
+        crate::runtime_configuration::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(2));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {

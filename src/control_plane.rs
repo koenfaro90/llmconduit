@@ -1243,7 +1243,7 @@ fn resolve_backend_api_key(backend: &OpBackend) -> Result<Option<String>, String
         return Ok(trim_option(backend.api_key.as_deref()));
     };
     validate_env_name(&name)?;
-    let value = std::env::var(&name).map_err(|_| {
+    let value = crate::runtime_configuration::var(&name).map_err(|_| {
         format!(
             "backend '{}' requires non-empty environment variable '{name}'",
             backend.name.trim()

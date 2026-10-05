@@ -273,7 +273,7 @@ struct Index {
 /// In-memory session index. Cheap to clone the handle (`Arc` it).
 #[derive(Debug)]
 pub struct SessionLinker {
-    index: Mutex<Index>,
+    index: std::sync::Arc<Mutex<Index>>,
     infer_sub_sessions: bool,
 }
 
@@ -290,10 +290,17 @@ impl SessionLinker {
         display_numbers: crate::control_plane_store::DisplayNumbers,
     ) -> Self {
         Self {
-            index: Mutex::new(Index {
+            index: std::sync::Arc::new(Mutex::new(Index {
                 display_numbers,
                 ..Index::default()
-            }),
+            })),
+            infer_sub_sessions,
+        }
+    }
+
+    pub(crate) fn with_inference_policy(&self, infer_sub_sessions: bool) -> Self {
+        Self {
+            index: self.index.clone(),
             infer_sub_sessions,
         }
     }

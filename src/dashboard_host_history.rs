@@ -81,7 +81,7 @@ pub fn start(gateway: Arc<Gateway>) {
     let Some(admin) = gateway.mesh_admin() else {
         return;
     };
-    tokio::spawn(async move {
+    crate::runtime_configuration::spawn(async move {
         let mut timer = tokio::time::interval(Duration::from_secs(15));
         loop {
             timer.tick().await;

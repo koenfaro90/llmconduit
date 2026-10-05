@@ -84,7 +84,7 @@ const initialSettings=():Record<string,SettingsView>=>Object.fromEntries(Object.
  access:{'/auth':{mode:'disabled',store_path:'/data/auth.sqlite3'}},
  observability:{'/control_plane/metrics':{enabled:true,scrape_interval_secs:15,backends:{}},'/turn_capture_dir':null},
  service:{'/bind_addr':'0.0.0.0:4000','/mesh':{controller:{enabled:true}},'/control_plane/storage/backend':'postgres','/control_plane/storage/url':'[keep existing secret]'},
-} as Record<string,Record<string,Json>>).map(([scope,values])=>[scope,{revision:0,applied_revision:0,status:'applied',error:null,values,active_values:structuredClone(values),environment:(scope==='gateway'?{LLMCONDUIT_REQUEST_TIMEOUT_SECS:'600'}:scope==='authentication'?{LLMCONDUIT_DASHBOARD_SESSION_KEY:'[keep existing secret]'}:{}) as Record<string,string>,impact:'Gateway restart with readiness verification and rollback.',source:'SQL managed settings'}]));
+} as Record<string,Record<string,Json>>).map(([scope,values])=>[scope,{revision:0,applied_revision:0,status:'applied',error:null,values,active_values:structuredClone(values),environment:(scope==='gateway'?{LLMCONDUIT_REQUEST_TIMEOUT_SECS:'600'}:scope==='authentication'?{LLMCONDUIT_DASHBOARD_SESSION_KEY:'[keep existing secret]'}:{}) as Record<string,string>,impact:'Live apply; running requests keep their original configuration. No gateway restart or request drain.',source:'SQL managed settings'}]));
 let MOCK_SETTINGS=initialSettings();
 let MOCK_HOST_SETTINGS:Record<string,HostSettings>={};
 const MOCK_CSRF = 'mock-csrf-token';
