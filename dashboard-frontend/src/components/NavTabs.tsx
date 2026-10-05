@@ -23,13 +23,23 @@ const LABELS: Record<RouteName, string> = {
   deployment: 'Deployment',
   benchmarks: 'Benchmarks',
   access: 'Access',
+  'gateway-settings': 'Gateway',
+  'profiles': 'Profiles & routing',
+  'provider-settings': 'Provider settings',
+  'integrations': 'Integrations',
+  'authentication': 'Authentication',
+  'access-settings': 'Access activation',
+  'observability': 'Observability',
+  'service': 'Service & storage',
+  'host-settings': 'Host settings',
+
 };
 
 const SECTIONS: Array<{ label: string; landing: RouteName; routes: RouteName[] }> = [
   { label: 'Chat', landing: 'chat', routes: ['chat'] },
   { label: 'Observe', landing: 'overview', routes: ['overview', 'traffic', 'flows', 'requests', 'sessions', 'throughput', 'activity'] },
-  { label: 'Infrastructure', landing: 'hosts', routes: ['hosts', 'recipes', 'models', 'aliases', 'deployment', 'benchmarks', 'providers', 'topology', 'sankey', 'theater'] },
-  { label: 'Admin', landing: 'access', routes: ['access', 'account'] },
+  { label: 'Infrastructure', landing: 'hosts', routes: ['hosts', 'recipes', 'models', 'aliases', 'deployment', 'benchmarks', 'providers', 'provider-settings', 'profiles', 'host-settings', 'topology', 'sankey', 'theater'] },
+  { label: 'Admin', landing: 'access', routes: ['access', 'access-settings', 'account', 'gateway-settings', 'integrations', 'authentication', 'observability', 'service'] },
 ];
 
 /** The Argus eye — the hundred-eyed watchman's iris, the brand mark. Keeps a slow watch. */
@@ -51,7 +61,7 @@ function ArgusEye({ className }: { className?: string }) {
 export function NavTabs({ active, onLogout, compact = false, onToggleCompact }: { active: RouteName; onLogout: () => void; compact?: boolean; onToggleCompact?: () => void }) {
   const activeSection = SECTIONS.find((section) => section.routes.includes(active)) ?? SECTIONS[0]!;
   return (
-    <nav className="flex flex-wrap items-center gap-x-6 gap-y-2 border-b border-line bg-panel px-5 py-2.5" aria-label="Dashboard">
+    <nav className="flex shrink-0 flex-wrap items-center gap-x-6 gap-y-2 border-b border-line bg-panel px-5 py-2.5" aria-label="Dashboard">
       {/* Masthead: the Argus eye + tracked wordmark; llmconduit rides below as the eyebrow. */}
       <div className="flex shrink-0 items-center gap-2.5 pr-1">
         <ArgusEye className="argus-eye h-[18px] w-[18px] text-accent" />

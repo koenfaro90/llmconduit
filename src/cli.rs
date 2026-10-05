@@ -31,6 +31,18 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
+    /// Supervise the gateway and apply SQL-managed configuration with rollback.
+    Supervise {
+        #[arg(long)]
+        config: Option<PathBuf>,
+        #[arg(long, default_value = "/data/managed-settings")]
+        state_dir: PathBuf,
+    },
+    /// Validate a complete runtime configuration without starting listeners.
+    CheckConfig {
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
     /// Start the gateway server.
     Start {
         /// Path to the config file. Defaults to ~/.config/llmconduit/config.yaml

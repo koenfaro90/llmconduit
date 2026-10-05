@@ -484,10 +484,24 @@ pub(super) async fn handle_stream(
                 error: None,
             };
             if let Some(fleet) = &runtime.fleet {
-                let result = match (command.benchmark, command.deployment_id, command.desired) {
-                    (Some(benchmark), None, None) => fleet.benchmark_command(&benchmark).await,
-                    (None, Some(id), Some(desired)) => fleet.apply_managed(&id, &desired).await,
-                    (None, None, None) => fleet.managed_report().await,
+                let result = match (
+                    command.settings,
+                    command.benchmark,
+                    command.deployment_id,
+                    command.desired,
+                ) {
+                    (Some(settings), None, None, None) => {
+                        fleet
+                            .host_settings((!settings.is_null()).then_some(&settings))
+                            .await
+                    }
+                    (None, Some(benchmark), None, None) => {
+                        fleet.benchmark_command(&benchmark).await
+                    }
+                    (None, None, Some(id), Some(desired)) => {
+                        fleet.apply_managed(&id, &desired).await
+                    }
+                    (None, None, None, None) => fleet.managed_report().await,
                     _ => Err(crate::dashboard_fleet::FleetProxyError::new(
                         axum::http::StatusCode::BAD_REQUEST,
                         "invalid managed command",

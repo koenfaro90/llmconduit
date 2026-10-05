@@ -1126,6 +1126,8 @@ export interface ProvidersResponse {
 
 /** Dashboard-managed OpenAI-compatible provider. Credentials never cross this wire. */
 export interface ConfiguredProvider {
+  revision?:number;
+  enabled?:boolean;
   id: string;
   name: string;
   base_url: string;
@@ -1759,6 +1761,7 @@ function isProviderCacheMetrics(v: unknown): v is ProviderCacheMetrics {
 export const isProvidersResponse = (v: unknown): v is ProvidersResponse => isArrayEnvelope(v, 'providers', isProviderInventoryEntry);
 function isConfiguredProvider(v: unknown): v is ConfiguredProvider {
   return isObj(v) && isStr(v.id) && isStr(v.name) && isStr(v.base_url)
+    && (v.revision===undefined || isUint(v.revision)) && (v.enabled===undefined || typeof v.enabled==='boolean')
     && typeof v.api_key_present === 'boolean'
     && Array.isArray(v.models) && v.models.every(isProviderInventoryModel);
 }

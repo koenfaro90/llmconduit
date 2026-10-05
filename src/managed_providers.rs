@@ -21,6 +21,20 @@ use tokio::sync::RwLock;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
+fn default_enabled() -> bool {
+    true
+}
+
+#[derive(Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateConfiguredProviderRequest {
+    pub revision: u64,
+    pub name: String,
+    pub base_url: String,
+    pub enabled: bool,
+    pub api_key: Option<String>,
+}
+
 const STORE_KEY: &str = "configured_providers";
 const MAX_CONFIGURED_PROVIDERS: usize = 32;
 const MAX_PROVIDER_MODELS: usize = 512;
@@ -44,6 +58,8 @@ pub struct ConfiguredProvidersBody {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ConfiguredProviderView {
+    pub revision: u64,
+    pub enabled: bool,
     pub id: String,
     pub name: String,
     pub base_url: String,
@@ -65,6 +81,10 @@ struct StoredProviders {
 
 #[derive(Clone, Serialize, Deserialize)]
 struct StoredProvider {
+    #[serde(default)]
+    revision: u64,
+    #[serde(default = "default_enabled")]
+    enabled: bool,
     id: String,
     name: String,
     base_url: String,
@@ -170,6 +190,8 @@ impl ManagedProviderRegistry {
             return Err(AppError::bad_request("provider URL already exists"));
         }
         let stored = StoredProvider {
+            revision: 1,
+            enabled: true,
             id: format!("cfg_{}", Uuid::new_v4().simple()),
             name,
             base_url: base_url.to_string(),
@@ -194,6 +216,95 @@ impl ManagedProviderRegistry {
                 Err(err)
             }
         }
+    }
+
+    pub async fn update(
+        &self,
+        id: &str,
+        request: UpdateConfiguredProviderRequest,
+    ) -> AppResult<ConfiguredProviderView> {
+        self.ensure_loaded().await?;
+        let old = self
+            .state
+            .read()
+            .await
+            .providers
+            .iter()
+            .find(|p| p.stored.id == id)
+            .cloned()
+            .ok_or_else(|| AppError::not_found("Configured provider not found"))?;
+        if request.revision != old.stored.revision {
+            return Err(AppError::conflict(
+                "Provider changed; reload before editing",
+            ));
+        }
+        let name = validate_provider_name(&request.name)?;
+        let base_url = normalize_provider_url(&request.base_url)?;
+        let api_key = request
+            .api_key
+            .map(|v| v.trim().to_owned())
+            .unwrap_or_else(|| old.stored.api_key.clone());
+        let client = self.make_client(
+            base_url.clone(),
+            (!api_key.is_empty()).then_some(api_key.clone()),
+        );
+        let mut stored = old.stored.clone();
+        stored.name = name;
+        stored.base_url = base_url.to_string();
+        stored.api_key = api_key;
+        stored.enabled = request.enabled;
+        if stored.enabled
+            && (!old.stored.enabled
+                || stored.base_url != old.stored.base_url
+                || stored.api_key != old.stored.api_key)
+        {
+            let mut models =
+                tokio::time::timeout(MODEL_DISCOVERY_TIMEOUT, client.supported_model_catalog())
+                    .await
+                    .map_err(|_| AppError::upstream("Provider discovery timed out"))??;
+            models.sort_by(|a, b| a.id.cmp(&b.id));
+            models.dedup_by(|a, b| a.id == b.id);
+            if models.is_empty() || models.len() > MAX_PROVIDER_MODELS {
+                return Err(AppError::bad_request(
+                    "Provider must advertise 1–512 models",
+                ));
+            }
+            stored.models = models;
+        }
+        stored.revision = stored
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| AppError::bad_request("Provider revision exhausted"))?;
+        let mut state = self.state.write().await;
+        if state.providers.iter().any(|p| {
+            p.stored.id != id
+                && (p.stored.name.eq_ignore_ascii_case(&stored.name)
+                    || p.stored.base_url == stored.base_url)
+        }) {
+            return Err(AppError::bad_request("Provider name or URL already exists"));
+        }
+        let index = state
+            .providers
+            .iter()
+            .position(|p| p.stored.id == id)
+            .ok_or_else(|| AppError::not_found("Configured provider not found"))?;
+        if state.providers[index].stored.revision != request.revision {
+            return Err(AppError::conflict(
+                "Provider changed; reload before editing",
+            ));
+        }
+        let prior = std::mem::replace(
+            &mut state.providers[index],
+            ManagedProvider {
+                stored,
+                client: Arc::new(client),
+            },
+        );
+        if let Err(error) = self.persist_locked(&state).await {
+            state.providers[index] = prior;
+            return Err(error);
+        }
+        Ok(provider_view(&state.providers[index]))
     }
 
     pub async fn delete(&self, id: &str) -> AppResult<bool> {
@@ -301,29 +412,41 @@ impl ManagedProviderRegistry {
         &self,
         model: &str,
         base_models: &[UpstreamModelEntry],
-    ) -> Option<ManagedProvider> {
-        self.ensure_loaded().await.ok()?;
+    ) -> AppResult<Option<ManagedProvider>> {
+        self.ensure_loaded().await?;
         let mut base_ids = HashSet::new();
         for entry in base_models {
             base_ids.insert(entry.id.to_ascii_lowercase());
         }
         if base_ids.contains(&model.to_ascii_lowercase()) {
-            return None;
+            return Ok(None);
         }
         let state = self.state.read().await;
         let mut matches = state
             .providers
             .iter()
             .filter(|provider| {
-                provider
-                    .stored
-                    .models
-                    .iter()
-                    .any(|entry| entry.id.eq_ignore_ascii_case(model))
+                provider.stored.enabled
+                    && provider
+                        .stored
+                        .models
+                        .iter()
+                        .any(|entry| entry.id.eq_ignore_ascii_case(model))
             })
             .cloned()
             .collect::<Vec<_>>();
-        (matches.len() == 1).then(|| matches.remove(0))
+        if matches.is_empty()
+            && state.providers.iter().any(|p| {
+                !p.stored.enabled
+                    && p.stored
+                        .models
+                        .iter()
+                        .any(|m| m.id.eq_ignore_ascii_case(model))
+            })
+        {
+            return Err(AppError::not_found("Requested provider is disabled"));
+        }
+        Ok((matches.len() == 1).then(|| matches.remove(0)))
     }
 
     async fn inventory(&self) -> AppResult<Vec<ProviderInventoryEntry>> {
@@ -334,6 +457,7 @@ impl ManagedProviderRegistry {
             .await
             .providers
             .iter()
+            .filter(|provider| provider.stored.enabled)
             .map(|provider| ProviderInventoryEntry {
                 provider_id: provider.stored.id.clone(),
                 provider_name: provider.stored.name.clone(),
@@ -443,7 +567,7 @@ impl UpstreamClient for ManagedProviderUpstream {
         if let Some(provider) = self
             .registry
             .route_for_model(&request.request.model, &base_catalog)
-            .await
+            .await?
         {
             let routed = self.routed_request(request, &provider);
             ensure_provider_authorized(
@@ -476,7 +600,7 @@ impl UpstreamClient for ManagedProviderUpstream {
         if let Some(provider) = self
             .registry
             .route_for_model(&requested_model, &base_catalog)
-            .await
+            .await?
         {
             ensure_provider_authorized(
                 &request.authorization,
@@ -497,7 +621,7 @@ impl UpstreamClient for ManagedProviderUpstream {
         if let Some(provider) = self
             .registry
             .route_for_model(&request.request.model, &base_catalog)
-            .await
+            .await?
         {
             let routed = self.routed_request(request, &provider);
             ensure_provider_authorized(
@@ -520,12 +644,12 @@ impl UpstreamClient for ManagedProviderUpstream {
         let mut counts = HashMap::<String, usize>::new();
         self.registry.ensure_loaded().await?;
         let state = self.registry.state.read().await;
-        for provider in &state.providers {
+        for provider in state.providers.iter().filter(|p| p.stored.enabled) {
             for model in &provider.stored.models {
                 *counts.entry(model.id.to_ascii_lowercase()).or_default() += 1;
             }
         }
-        for provider in &state.providers {
+        for provider in state.providers.iter().filter(|p| p.stored.enabled) {
             for model in &provider.stored.models {
                 let key = model.id.to_ascii_lowercase();
                 if counts.get(&key) == Some(&1) && seen.insert(key) {
@@ -545,10 +669,15 @@ impl UpstreamClient for ManagedProviderUpstream {
     async fn backend_candidate_plan(&self, requested_model: &str) -> BackendCandidatePlan {
         let base_plan = self.base.backend_candidate_plan(requested_model).await;
         let base_catalog = self.base_catalog_or_empty().await;
-        if let Some(provider) = self
+        let provider = match self
             .registry
             .route_for_model(requested_model, &base_catalog)
             .await
+        {
+            Ok(provider) => provider,
+            Err(_) => return BackendCandidatePlan { candidates: vec![] },
+        };
+        if let Some(provider) = provider
             && let Some(model) = provider
                 .stored
                 .models
@@ -595,6 +724,8 @@ fn ensure_provider_authorized(
 
 fn provider_view(provider: &ManagedProvider) -> ConfiguredProviderView {
     ConfiguredProviderView {
+        revision: provider.stored.revision,
+        enabled: provider.stored.enabled,
         id: provider.stored.id.clone(),
         name: provider.stored.name.clone(),
         base_url: provider.stored.base_url.clone(),
@@ -793,6 +924,8 @@ mod tests {
     fn provider_views_redact_api_key() {
         let provider = ManagedProvider {
             stored: StoredProvider {
+                revision: 1,
+                enabled: true,
                 id: "cfg_1".to_string(),
                 name: "external".to_string(),
                 base_url: "https://api.example.com/v1/".to_string(),
@@ -821,6 +954,8 @@ mod tests {
     fn configured_provider_routing_honors_authorization_scope() {
         let provider = ManagedProvider {
             stored: StoredProvider {
+                revision: 1,
+                enabled: true,
                 id: "cfg_1".to_string(),
                 name: "external".to_string(),
                 base_url: "https://api.example.com/v1/".to_string(),
@@ -897,10 +1032,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn update_rotates_credentials_disables_routing_and_checks_revision() {
+        let server = MockServer::start().await;
+        for secret in ["old-key", "new-key"] {
+            Mock::given(method("GET"))
+                .and(path("/v1/models"))
+                .and(header("authorization", format!("Bearer {secret}")))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({"data":[{"id":"managed-model"}]})),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let registry = test_registry().await;
+        let added = registry
+            .add(CreateConfiguredProviderRequest {
+                name: "provider".into(),
+                base_url: server.uri(),
+                api_key: "old-key".into(),
+            })
+            .await
+            .unwrap();
+        let updated = registry
+            .update(
+                &added.id,
+                UpdateConfiguredProviderRequest {
+                    revision: added.revision,
+                    name: "renamed".into(),
+                    base_url: added.base_url.clone(),
+                    enabled: true,
+                    api_key: Some("new-key".into()),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.id, added.id);
+        assert_eq!(updated.revision, added.revision + 1);
+        assert!(!serde_json::to_string(&updated).unwrap().contains("new-key"));
+        let disabled = registry
+            .update(
+                &added.id,
+                UpdateConfiguredProviderRequest {
+                    revision: updated.revision,
+                    name: updated.name.clone(),
+                    base_url: updated.base_url.clone(),
+                    enabled: false,
+                    api_key: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(!disabled.enabled);
+        assert!(registry.inventory().await.unwrap().is_empty());
+        assert!(
+            registry
+                .route_for_model("managed-model", &[])
+                .await
+                .is_err()
+        );
+        assert!(
+            registry
+                .update(
+                    &added.id,
+                    UpdateConfiguredProviderRequest {
+                        revision: updated.revision,
+                        name: updated.name,
+                        base_url: updated.base_url,
+                        enabled: false,
+                        api_key: Some("".into())
+                    }
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            registry.list().await.unwrap()[0].revision,
+            disabled.revision
+        );
+    }
+    #[test]
+    fn update_provider_wire_roundtrip() {
+        let value = serde_json::json!({"revision":3,"name":"provider","base_url":"https://example.com/v1/","enabled":false,"api_key":null});
+        let request: UpdateConfiguredProviderRequest =
+            serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(request).unwrap(), value);
+    }
+
+    #[tokio::test]
     async fn catalog_union_preserves_base_precedence_and_routes_unique_dynamic_models() {
         let registry = test_registry().await;
         {
             let dynamic = StoredProvider {
+                revision: 1,
+                enabled: true,
                 id: "cfg_dynamic".to_string(),
                 name: "dynamic".to_string(),
                 base_url: "https://dynamic.example/v1/".to_string(),

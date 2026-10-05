@@ -16,6 +16,7 @@ export type ViewName =
   | 'overview'
   | 'chat'
   | 'providers'
+  | 'gateway-settings' | 'profiles' | 'provider-settings' | 'integrations' | 'authentication' | 'access-settings' | 'observability' | 'service' | 'host-settings'
   | 'aliases' | 'access' | 'hosts' | 'recipes' | 'models' | 'deployment' | 'benchmarks';
 
 /** Each view: the nav-tab label to click + a route-specific "ready" marker (text/regex). */
@@ -29,13 +30,22 @@ export const VIEWS: { name: ViewName; section: string; tab: string; ready: strin
   { name: 'overview', section: 'Observe', tab: 'Overview', ready: /control room/i },
   { name: 'sessions', section: 'Observe', tab: 'Sessions', ready: /all retained sessions/i },
   { name: 'chat', section: 'Chat', tab: 'Chat', ready: /^chat$/i },
-  {name:'hosts', section:'Infrastructure', tab:'Hosts', ready:/Fleet system observations/i},
+  {name:'hosts', section:'Infrastructure', tab:'Hosts', ready:/Stored Fleet history/i},
   {name:'recipes', section:'Infrastructure', tab:'Recipes', ready:/Review immutable revisions/i},
   {name:'aliases', section:'Infrastructure', tab:'Aliases', ready:/Stable client names/i},
-  {name:'models', section:'Infrastructure', tab:'Models', ready:/pinned configuration/i},
-  {name:'deployment', section:'Infrastructure', tab:'Deployment', ready:/Choose a recipe revision and host/i},
+  {name:'models', section:'Infrastructure', tab:'Models', ready:/One row per served model/i},
+  {name:'deployment', section:'Infrastructure', tab:'Deployment', ready:/Deploy recipes to ordered hosts/i},
   {name:'benchmarks', section:'Infrastructure', tab:'Benchmarks', ready:/Measure throughput and latency/i},
   { name: 'providers', section: 'Infrastructure', tab: 'Providers', ready: /provider inventory/i },
+  {name:'gateway-settings',section:'Admin',tab:'Gateway',ready:'Request limits, timeouts, replay, image caches and generation defaults.'},
+  {name:'profiles',section:'Infrastructure',tab:'Profiles & routing',ready:'Model profiles & routing'},
+  {name:'provider-settings',section:'Infrastructure',tab:'Provider settings',ready:'Edit upstream URLs, enable or disable backends, rotate credentials and configure fallback chains.'},
+  {name:'integrations',section:'Admin',tab:'Integrations',ready:'Search and vision services. Configure GitHub sign-in on Authentication.'},
+  {name:'authentication',section:'Admin',tab:'Authentication',ready:/Dashboard sign-in, SSO, sessions and legacy inference authentication/},
+  {name:'access-settings',section:'Admin',tab:'Access activation',ready:/Enable policy-backed API authorization/},
+  {name:'observability',section:'Admin',tab:'Observability',ready:/Upstream metrics, vision probes/},
+  {name:'service',section:'Admin',tab:'Service & storage',ready:/Gateway listeners, mesh controller identity/},
+  {name:'host-settings',section:'Infrastructure',tab:'Host settings',ready:/Fleet owns deployment admission/},
   { name: 'access', section: 'Admin', tab: 'Access', ready: /Access control/i },
 ];
 

@@ -85,6 +85,7 @@ export function ProvidersView() {
     mutationFn: (body: CreateConfiguredProviderRequest) => client.createConfiguredProvider(body),
     onSuccess: invalidateConfiguredProviders,
   });
+  const updateConfiguredProvider=useMutation({mutationFn:({id,...body}:{id:string;revision:number;name:string;base_url:string;enabled:boolean;api_key:string|null})=>client.updateConfiguredProvider(id,body),onSuccess:invalidateConfiguredProviders});
   const deleteConfiguredProvider = useMutation({
     mutationFn: (id: string) => client.deleteConfiguredProvider(id),
     onSuccess: invalidateConfiguredProviders,
@@ -167,9 +168,10 @@ export function ProvidersView() {
           loading={configuredProvidersQuery.isLoading}
           error={configuredProvidersQuery.error ? String(configuredProvidersQuery.error) : null}
           mutationsEnabled={mutationsEnabled}
-          busy={createConfiguredProvider.isPending || deleteConfiguredProvider.isPending}
-          mutationError={String(createConfiguredProvider.error ?? deleteConfiguredProvider.error ?? '') || null}
+          busy={createConfiguredProvider.isPending || deleteConfiguredProvider.isPending || updateConfiguredProvider.isPending}
+          mutationError={String(createConfiguredProvider.error ?? deleteConfiguredProvider.error ?? updateConfiguredProvider.error ?? '') || null}
           onCreate={(body) => createConfiguredProvider.mutate(body)}
+          onUpdate={(id,body)=>updateConfiguredProvider.mutateAsync({id,...body})}
           onDelete={(id) => deleteConfiguredProvider.mutate(id)}
         />
         <MeshAdminPanel
@@ -214,6 +216,7 @@ function ConfiguredProvidersPanel({
   mutationError,
   onCreate,
   onDelete,
+  onUpdate,
 }: {
   providers: ConfiguredProvider[];
   loading: boolean;
@@ -223,13 +226,17 @@ function ConfiguredProvidersPanel({
   mutationError: string | null;
   onCreate: (body: CreateConfiguredProviderRequest) => void;
   onDelete: (id: string) => void;
+  onUpdate:(id:string,body:{revision:number;name:string;base_url:string;enabled:boolean;api_key:string|null})=>Promise<ConfiguredProvider>;
 }) {
+  const [editing,setEditing]=useState<ConfiguredProvider|null>(null);
+  const [enabled,setEnabled]=useState(true);
+  const [clearKey,setClearKey]=useState(false);
   const [name, setName] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    onCreate({ name: name.trim(), base_url: baseUrl.trim(), api_key: apiKey });
+    if(editing){void onUpdate(editing.id,{revision:editing.revision??0,name:name.trim(),base_url:baseUrl.trim(),enabled,api_key:clearKey?'':apiKey||null}).then(()=>{setEditing(null);setName('');setBaseUrl('');setApiKey('');setClearKey(false)}).catch(()=>undefined);}else{onCreate({ name: name.trim(), base_url: baseUrl.trim(), api_key: apiKey });}
   };
 
   return (
@@ -238,7 +245,7 @@ function ConfiguredProvidersPanel({
         <div>
           <h2 className="text-sm font-semibold">Additional providers</h2>
           <p className="mt-1 text-[10px] leading-relaxed text-text-muted">
-            Add an OpenAI-compatible endpoint. LLMConduit discovers its models; API keys remain server-side.
+            Add an OpenAI-compatible endpoint. LLMConduit discovers its models; API keys remain server-side. <a className="text-accent underline" href="#/provider-settings">Gateway backend settings</a> · <a className="text-accent underline" href="#/profiles">Profiles &amp; routing</a>.
           </p>
         </div>
         {!mutationsEnabled && (
@@ -251,10 +258,11 @@ function ConfiguredProvidersPanel({
       <form className="mt-3 grid gap-2 lg:grid-cols-[minmax(10rem,0.7fr)_minmax(16rem,1.4fr)_minmax(12rem,1fr)_auto]" onSubmit={submit}>
         <input aria-label="Provider name" required value={name} onChange={(event) => setName(event.target.value)} placeholder="provider name" className={INPUT} />
         <input aria-label="Provider URL" required type="url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.example.com/v1" className={INPUT} />
-        <input aria-label="Provider API key" required type="password" autoComplete="new-password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="API key" className={INPUT} />
-        <Button type="submit" disabled={!mutationsEnabled || busy || !name.trim() || !baseUrl.trim() || !apiKey}>Discover &amp; add</Button>
+        <input aria-label="Provider API key" required={!editing} type="password" autoComplete="new-password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={editing?"Leave unchanged to keep credential":"API key"} className={INPUT} />
+        <Button type="submit" disabled={!mutationsEnabled || busy || !name.trim() || !baseUrl.trim() || (!editing&&!apiKey)}>{editing?"Save provider":"Discover & add"}</Button>
       </form>
 
+      {editing&&<div className="mt-2 flex flex-wrap gap-3 text-xs"><label className="flex gap-2"><input type="checkbox" checked={enabled} onChange={e=>setEnabled(e.target.checked)}/>Provider enabled</label><label className="flex gap-2"><input type="checkbox" checked={clearKey} onChange={e=>setClearKey(e.target.checked)}/>Clear credential</label><Button variant="ghost" onClick={()=>{setEditing(null);setName('');setBaseUrl('');setApiKey('');setClearKey(false)}}>Cancel edit</Button></div>}
       {loading && <p className="mt-3 text-xs text-text-muted">Loading configured providers...</p>}
       {error && <p className="mt-3 text-xs text-status-down">Could not load configured providers: {error}</p>}
       {mutationError && <p className="mt-3 text-xs text-status-down">Provider change failed: {mutationError}</p>}
@@ -271,10 +279,10 @@ function ConfiguredProvidersPanel({
                   <div className="truncate text-xs font-medium text-text">{provider.name}</div>
                   <div className="mt-1 truncate font-mono text-[10px] text-text-muted" title={provider.base_url}>{provider.base_url}</div>
                 </div>
-                <Button type="button" variant="danger" className="px-2 py-1 text-[10px]" disabled={!mutationsEnabled || busy} onClick={() => onDelete(provider.id)}>Remove</Button>
+                <div className="flex gap-1"><Button type="button" variant="ghost" disabled={!mutationsEnabled||busy} onClick={()=>{setEditing(provider);setName(provider.name);setBaseUrl(provider.base_url);setApiKey('');setEnabled(provider.enabled!==false);setClearKey(false)}}>Edit</Button><Button type="button" variant="danger" className="px-2 py-1 text-[10px]" disabled={!mutationsEnabled || busy} onClick={() => onDelete(provider.id)}>Remove</Button></div>
               </div>
               <div className="mt-2 text-[10px] text-text-muted">
-                {provider.models.length} model{provider.models.length === 1 ? '' : 's'} discovered · key {provider.api_key_present ? 'configured' : 'missing'}
+                {provider.models.length} model{provider.models.length === 1 ? '' : 's'} discovered · {provider.enabled===false?'disabled':'enabled'} · revision {provider.revision??0} · key {provider.api_key_present ? 'configured' : 'missing'}
               </div>
               <div className="mt-2 flex flex-wrap gap-1">
                 {provider.models.map((model) => <code key={model.id} className="rounded bg-panel px-1.5 py-0.5 text-[10px] text-text">{model.id}</code>)}

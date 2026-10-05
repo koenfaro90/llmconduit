@@ -348,6 +348,21 @@ impl AuthzService {
             groups: authority.policy.groups_for(&credential.principal_id),
         })
     }
+    pub fn import_legacy_keys(
+        &self,
+        specs: &[crate::client_auth::VirtualKeySpec],
+    ) -> Result<(), String> {
+        let Some(inner) = &self.inner else {
+            return Ok(());
+        };
+        let mut store = inner.store.lock().map_err(|_| "Auth store unavailable")?;
+        store.import_legacy_keys(specs)?;
+        *inner
+            .authority
+            .write()
+            .map_err(|_| "Auth authority unavailable")? = Arc::new(store.load_authority()?);
+        Ok(())
+    }
     pub fn from_config(config: &AuthConfig) -> Result<Self, String> {
         if config.mode == AuthMode::Disabled {
             return Ok(Self::default());
@@ -416,8 +431,12 @@ impl AuthzService {
             return Ok(None);
         };
         let raw = presented_key(headers).ok_or(AuthFailure::Missing)?;
-        key_prefix(raw).map_err(|_| AuthFailure::Invalid)?;
+        if raw.len() > 16384 {
+            return Err(AuthFailure::Invalid);
+        }
         let digest = inner.pepper.digest(raw);
+        use sha2::Digest;
+        let legacy_digest: [u8; 32] = sha2::Sha256::digest(raw.as_bytes()).into();
         let authority = inner
             .authority
             .read()
@@ -425,11 +444,21 @@ impl AuthzService {
             .clone();
         let mut matched = None;
         for credential in &authority.credentials {
-            if digest_matches(&credential.digest, &digest) {
+            if digest_matches(
+                &credential.digest,
+                if credential.legacy_sha256 {
+                    &legacy_digest
+                } else {
+                    &digest
+                },
+            ) {
                 matched = Some(credential);
             }
         }
         let credential = matched.ok_or(AuthFailure::Invalid)?;
+        if !credential.legacy_sha256 {
+            key_prefix(raw).map_err(|_| AuthFailure::Invalid)?;
+        }
         let usage_admission = inner.usage_persistence.admit()?;
         let request_id = AuthRequestId::new();
         let identity = PolicyIdentity {
@@ -1043,6 +1072,54 @@ mod tests {
     use axum::http::{HeaderMap, HeaderValue};
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn explicit_legacy_migration_preserves_client_secret_scope_and_revocation() {
+        use sha2::Digest;
+        let config = AuthConfig {
+            mode: AuthMode::Enforce,
+            store_path: std::path::PathBuf::from(":memory:"),
+        };
+        let service = AuthzService::open_enforced(
+            &config,
+            b"migration-pepper".to_vec(),
+            Some("llmc_bootstrap_test"),
+        )
+        .unwrap();
+        let raw = "old-client-secret-without-llmc-prefix";
+        let specs = vec![crate::client_auth::VirtualKeySpec {
+            id: "original-key-id".into(),
+            label: Some("Existing client".into()),
+            owner_id: Some("original-user".into()),
+            secret_hash: format!("sha256:{}", hex::encode(sha2::Sha256::digest(raw))),
+            allowed_models: vec!["public-v1".into()],
+        }];
+        service.import_legacy_keys(&specs).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            HeaderValue::from_str(&format!("Bearer {raw}")).unwrap(),
+        );
+        let context = service.authenticate(&headers).unwrap().unwrap();
+        assert_eq!(context.key_id, "original-key-id");
+        assert_eq!(context.principal_id, "original-user");
+        assert!(context.allows_model("chat", "public-v1"));
+        assert!(!context.allows_model("chat", "private-v1"));
+        assert!(!matches!(
+            context.management_actor(),
+            ManagementActor::Bootstrap
+        ));
+        let mut narrowed = specs.clone();
+        narrowed[0].allowed_models = vec!["private-v1".into()];
+        service.import_legacy_keys(&narrowed).unwrap();
+        let changed = service.authenticate(&headers).unwrap().unwrap();
+        assert!(!changed.allows_model("chat", "public-v1"));
+        assert!(changed.allows_model("chat", "private-v1"));
+        service.import_legacy_keys(&[]).unwrap();
+        assert!(service.authenticate(&headers).is_err());
+        service.import_legacy_keys(&specs).unwrap();
+        assert!(service.authenticate(&headers).is_err());
+    }
 
     #[tokio::test]
     async fn key_lifecycle_uses_rich_snapshot_and_revokes_immediately() {

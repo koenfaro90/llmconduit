@@ -18,7 +18,7 @@ Single-host retirement requires the current generation to be observed unloaded,
 retains recipe evidence and never partially removes distributed groups.
 Memory validation evidence records measured startup/load peaks and explicit margins per
 resolved revision and tested hardware; do not label an untested size as calibrated.
-SQL-managed aliases bootstrap once and freeze routing/profile/replay per request; see `docs/dashboard-configuration.md` for remaining configuration gaps.
+SQL-managed aliases bootstrap once and freeze routing/profile/replay per request; see `docs/dashboard-configuration.md` for SQL-managed settings pages and supervised stage/apply/rollback.
 See `docs/fleet-dashboard-management.md` and `docs/production-traffic.md`. Adds server-side Brave web search, per-model defaults, nested failover/model routing across upstreams, replay caching, request-log analysis, and an optional debug UI.
 
 Use the code layout below as the architecture map when touching unfamiliar areas.

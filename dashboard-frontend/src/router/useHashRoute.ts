@@ -5,9 +5,9 @@
  */
 import { useSyncExternalStore } from 'react';
 
-export type RouteName = 'flows' | 'requests' | 'sessions' | 'throughput' | 'activity' | 'chat' | 'account' | 'topology' | 'sankey' | 'theater' | 'overview' | 'providers' | 'access' | 'hosts' | 'recipes' | 'models' | 'deployment' | 'benchmarks' | 'traffic' | 'aliases';
+export type RouteName = 'flows' | 'requests' | 'sessions' | 'throughput' | 'activity' | 'chat' | 'account' | 'topology' | 'sankey' | 'theater' | 'overview' | 'providers' | 'access' | 'hosts' | 'recipes' | 'models' | 'deployment' | 'benchmarks' | 'traffic' | 'aliases' | 'gateway-settings' | 'profiles' | 'provider-settings' | 'integrations' | 'authentication' | 'access-settings' | 'observability' | 'service' | 'host-settings';
 
-export const ROUTES: RouteName[] = ['flows', 'requests', 'sessions', 'throughput', 'activity', 'chat', 'account', 'topology', 'sankey', 'theater', 'overview', 'providers', 'access', 'hosts', 'recipes', 'models', 'deployment', 'benchmarks', 'traffic', 'aliases'];
+export const ROUTES: RouteName[] = ['flows', 'requests', 'sessions', 'throughput', 'activity', 'chat', 'account', 'topology', 'sankey', 'theater', 'overview', 'providers', 'access', 'hosts', 'recipes', 'models', 'deployment', 'benchmarks', 'traffic', 'aliases','gateway-settings','profiles','provider-settings','integrations','authentication','access-settings','observability','service','host-settings'];
 
 const DEFAULT_ROUTE: RouteName = 'chat';
 

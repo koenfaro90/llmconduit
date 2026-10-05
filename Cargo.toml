@@ -41,7 +41,7 @@ http-body = "1"
 include_dir = "0.7"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["charset", "http2", "json", "rustls-tls", "stream"] }
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.31", features = ["bundled", "backup"] }
 serde = { version = "1", features = ["derive"] }
 # `preserve_order`: JSON object key order is semantic for clients we proxy. Constrained decoding
 # emits JSON Schema properties in schema order, and tool parameter order shapes generation;
@@ -57,7 +57,7 @@ toml = { version = "1", default-features = false, features = ["parse", "serde", 
 sha2 = "0.10"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "postgres", "migrate", "macros"] }
 thiserror = "2"
-tokio = { version = "1", features = ["fs", "io-util", "macros", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "rt-multi-thread", "process", "signal", "sync", "time"] }
 tokio-stream = "0.1"
 # D6 AbortHub: `CancellationToken` for server-side flow kill. Race-free `cancelled()`
 # future (no lost-wakeup, unlike a hand-rolled `Notify`) composed alongside every

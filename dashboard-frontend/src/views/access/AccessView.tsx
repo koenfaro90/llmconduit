@@ -239,7 +239,7 @@ export function AccessView() {
         <Panel className="max-w-2xl p-5">
           <h1 className="text-xl font-semibold text-text">Access control is not enabled</h1>
           <p className="mt-2 text-sm leading-relaxed text-text-muted">
-            The dashboard is healthy, but policy-backed inference authorization is disabled. Set <code className="font-mono text-text">auth.mode: enforce</code> and configure its store before creating identities, keys, or policies.
+            The dashboard is healthy, but policy-backed inference authorization is disabled. Open <a className="text-accent underline" href="#/access-settings">Access activation</a> to enable enforcement and migrate existing client keys.
           </p>
         </Panel>
       </div>

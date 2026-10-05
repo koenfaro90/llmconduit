@@ -146,6 +146,9 @@ pub async fn reload_client_keys(gateway: &Gateway) -> Result<usize, String> {
         specs = merge_key_specs(specs, specs_from_sql(store.api_key_auth_specs().await?));
     }
     let count = specs.len();
+    if std::env::var("LLMCONDUIT_AUTH_MIGRATE_LEGACY_KEYS").is_ok_and(|v| v == "true") {
+        gateway.authz().import_legacy_keys(&specs)?;
+    }
     gateway
         .client_auth()
         .replace(gateway.client_auth_required(), specs)?;

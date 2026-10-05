@@ -30,6 +30,7 @@ pub(crate) struct StoredCredential {
     pub principal_id: String,
     pub prefix: String,
     pub digest: [u8; 32],
+    pub legacy_sha256: bool,
 }
 
 pub(crate) struct StoredAuthority {
@@ -82,6 +83,28 @@ impl CreatedApiKey {
 }
 
 impl AuthStore {
+    /// Copy the closed policy database to a new private file before a managed
+    /// path change. Existing destinations are never overwritten.
+    pub fn backup_into_new(source: &Path, destination: &Path) -> Result<(), String> {
+        use std::os::unix::fs::OpenOptionsExt;
+        let _file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(destination)
+            .map_err(|_| "Policy-store destination must be a new writable file")?;
+        let source =
+            Connection::open_with_flags(source, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(|_| "Cannot open source policy store")?;
+        let mut destination =
+            Connection::open(destination).map_err(|_| "Cannot open destination policy store")?;
+        rusqlite::backup::Backup::new(&source, &mut destination)
+            .and_then(|backup| {
+                backup.run_to_completion(128, std::time::Duration::from_millis(10), None)
+            })
+            .map_err(|_| "Could not copy policy store".to_string())
+    }
+
     pub fn open(path: &Path) -> Result<Self, String> {
         let connection = Connection::open(path)
             .map_err(|err| format!("failed to open auth store {}: {err}", path.display()))?;
@@ -218,6 +241,102 @@ impl AuthStore {
         self.connection
             .query_row("SELECT COUNT(*) FROM auth_api_keys", [], |row| row.get(0))
             .map_err(db)
+    }
+
+    /// Existing clients keep their SHA-256 credentials during explicit migration;
+    /// newly created and rotated keys continue to use peppered HMAC digests.
+    pub fn import_legacy_keys(
+        &mut self,
+        specs: &[crate::client_auth::VirtualKeySpec],
+    ) -> Result<(), String> {
+        let now = Utc::now().timestamp();
+        let tx = self.connection.transaction().map_err(db)?;
+        for spec in specs {
+            if spec
+                .allowed_models
+                .iter()
+                .any(|m| m.contains('*') || m.contains('?'))
+            {
+                return Err("Legacy model names containing wildcard characters cannot be migrated as patterns".into());
+            }
+            if tx
+                .query_row(
+                    "SELECT COUNT(*) FROM auth_api_keys WHERE id=?1",
+                    [&spec.id],
+                    |r| r.get::<_, i64>(0),
+                )
+                .map_err(db)?
+                != 0
+            {
+                // Keep SQL model restrictions current without undoing policy revocation
+                // or replacing a rotated credential. Only the migration-owned scopes change.
+                if tx
+                    .query_row(
+                        "SELECT COUNT(*) FROM auth_legacy_key_digests WHERE key_id=?1",
+                        [&spec.id],
+                        |r| r.get::<_, i64>(0),
+                    )
+                    .map_err(db)?
+                    != 0
+                {
+                    let policy = format!("legacy_{}", spec.id);
+                    tx.execute("DELETE FROM auth_policy_scopes WHERE policy_id=?1 AND dimension='requested_model'", [&policy]).map_err(db)?;
+                    for model in &spec.allowed_models {
+                        tx.execute("INSERT INTO auth_policy_scopes(policy_id,dimension,matcher) VALUES(?1,'requested_model',?2)", params![policy,model]).map_err(db)?;
+                    }
+                }
+                continue;
+            }
+            let digest = hex::decode(
+                spec.secret_hash
+                    .strip_prefix("sha256:")
+                    .ok_or("Invalid legacy key digest")?,
+            )
+            .map_err(|_| "Invalid legacy key digest")?;
+            if digest.len() != 32 {
+                return Err("Invalid legacy key digest".into());
+            }
+            let principal = spec
+                .owner_id
+                .clone()
+                .unwrap_or_else(|| format!("legacy_{}", spec.id));
+            let policy = format!("legacy_{}", spec.id);
+            tx.execute("INSERT OR IGNORE INTO auth_principals(id,kind,display_name,enabled,created_at) VALUES(?1,'user',?2,1,?3)",params![principal,spec.label.as_deref().unwrap_or("Migrated client"),now]).map_err(db)?;
+            tx.execute("INSERT INTO auth_api_keys(id,principal_id,name,prefix,hmac_sha256_digest,enabled,created_at) VALUES(?1,?2,?3,'legacy',?4,1,?5)",params![spec.id,principal,spec.label.as_deref().unwrap_or("Migrated client key"),digest,now]).map_err(db)?;
+            tx.execute(
+                "INSERT INTO auth_legacy_key_digests(key_id,digest) VALUES(?1,?2)",
+                params![spec.id, digest],
+            )
+            .map_err(db)?;
+            tx.execute("INSERT INTO auth_policies(id,name,effect,enabled,created_at,updated_at) VALUES(?1,?2,'allow',1,?3,?3)",params![policy,format!("Migrated {}",spec.label.as_deref().unwrap_or(&spec.id)),now]).map_err(db)?;
+            tx.execute("INSERT INTO auth_policy_subjects(policy_id,subject_kind,subject_id) VALUES(?1,'key',?2)",params![policy,spec.id]).map_err(db)?;
+            for model in &spec.allowed_models {
+                tx.execute("INSERT INTO auth_policy_scopes(policy_id,dimension,matcher) VALUES(?1,'requested_model',?2)",params![policy,model]).map_err(db)?;
+            }
+        }
+        // SQL key revocation must remain effective after migration. Policy-store
+        // revocations are never undone by a subsequent SQL import.
+        let ids: std::collections::HashSet<_> = specs.iter().map(|s| s.id.as_str()).collect();
+        let legacy: Vec<String> = {
+            let mut q = tx
+                .prepare("SELECT key_id FROM auth_legacy_key_digests")
+                .map_err(db)?;
+            q.query_map([], |r| r.get(0))
+                .map_err(db)?
+                .collect::<Result<_, _>>()
+                .map_err(db)?
+        };
+        for id in legacy {
+            if !ids.contains(id.as_str()) {
+                tx.execute(
+                    "UPDATE auth_api_keys SET enabled=0,revoked_at=?2 WHERE id=?1",
+                    params![id, now],
+                )
+                .map_err(db)?;
+            }
+        }
+        bump_epoch(&tx)?;
+        tx.commit().map_err(db)
     }
 
     pub fn insert_bootstrap_key(&mut self, raw: &str, digest: &[u8; 32]) -> Result<(), String> {
@@ -442,7 +561,7 @@ impl AuthStore {
         let now = Utc::now().timestamp();
         let epoch = current_epoch(&self.connection)?;
         let mut stmt = self.connection.prepare(
-            "SELECT id,principal_id,prefix,hmac_sha256_digest FROM auth_api_keys WHERE enabled=1 AND (expires_at IS NULL OR expires_at>?1)"
+            "SELECT k.id,k.principal_id,k.prefix,COALESCE(l.digest,k.hmac_sha256_digest),l.key_id FROM auth_api_keys k LEFT JOIN auth_legacy_key_digests l ON l.key_id=k.id WHERE k.enabled=1 AND (k.expires_at IS NULL OR k.expires_at>?1)"
         ).map_err(db)?;
         let credentials = stmt
             .query_map([now], |row| {
@@ -459,6 +578,7 @@ impl AuthStore {
                     principal_id: row.get(1)?,
                     prefix: row.get(2)?,
                     digest,
+                    legacy_sha256: row.get::<_, Option<String>>(4)?.is_some(),
                 })
             })
             .map_err(db)?
@@ -1618,6 +1738,7 @@ const SCHEMA: &str = r#"
 PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS auth_principals(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind IN('user','service_account')),display_name TEXT NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,created_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS auth_api_keys(id TEXT PRIMARY KEY,principal_id TEXT NOT NULL REFERENCES auth_principals(id),name TEXT NOT NULL,prefix TEXT NOT NULL,hmac_sha256_digest BLOB NOT NULL UNIQUE,enabled INTEGER NOT NULL DEFAULT 1,created_at INTEGER NOT NULL,expires_at INTEGER,last_used_at INTEGER,revoked_at INTEGER);
+CREATE TABLE IF NOT EXISTS auth_legacy_key_digests(key_id TEXT PRIMARY KEY REFERENCES auth_api_keys(id),digest BLOB NOT NULL);
 CREATE INDEX IF NOT EXISTS auth_api_keys_prefix_idx ON auth_api_keys(prefix);
 CREATE TABLE IF NOT EXISTS auth_groups(id TEXT PRIMARY KEY,name TEXT NOT NULL UNIQUE,enabled INTEGER NOT NULL DEFAULT 1,created_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS auth_group_members(group_id TEXT NOT NULL REFERENCES auth_groups(id) ON DELETE CASCADE,principal_id TEXT NOT NULL REFERENCES auth_principals(id) ON DELETE CASCADE,PRIMARY KEY(group_id,principal_id));

@@ -1,45 +1,99 @@
-# Dashboard configuration ownership
+# Dashboard configuration management
 
-Audit dated 2026-10-05. The dashboard should be the operator interface for all
-configuration changes. SQL stores authoritative desired settings; files become
-bootstrap inputs and export/restore artifacts. A form is incomplete unless its
-Save/Apply action changes the running service or schedules the required restart.
+The dashboard manages gateway configuration in SQL. Start the controller with
+`llmconduit supervise --config bootstrap.yaml --state-dir /data/managed-settings
+--with-debug-ui`. The first start imports YAML and supported environment overrides;
+subsequent starts read SQL. Files remain bootstrap and recovery inputs.
 
-## Current gaps
+| Page | Configuration |
+| --- | --- |
+| Infrastructure → Aliases | Public names, ordered profile fallback; live SQL management |
+| Infrastructure → Profiles & routing | Operational and legacy profiles, served-model remapping, ordered backend choices, templates, context/capability defaults, unknown-model handling |
+| Infrastructure → Provider settings | Bootstrap backends, credentials, upstream/fallback chains; staged restart |
+| Infrastructure → Providers | SQL provider discovery, create/edit/disable, credential replace/clear; live revisioned updates |
+| Infrastructure → Host settings | Per-metric interval/off, RAM/VRAM admission budgets, sharing and container allowlists; Fleet applies locally |
+| Admin → Access activation | Enable/disable policy-backed authorization, migrate existing virtual keys, policy database path |
+| Admin → Gateway | Timeouts, request/SSE bounds, cooldown, replay/image caches, generation defaults, prefix and pricing |
+| Admin → Integrations | Search and vision configuration with masked credentials |
+| Admin → Authentication | Dashboard login/SSO/session/origin environment and legacy API authentication; account passwords remain on Account/Users |
+| Admin → Observability | Engine metrics, native-vision probes, session detection, capture/logging and request/media retention |
+| Admin → Service & storage | Listener, mesh configuration, SQL/JSONL/disabled history, database connection and persistence queue |
 
-| Area | Current source and limitation | UI home / required behavior |
-| --- | --- | --- |
-| Client model aliases | Infrastructure → Aliases; SQL `model_aliases` after initial YAML import | Live create, rename, target/fallback editing and delete are implemented. YAML/config sync cannot overwrite SQL. |
-| Policy-backed API authorization | Gateway `auth.mode`, `auth.store_path`, environment pepper/bootstrap credential; initialized by `AuthzService::from_config` | Admin → Access needs an activation/migration flow, not instructions to edit YAML. Import existing keys, prepare identities/policies, validate operator access, then enforce. Disabling/reenabling and changing the policy store must also be supported. |
-| Model profiles and routing | `control_plane.operational` backend/profile arrays; gateway `model_profiles`, templates, `model_routes`, legacy upstream/fallback arrays | Models needs a profile/defaults editor and Providers needs routing, edit, disable and credential rotation. Include served-model remaps, ordered backend choices, unknown-model policy, context/vision/tool/role settings, prefixes and generation defaults. Recipe engine/container settings already belong to Recipes. |
-| Gateway behavior | `PersistedConfig`: request/connect timeouts, body/SSE bounds, cooldowns, replay/image caches, unsupported-image behavior and completion defaults | Admin → Settings, grouped by purpose, with schema validation, effective values and source attribution. |
-| Integrations and secrets | Brave/search config, image-agent vision endpoint/model, provider credentials; dashboard GitHub SSO and login settings in environment | Settings → Integrations/Authentication plus write-only credential fields in Providers. Mask stored secrets; permit replace/clear without returning their values. Preserve environment overrides or migrate them explicitly so a successful save cannot be silently ignored. |
-| Host telemetry and machine policy | Fleet arguments/environment/Compose for sampling; local device, RAM/VRAM budgets, allowlists and sharing policy | Host detail → Settings: per-metric interval/off, host budgets/sharing/allowlists. Persist desired state centrally; Fleet validates and applies locally. Distinguish agent-local collection, mesh reporting and SQL history cadence. |
-| Observability | Gateway metrics scrape/observer URLs, metric polling config, native-vision probe settings, harness/session detection, request capture/logging and media retention settings | Settings → Observability; expose intervals, capture and supported storage options. Fleet sampling controls belong to Hosts. |
-| Service/bootstrap settings | Bind/listen addresses, mesh identity/controller/worker addresses and heartbeats, dashboard origin/session configuration, SQL connection/storage and deployment environment | Settings → Service: validate, stage, show restart impact and apply through the host's deployment operator. Connection/session changes require an explicit reconnect/result workflow. Existing identities and database contents must survive. |
+Existing Recipes, Deployment, Benchmarks, Traffic, Access, Accounts and mesh
+administration continue using their existing APIs. Editors reuse shared panels,
+tables, status icons and local Monaco JSON editing, with mobile layouts.
 
-Existing functional management includes Recipes/revisions/sizes and evidence,
-Deployment/physical GPU placement, Benchmarks, Traffic admission policies,
-mesh node/model administration, SQL-configured provider creation/removal,
-dashboard users/keys, and policy-backed users/groups/roles/policies when enabled.
-Host metric selection and table/filter preferences are viewing preferences,
-not agent sampling or machine admission settings.
+## Stage and apply
 
-The Access page's file reference is specifically `auth.mode: enforce`.
-Production's policy-backed authorization summary currently reports disabled.
-That is separate from existing virtual-key API authentication and dashboard login;
-adding the activation UI must not revoke valid existing clients accidentally.
+Edit settings, validate and stage, review the revision, then **Apply staged
+configuration**. Apply includes all staged pages. Revision checks prevent stale
+editors overwriting newer settings; a failed save retains the local draft.
+Reads require administrator access; writes also require the existing session and
+CSRF protection. Configuration administration remains available when ordinary
+mutations are disabled, so an administrator can reenable them through Authentication.
 
-## Apply contract
+The supervisor validates the complete candidate with its exact environment,
+drains the child gateway for up to 35 seconds, starts the candidate, and checks
+its private revision-specific readiness endpoint. Previously connected mesh hosts
+must reconnect when the controller remains enabled. Failure restores the last
+applied revision. The page polls for the result after reconnecting. This is a
+single-controller restart with a brief availability interruption, not HA rollout.
 
-Every editor needs a validated, revisioned desired setting, a preview of the
-change, source/override visibility, and observed applied revision. Live changes
-must have an immutable per-request snapshot where routing/model policy is involved.
-Cold settings need a staged restart with readiness verification and rollback;
-showing a saved value without applying it is not sufficient. Host execution stays
-with Fleet. Central reconciliation and rollout selection stay with LLMConduit.
+Settings show document values, running scalar values where available, environment
+source overrides and applied revision. Editing a matching field removes its
+known environment override. Secrets are never returned: leave the marker unchanged
+to keep, enter a replacement, or explicitly clear. Array entries retain IDs and
+restore credentials by ID rather than position. Referenced `api_key_env` variables
+are managed as provider credentials. Unknown document fields survive round trips.
 
-Recommended implementation order: Access activation and key migration;
-backend/profile management; host settings; gateway/integration/observability
-settings; staged service/database/identity changes. This table records gaps,
-not a claim that the missing editors or restart workflow already exist.
+## Access and data preservation
+
+First policy activation generates a private pepper/bootstrap credential and imports
+active YAML/SQL virtual-key hashes without changing their raw client secrets,
+identities or model restrictions. Newly issued/rotated keys use HMAC. SQL revocation
+and scope changes update migrated keys; import never undoes policy revocation.
+Wildcard-like legacy model names are rejected instead of widening their scope.
+Production policy enforcement stays **Off** until an administrator explicitly applies it.
+
+Changing SQL storage copies accounts, credential hashes, aliases, deployment/recipe
+state and history into an **empty** reachable destination after the child stops.
+The destination transaction rejects populated databases and the source is retained.
+If a later readiness check fails, the original database remains active; use a fresh
+empty destination on retry. Policy and mesh state SQLite moves use native backup;
+controller identity moves preserve the original bytes and reject conflicting identities.
+The initial management SQL database remains the supervisor's settings authority and
+must remain available after a history/database move. Keep the last SQL connection
+when disabling history so account and model management continue using that database.
+
+Listener changes can update Traefik's internal upstream through the optional
+`LLMCONDUIT_MANAGED_INGRESS_FILE` deployment mount. DNS, certificates, external
+published ports, OS mounts and worker bootstrap addresses remain deployment prerequisites.
+Changing the public origin may require signing in at the new origin. Mesh port changes
+that prevent enrolled workers reconnecting roll back; configure host transport first.
+Build-time dashboard embedding and Fleet's initial host-owner remote-management opt-in
+are installation settings, not runtime dashboard controls.
+
+## Fleet ownership
+
+Fleet exposes bearer-protected GET/PUT `/v1/settings`, forwarded over the pinned mesh.
+Writes require host-owner `--allow-remote-settings`, disabled by default upstream.
+The dashboard shows this capability. Fleet validates fresh hardware capacity, immutable
+GPU inventory and all loaded/pending workloads before saving a revision privately next
+to durable desired state. No inference container is restarted by a settings edit.
+Cadence changes replace the collector timers; GPU/container helpers are supervised.
+Observed revision advances after a new sample. Accepted settings are also stored in
+central SQL. Offline hosts reject writes; there is no offline queued settings rollout.
+
+Agent collection can be 100ms–60s for host/GPU/storage metrics, and 1s–60s for
+container metrics. Mesh reporting remains 5s and SQL host history defaults to 15s;
+fast local sampling does not retain every intermediate sample. These are distinct
+cadences, clearly identified on Host settings. Remote edits supersede bootstrap
+sampling and policy files on restart; use the page or central telemetry helper thereafter.
+
+## Validation
+
+Rust suite and OpenAPI route inventory, Clippy, SQL migration/key-scope tests,
+Fleet race/vet checks, 784 frontend tests, typed/linted frontend build and desktop
+page baselines cover these APIs. Browser workflows cover explicit stage/apply,
+Monaco add/format without accidental form submission and all nine pages at 390px.
+Native/live rollout results are recorded in the operations repository.

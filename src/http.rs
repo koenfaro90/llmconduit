@@ -179,6 +179,10 @@ pub fn build_router(gateway: Arc<Gateway>, options: RouterOptions) -> Router {
     let router = Router::new()
         .merge(inference_routes)
         .route("/health", get(get_health))
+        .route(
+            "/internal/configuration-ready",
+            get(crate::dashboard_settings::ready),
+        )
         .route("/openapi.json", get(get_openapi))
         .route("/", {
             let dashboard = options.with_debug_ui && options.register_protected_routes;
@@ -278,6 +282,18 @@ fn protected_routes(gateway: Arc<Gateway>, auth: Arc<DashboardAuth>) -> Router<A
             get(crate::dashboard_traffic::get).post(crate::dashboard_traffic::save),
         )
         .route(
+            "/dashboard/api/hosts/{id}/settings",
+            get(crate::dashboard_host_settings::get).put(crate::dashboard_host_settings::save),
+        )
+        .route(
+            "/dashboard/api/settings/apply",
+            post(crate::dashboard_settings::apply),
+        )
+        .route(
+            "/dashboard/api/settings/{scope}",
+            get(crate::dashboard_settings::get).post(crate::dashboard_settings::stage),
+        )
+        .route(
             "/dashboard/api/aliases",
             get(crate::dashboard_aliases::get).post(crate::dashboard_aliases::save),
         )
@@ -348,7 +364,8 @@ fn protected_routes(gateway: Arc<Gateway>, auth: Arc<DashboardAuth>) -> Router<A
         )
         .route(
             "/dashboard/api/configured-providers/{id}",
-            delete(delete_configured_provider),
+            delete(delete_configured_provider)
+                .put(crate::dashboard_api::update_configured_provider),
         )
         .route(
             "/dashboard/api/fleet",

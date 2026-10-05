@@ -4,6 +4,10 @@ use utoipa::ToSchema;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
 pub struct FleetHostSnapshot {
+    #[serde(default)]
+    pub configuration_revision: u64,
+    #[serde(default)]
+    pub remote_settings_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collection: Option<HostCollection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -584,6 +588,14 @@ mod tests {
     }
     #[test]
     fn fleet_host_heartbeat_round_trip_and_legacy_compatibility() {
+        let mut settings = fixture();
+        settings.configuration_revision = 12;
+        settings.remote_settings_enabled = true;
+        assert_eq!(
+            serde_json::from_value::<FleetHostSnapshot>(serde_json::to_value(&settings).unwrap())
+                .unwrap(),
+            settings
+        );
         use crate::mesh::protocol::{Heartbeat, validate_heartbeat};
         let heartbeat = Heartbeat {
             sequence: 1,

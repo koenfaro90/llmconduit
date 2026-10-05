@@ -69,6 +69,8 @@ pub struct DesiredDeployment {
 #[serde(deny_unknown_fields)]
 pub struct ManagedCommand {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub benchmark: Option<crate::dashboard_benchmarks::BenchmarkCommand>,
     pub deployment_id: Option<String>,
     pub desired: Option<Value>,
@@ -885,6 +887,7 @@ async fn reconcile_deployment(
         .manage_fleet(
             endpoint,
             ManagedCommand {
+                settings: None,
                 benchmark: None,
                 deployment_id: Some(id.to_string()),
                 desired: Some(desired),
@@ -1118,7 +1121,21 @@ mod tests {
     }
     #[test]
     fn management_wire_fields_round_trip() {
+        let settings = ManagedCommand {
+            settings: Some(
+                serde_json::json!({"revision":7,"configuration":{"policy":{},"metrics":{"cpu":"100ms"}}}),
+            ),
+            benchmark: None,
+            deployment_id: None,
+            desired: None,
+        };
+        assert_eq!(
+            serde_json::from_value::<ManagedCommand>(serde_json::to_value(&settings).unwrap())
+                .unwrap(),
+            settings
+        );
         let command = ManagedCommand {
+            settings: None,
             benchmark: None,
             deployment_id: Some("fixture".into()),
             desired: Some(serde_json::json!({"generation":1,"model":{"image":"fixture"}})),

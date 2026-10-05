@@ -1128,6 +1128,150 @@ impl SqlStore {
         Ok(store)
     }
 
+    /// Copy a quiesced gateway database into an empty, migrated destination.
+    /// Target writes are one transaction; an occupied target is never overwritten.
+    pub async fn copy_into_empty(&self, target: &Self) -> StoreResult<()> {
+        use futures::TryStreamExt;
+        use sqlx::{Column, ValueRef};
+        const TABLES: &[&str] = &[
+            "users",
+            "backends",
+            "model_profiles",
+            "aliases",
+            "api_keys",
+            "profile_backends",
+            "alias_profiles",
+            "key_aliases",
+            "audit_log",
+            "requests",
+            "request_events",
+            "settings",
+            "backend_metrics",
+            "content_blobs",
+            "request_items",
+            "sessions",
+            "display_counters",
+            "host_metrics",
+            "recipe_evidence",
+        ];
+        #[derive(Clone)]
+        enum Cell {
+            Text(Option<String>),
+            Number(Option<i64>),
+        }
+        async fn rows(store: &SqlStore, sql: &str) -> StoreResult<(Vec<String>, Vec<Vec<Cell>>)> {
+            let table = sql
+                .split_whitespace()
+                .nth(3)
+                .ok_or("Invalid storage migration query")?;
+            let kinds:Vec<String>=match &store.pool {
+                SqlPool::Sqlite(p)=>sqlx::query(&format!("PRAGMA table_info({table})")).fetch_all(p).await.map_err(store_error)?.iter().map(|r|r.try_get::<String,_>(2).map(|s|s.to_uppercase()).map_err(store_error)).collect::<Result<_,_>>()?,
+                SqlPool::Postgres(p)=>sqlx::query_scalar::<_,String>("SELECT data_type FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=$1 ORDER BY ordinal_position").bind(table).fetch_all(p).await.map_err(store_error)?.iter().map(|s|s.to_uppercase()).collect(),
+            };
+            macro_rules! collect {
+                ($pool:expr) => {{
+                    let mut result = Vec::new();
+                    let mut names = Vec::new();
+                    let mut stream = sqlx::query(sql).fetch($pool);
+                    while let Some(row) = stream.try_next().await.map_err(store_error)? {
+                        if names.is_empty() {
+                            names = row.columns().iter().map(|c| c.name().to_owned()).collect();
+                        }
+                        let mut cells = Vec::new();
+                        for (index, _column) in row.columns().iter().enumerate() {
+                            let kind = kinds
+                                .get(index)
+                                .ok_or("Missing migration column metadata")?
+                                .as_str();
+                            let raw = row.try_get_raw(index).map_err(store_error)?;
+                            cells.push(match kind {
+                                "TEXT" | "VARCHAR" => Cell::Text(if raw.is_null() {
+                                    None
+                                } else {
+                                    Some(row.try_get(index).map_err(store_error)?)
+                                }),
+                                "BIGINT" | "INT8" | "INTEGER" | "INT" | "NULL" => {
+                                    Cell::Number(if raw.is_null() {
+                                        None
+                                    } else {
+                                        Some(row.try_get(index).map_err(store_error)?)
+                                    })
+                                }
+                                _ => return Err("Unsupported storage migration column type".into()),
+                            });
+                        }
+                        result.push(cells);
+                    }
+                    Ok((names, result))
+                }};
+            }
+            match &store.pool {
+                SqlPool::Sqlite(p) => collect!(p),
+                SqlPool::Postgres(p) => collect!(p),
+            }
+        }
+        macro_rules! transfer {
+            ($pool:expr) => {{
+                let mut tx = $pool.begin().await.map_err(store_error)?;
+                for table in TABLES {
+                    let count: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+                        .fetch_one(&mut *tx)
+                        .await
+                        .map_err(store_error)?;
+                    if *table != "display_counters" && count != 0 {
+                        return Err("Destination contains data; select an empty database".into());
+                    }
+                }
+                sqlx::query("DELETE FROM display_counters")
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(store_error)?;
+                for table in TABLES {
+                    let mut offset = 0;
+                    loop {
+                        let (columns, batch) = rows(
+                            self,
+                            &format!("SELECT * FROM {table} LIMIT 512 OFFSET {offset}"),
+                        )
+                        .await?;
+                        if batch.is_empty() {
+                            break;
+                        }
+                        let sql = format!(
+                            "INSERT INTO {table} ({}) VALUES ({})",
+                            columns.join(","),
+                            (1..=columns.len())
+                                .map(|i| if target.postgres() {
+                                    format!("${i}")
+                                } else {
+                                    "?".into()
+                                })
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        );
+                        for row in &batch {
+                            let mut q = sqlx::query(&sql);
+                            for cell in row {
+                                q = match cell {
+                                    Cell::Text(v) => q.bind(v),
+                                    Cell::Number(v) => q.bind(v),
+                                }
+                            }
+                            q.execute(&mut *tx).await.map_err(store_error)?;
+                        }
+                        offset += batch.len();
+                    }
+                }
+                tx.commit().await.map_err(store_error)?;
+                Ok(())
+            }};
+        }
+        match &target.pool {
+            SqlPool::Sqlite(p) => transfer!(p),
+            SqlPool::Postgres(p) => transfer!(p),
+        }
+    }
+
     pub async fn close(&self) {
         match &self.pool {
             SqlPool::Sqlite(pool) => pool.close().await,
@@ -4321,6 +4465,54 @@ impl PersistenceQueue {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn empty_destination_migration_preserves_keys_settings_history_and_rejects_overwrite() {
+        let source = SqlStore::connect_sqlite("sqlite::memory:").await.unwrap();
+        let destination = SqlStore::connect_sqlite("sqlite::memory:").await.unwrap();
+        source
+            .set_setting("future-config", "{\"unknown\":true}")
+            .await
+            .unwrap();
+        source
+            .put_api_key(
+                "existing-key",
+                "original-client-secret",
+                Some("client"),
+                None,
+                &["model-a".into()],
+                "test",
+            )
+            .await
+            .unwrap();
+        for id in 0..520 {
+            source
+                .begin_request(request(&format!("copy-{id}")))
+                .await
+                .unwrap();
+        }
+        source.copy_into_empty(&destination).await.unwrap();
+        assert_eq!(
+            destination.get_setting("future-config").await.unwrap(),
+            source.get_setting("future-config").await.unwrap()
+        );
+        assert!(
+            destination
+                .verify_api_key("original-client-secret")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(destination.get_request("copy-519").await.unwrap().is_some());
+        assert!(source.copy_into_empty(&destination).await.is_err());
+        assert!(
+            destination
+                .verify_api_key("original-client-secret")
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
     #[tokio::test]
     async fn stored_host_history_is_deduplicated_bounded_and_endpoint_isolated() {
         use super::{MetricSample, PersistenceStore, SqlStore};

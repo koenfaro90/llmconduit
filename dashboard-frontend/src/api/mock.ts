@@ -1,3 +1,4 @@
+import type {SettingsView,HostSettings,Json} from '../views/settings/settingsModel';
 import type { AliasesResponse } from "../views/infrastructure/aliasModel";
 import {blankConfig,blankRuntime,type TrafficResponse} from '../views/traffic/trafficModel';
 let MOCK_TRAFFIC:TrafficResponse={revision:0,config:blankConfig(),runtime:blankRuntime(),scope:'single gateway process'};
@@ -74,6 +75,18 @@ const initialAliases = (): AliasesResponse => ({revision: 0, persistent: true, t
   {id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', name: 'wielick-small', profiles: ['33333333-3333-4333-8333-333333333333'], error: null},
 ]});
 let MOCK_ALIASES = initialAliases();
+const initialSettings=():Record<string,SettingsView>=>Object.fromEntries(Object.entries({
+ gateway:{'/request_timeout_secs':600,'/connect_timeout_secs':10,'/max_replay_entries':1024,'/max_request_body_bytes':10485760,'/flatten_content':false},
+ profiles:{'/control_plane/operational/model_profiles':[{id:'11111111-1111-4111-8111-111111111111',name:'glm-5.3',backends:['backend-one'],upstream_model:'GLM-5.3-NVFP4'}],'/model_profiles':{},'/model_profile_templates':{},'/model_routes':{}},
+ providers:{'/control_plane/operational/backends':[{id:'backend-one',name:'GLM',enabled:true,base_url:'http://gpu02:8000/v1',api_key:'[keep existing secret]'}],'/upstreams':[]},
+ integrations:{'/brave_base_url':'https://api.search.brave.com/res/v1','/brave_api_key':'[keep existing secret]','/image_agent_enabled':false,'/vision_url':null},
+ authentication:{'/control_plane/auth':{require:true,conversation_id_header:'x-conversation-id'}},
+ access:{'/auth':{mode:'disabled',store_path:'/data/auth.sqlite3'}},
+ observability:{'/control_plane/metrics':{enabled:true,scrape_interval_secs:15,backends:{}},'/turn_capture_dir':null},
+ service:{'/bind_addr':'0.0.0.0:4000','/mesh':{controller:{enabled:true}},'/control_plane/storage/backend':'postgres','/control_plane/storage/url':'[keep existing secret]'},
+} as Record<string,Record<string,Json>>).map(([scope,values])=>[scope,{revision:0,applied_revision:0,status:'applied',error:null,values,active_values:structuredClone(values),environment:(scope==='gateway'?{LLMCONDUIT_REQUEST_TIMEOUT_SECS:'600'}:scope==='authentication'?{LLMCONDUIT_DASHBOARD_SESSION_KEY:'[keep existing secret]'}:{}) as Record<string,string>,impact:'Gateway restart with readiness verification and rollback.',source:'SQL managed settings'}]));
+let MOCK_SETTINGS=initialSettings();
+let MOCK_HOST_SETTINGS:Record<string,HostSettings>={};
 const MOCK_CSRF = 'mock-csrf-token';
 
 let AUTH_USERS: AuthUser[] = [
@@ -590,6 +603,26 @@ export const mockFetch: typeof fetch = async (input, init): Promise<Response> =>
   const path = url.replace(/^https?:\/\/[^/]+/, '').split('?')[0] ?? url;
   const qs = new URLSearchParams(url.includes('?') ? url.slice(url.indexOf('?')) : '');
 
+  if(path==='/dashboard/api/settings/apply'&&method==='POST'){
+    if(!headerValue(init?.headers,'X-CSRF-Token'))return json({error:'missing csrf'},403);
+    const body=JSON.parse(String(init?.body??'{}'));
+    if(body.revision!==MOCK_SETTINGS.gateway!.revision)return json({error:'Configuration changed; reload'},409);
+    Object.values(MOCK_SETTINGS).forEach(s=>{s.applied_revision=s.revision;s.status='applied';s.active_values=structuredClone(s.values)});
+    return json({revision:body.revision,status:'applied'},202);
+  }
+  const settingScope=path.match(/^\/dashboard\/api\/settings\/([^/]+)$/)?.[1];
+  if(settingScope){const current=MOCK_SETTINGS[settingScope];if(!current)return json({error:'unknown scope'},404);if(method==='GET')return json(current);if(method==='POST'){
+    if(!headerValue(init?.headers,'X-CSRF-Token'))return json({error:'missing csrf'},403);
+    const body=JSON.parse(String(init?.body??'{}'));
+    if(body.revision!==current.revision)return json({error:'Configuration changed; reload'},409);
+    current.values=body.values;for(const [key,value]of Object.entries(body.environment??{})){if(value===null)delete current.environment[key];else current.environment[key]=String(value)}
+    Object.values(MOCK_SETTINGS).forEach(s=>{s.revision++;s.status='staged'});return json(current);
+  }}
+  const hostSettings=path.match(/^\/dashboard\/api\/hosts\/([^/]+)\/settings$/)?.[1];
+  if(hostSettings){const current=MOCK_HOST_SETTINGS[hostSettings]??={revision:0,applied_revision:0,enabled:true,configuration:{metrics:{cpu:'5s',memory:'5s',gpu_temperature:'5s',container_cpu:'5s',disk:'30s'},policy:{memory_budget_mib:65536,allow_gpu_sharing:false,users:['1000:1000'],images:['registry/model:latest'],gpu_indices:['0'],gpu_memory:{'0':{total_mib:98304,budget_mib:90000,unified_memory:false}}}}};if(method==='GET')return json(current);if(method==='PUT'){
+    if(!headerValue(init?.headers,'X-CSRF-Token'))return json({error:'missing csrf'},403);
+    const body=JSON.parse(String(init?.body??'{}'));if(body.revision!==current.revision)return json({error:'Host changed; reload'},409);current.revision++;current.applied_revision=current.revision;current.configuration=body.configuration;return json(current);
+  }}
   if (path === '/dashboard/api/aliases' && method === 'GET') return json(MOCK_ALIASES);
   if (path === '/dashboard/api/aliases' && method === 'POST') {
     if (!headerValue(init?.headers, 'X-CSRF-Token')) return json({error: 'missing csrf'}, 403);
@@ -853,6 +886,12 @@ export const mockFetch: typeof fetch = async (input, init): Promise<Response> =>
     return json(provider, 201);
   }
   const configuredProviderDelete = path.match(/^\/dashboard\/api\/configured-providers\/([^/]+)$/);
+  if(configuredProviderDelete&&method==='PUT'){
+    if(!headerValue(init?.headers,'X-CSRF-Token'))return json({error:'missing csrf'},403);
+    const id=decodeURIComponent(configuredProviderDelete[1]??'');const provider=CONFIGURED_PROVIDERS.find(p=>p.id===id);if(!provider)return json({error:'Provider not found'},404);
+    const body=JSON.parse(String(init?.body??'{}'));if(body.revision!==(provider.revision??0))return json({error:'Provider changed; reload'},409);
+    Object.assign(provider,{name:body.name,base_url:body.base_url,enabled:body.enabled,revision:(provider.revision??0)+1});if(body.api_key!==null)provider.api_key_present=!!body.api_key;return json(provider);
+  }
   if (configuredProviderDelete && method === 'DELETE') {
     const csrf = headerValue(init?.headers, 'X-CSRF-Token');
     if (!csrf) return json({ error: 'missing csrf' }, 403);
@@ -1367,6 +1406,7 @@ export const MOCK_KEYS: ApiKeyRecord[] = [
 /** Reset the mutable mock account state (tests). */
 export function resetMockAccounts(): void {
   MOCK_ALIASES = initialAliases();
+  MOCK_SETTINGS=initialSettings();MOCK_HOST_SETTINGS={};
   MOCK_TRAFFIC={revision:0,config:blankConfig(),runtime:blankRuntime(),scope:'single gateway process'};
   mockSessionUser = null;
   mockHistoryCleared = false;

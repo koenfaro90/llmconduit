@@ -51,6 +51,120 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     match cli.command {
+        Some(Commands::Supervise { config, state_dir }) => {
+            let path = resolve_config_path(config)?;
+            let loaded = load_runtime_config(&path, &[])?;
+            let backend = storage_backend_name(loaded.storage.backend);
+            let url = loaded
+                .storage
+                .url
+                .as_deref()
+                .ok_or("SQL storage is required for managed configuration")?;
+            let document = ControlPlaneConfig::from_yaml_str(&std::fs::read_to_string(&path)?)?;
+            let raw = serde_json::to_value(document.to_yaml_value()?)?;
+            let mut complete = serde_json::to_value(document.gateway())?;
+            for (k, v) in raw.as_object().ok_or("Configuration must be a mapping")? {
+                complete[k] = v.clone();
+            }
+            // Serialize default settings explicitly for editable pages while retaining
+            // the lossless source mapping and unknown future fields above.
+            for (name, value) in [
+                (
+                    "auth",
+                    serde_json::to_value(document.gateway().auth.clone())?,
+                ),
+                (
+                    "mesh",
+                    serde_json::to_value(document.gateway().mesh.clone())?,
+                ),
+                (
+                    "model_profiles",
+                    serde_json::to_value(&document.gateway().model_profiles)?,
+                ),
+                (
+                    "model_profile_templates",
+                    serde_json::to_value(&document.gateway().model_profile_templates)?,
+                ),
+                (
+                    "model_routes",
+                    serde_json::to_value(&document.gateway().model_routes)?,
+                ),
+                (
+                    "upstreams",
+                    serde_json::to_value(&document.gateway().upstreams)?,
+                ),
+                (
+                    "fallback_upstreams",
+                    serde_json::to_value(&document.gateway().fallback_upstreams)?,
+                ),
+                (
+                    "upstream_chat_kwargs",
+                    serde_json::to_value(&document.gateway().upstream_chat_kwargs)?,
+                ),
+                (
+                    "price_table",
+                    serde_json::to_value(&document.gateway().price_table)?,
+                ),
+            ] {
+                if complete.get(name).is_none() {
+                    complete[name] = value;
+                }
+            }
+            if complete
+                .pointer("/auth/store_path")
+                .and_then(serde_json::Value::as_str)
+                == Some("llmconduit-auth.sqlite3")
+            {
+                complete["auth"]["store_path"] = serde_json::json!("/data/auth.sqlite3");
+            }
+            let section = document.control_plane();
+            for (path, value) in [
+                (
+                    "/control_plane/storage",
+                    serde_json::to_value(&section.storage)?,
+                ),
+                ("/control_plane/auth", serde_json::to_value(&section.auth)?),
+                (
+                    "/control_plane/metrics",
+                    serde_json::to_value(&section.metrics)?,
+                ),
+                (
+                    "/control_plane/vision_probe",
+                    serde_json::to_value(&section.vision_probe)?,
+                ),
+                (
+                    "/control_plane/sessions",
+                    serde_json::to_value(&section.sessions)?,
+                ),
+            ] {
+                if complete.pointer(path).is_none() {
+                    llmconduit::dashboard_settings::set(&mut complete, path, value);
+                }
+            }
+            let referenced = llmconduit::dashboard_settings::referenced_environment(&complete);
+            let bootstrap = llmconduit::dashboard_settings::Specification {
+                document: complete,
+                environment: std::env::vars()
+                    .filter(|(k, _)| {
+                        llmconduit::dashboard_settings::managed_env(k) || referenced.contains(k)
+                    })
+                    .collect(),
+            };
+            llmconduit::configuration_supervisor::run(
+                backend,
+                url,
+                bootstrap,
+                state_dir,
+                app_options.with_debug_ui,
+            )
+            .await
+            .map_err(Into::into)
+        }
+        Some(Commands::CheckConfig { config }) => {
+            let path = resolve_config_path(config)?;
+            load_runtime_config(&path, &[]).map_err(|_| "Configuration validation failed")?;
+            Ok(())
+        }
         Some(Commands::Configure { config }) => {
             let path = resolve_config_path(config)?;
             let _ = run_configure_flow(path.clone())?;
@@ -290,6 +404,9 @@ async fn run_server(
         client_auth,
         runtime,
     )?;
+    if std::env::var("LLMCONDUIT_AUTH_MIGRATE_LEGACY_KEYS").is_ok_and(|v| v == "true") {
+        llmconduit::accounts::reload_client_keys(&gateway).await?;
+    }
     if let Some(registry) = gateway.alias_registry() {
         registry.snapshot().await?;
     }
@@ -444,6 +561,26 @@ async fn prepare_control_plane_runtime(
             Some(PersistenceQueue::spawn(writer, capacity))
         }
     };
+    // Management remains in SQL even when request persistence is disabled/JSONL.
+    if persistence_store.is_none()
+        && let (Ok(backend), Ok(url)) = (
+            std::env::var("LLMCONDUIT_MANAGED_STORE_BACKEND"),
+            std::env::var("LLMCONDUIT_MANAGED_STORE_URL"),
+        )
+    {
+        let (management_backend, management_url) = match loaded.storage.url.as_deref() {
+            Some(connection) if connection.starts_with("sqlite:") => ("sqlite", connection),
+            Some(connection)
+                if connection.starts_with("postgres:") || connection.starts_with("postgresql:") =>
+            {
+                ("postgres", connection)
+            }
+            _ => (backend.as_str(), url.as_str()),
+        };
+        persistence_store = Some(
+            llmconduit::dashboard_settings::connect(management_backend, management_url).await?,
+        );
+    }
     // Accounts: bootstrap the first admin from the environment, merge the SQL
     // keys into the live registry (YAML ∪ SQL), and note whether users exist.
     let mut users_configured = false;

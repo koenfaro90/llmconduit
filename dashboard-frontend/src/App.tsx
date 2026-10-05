@@ -59,7 +59,7 @@ function Dashboard() {
       {/* Access is current authorization state, not a historical telemetry surface. */}
       {route !== 'access' && route !== 'chat' && route !== 'requests' && route !== 'traffic' && <Scrubber socket={socket} />}
       {/* view router */}
-      <main className="flex flex-1 overflow-hidden">
+      <main className="flex min-h-0 flex-1 overflow-hidden">
         <ActiveView />
       </main>
     </div>

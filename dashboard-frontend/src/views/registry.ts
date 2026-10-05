@@ -1,3 +1,5 @@
+import {GatewaySettingsView,ProfilesSettingsView,ProvidersSettingsView,IntegrationsSettingsView,AuthenticationSettingsView,AccessSettingsView,ObservabilitySettingsView,ServiceSettingsView} from './settings/SettingsView';
+import {HostSettingsView} from './settings/HostSettingsView';
 /** Route → view-component map. Kept out of the .tsx so react-refresh stays happy. */
 import type { ComponentType } from 'react';
 import type { RouteName } from '../router/useHashRoute';
@@ -45,4 +47,14 @@ export const VIEW_BY_ROUTE: Record<RouteName, ComponentType> = {
   aliases: AliasesView,
   deployment: DeploymentView,
   access: AccessView,
+  'gateway-settings': GatewaySettingsView,
+  'profiles': ProfilesSettingsView,
+  'provider-settings': ProvidersSettingsView,
+  'integrations': IntegrationsSettingsView,
+  'authentication': AuthenticationSettingsView,
+  'access-settings': AccessSettingsView,
+  'observability': ObservabilitySettingsView,
+  'service': ServiceSettingsView,
+  'host-settings': HostSettingsView,
+
 };

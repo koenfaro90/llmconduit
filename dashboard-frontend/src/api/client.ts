@@ -1,3 +1,4 @@
+import {isSettingsView,isHostSettings,type SettingsView,type HostSettings,type Json} from '../views/settings/settingsModel';
 import { isAliasesResponse, type AliasesResponse, type AliasMapping } from "../views/infrastructure/aliasModel";
 import { isBenchmarkRun, type BenchmarkRun, type BenchmarkOptions } from '../views/infrastructure/benchmarkModel';
 import { isTrafficResponse, type TrafficResponse, type TrafficConfig, type Backend, type EngineSample } from '../views/traffic/trafficModel';
@@ -231,6 +232,11 @@ export class DashboardClient {
     return this.request<T>(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
   }
 
+  settings(scope:string):Promise<SettingsView>{return this.request(`/settings/${encodeURIComponent(scope)}`,undefined,isSettingsView);}
+  stageSettings(scope:string,body:{revision:number;values:Record<string,Json>;environment:Record<string,string|null>}):Promise<SettingsView>{return this.mutate(`/settings/${encodeURIComponent(scope)}`,'POST',body).then(value=>{if(!isSettingsView(value))throw new Error('Invalid settings response');return value;});}
+  applySettings(revision:number):Promise<unknown>{return this.mutate('/settings/apply','POST',{revision});}
+  hostSettings(id:string):Promise<HostSettings>{return this.request(`/hosts/${encodeURIComponent(id)}/settings`,undefined,isHostSettings);}
+  saveHostSettings(id:string,value:HostSettings):Promise<HostSettings>{return this.mutate(`/hosts/${encodeURIComponent(id)}/settings`,'PUT',{revision:value.revision,configuration:value.configuration}).then(value=>{if(!isHostSettings(value))throw new Error('Invalid host settings response');return value;});}
   aliases(): Promise<AliasesResponse> { return this.request('/aliases', undefined, isAliasesResponse); }
   saveAliases(revision: number, aliases: AliasMapping[]): Promise<AliasesResponse> {
     return this.mutate('/aliases', 'POST', { revision, aliases }).then(value => {
@@ -360,6 +366,7 @@ export class DashboardClient {
     });
   }
 
+  updateConfiguredProvider(id:string,body:{revision:number;name:string;base_url:string;enabled:boolean;api_key:string|null}):Promise<ConfiguredProvider>{return this.mutate(`/configured-providers/${encodeURIComponent(id)}`,'PUT',body).then(value=>{if(!isConfiguredProviderResponse(value))throw new Error('Invalid configured provider response');return value;});}
   deleteConfiguredProvider(id: string): Promise<void> {
     return this.mutate(`/configured-providers/${encodeURIComponent(id)}`, 'DELETE');
   }

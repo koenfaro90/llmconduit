@@ -208,6 +208,23 @@ impl FleetClient {
         self.request_body(method, path, timeout, None).await
     }
 
+    pub async fn host_settings(
+        &self,
+        body: Option<&serde_json::Value>,
+    ) -> Result<serde_json::Value, FleetProxyError> {
+        self.request_body(
+            if body.is_some() {
+                reqwest::Method::PUT
+            } else {
+                reqwest::Method::GET
+            },
+            "/v1/settings",
+            FLEET_REQUEST_TIMEOUT,
+            body,
+        )
+        .await
+    }
+
     pub async fn managed_report(&self) -> Result<serde_json::Value, FleetProxyError> {
         let mut value: serde_json::Value = self
             .request(reqwest::Method::GET, "/v1/managed/deployments")

@@ -1526,6 +1526,29 @@ pub async fn create_configured_provider(
     }
 }
 
+#[utoipa::path(put,path="/dashboard/api/configured-providers/{id}",tag="dashboard",params(("id"=String,Path)),request_body=crate::managed_providers::UpdateConfiguredProviderRequest,responses((status=200,body=serde_json::Value),(status=403),(status=409),(status=503)),security(("session"=[])))]
+pub async fn update_configured_provider(
+    State(gateway): State<Arc<Gateway>>,
+    Extension(auth): Extension<Arc<DashboardAuth>>,
+    session: AuthSession,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(payload): Json<crate::managed_providers::UpdateConfiguredProviderRequest>,
+) -> Response {
+    if let Some(response) =
+        dashboard_admin_denial(&session).or_else(|| dashboard_mutation_denial(&auth, &headers))
+    {
+        return response;
+    }
+    let Some(registry) = gateway.managed_providers() else {
+        return dashboard_error(StatusCode::SERVICE_UNAVAILABLE, "SQL storage is required");
+    };
+    match registry.update(&id, payload).await {
+        Ok(provider) => json_no_store(StatusCode::OK, &provider),
+        Err(err) => dashboard_error(err.status_code(), err.client_message),
+    }
+}
+
 /// `DELETE /dashboard/api/configured-providers/{id}` — remove one provider.
 #[utoipa::path(
     delete,
