@@ -141,6 +141,16 @@ Profiles are considered against the resolved catalog model, the configured upstr
 
 `upstreams: [...]` switches the app to model-routing mode. `/v1/models` exposes the ordered union of primary upstream model catalogs plus fallback `exposed_model` aliases. Exact model id wins; normalized alias routing uses `canonical_model_key` and only succeeds when it maps to one unique id. Blank/missing/unavailable/ambiguous models default to the first model in the first non-empty provider catalog.
 
+## Settings forms
+
+Use the shared `SettingsField` and `settingsSchema` controls for configuration.
+Keep supported choices, units and bounds aligned with Rust/Fleet types; preserve
+unknown fields and unset/false distinctions. Use readable backend names for ordered
+references. Retain credential markers on edits; copies need fresh IDs and their own
+credentials. Physical host/GPU identity and totals are read-only. Advanced Monaco
+is optional, and invalid advanced edits must block save. Server-side stage/preflight
+remains the authoritative validator; routine live-apply behavior must not change.
+
 ## Testing
 
 - Integration tests: `tests/gateway.rs` (one file, ~5700 lines, 79 `#[tokio::test]` functions). Use `MockUpstream` (`tests/gateway.rs:51-99`) for in-process gateway tests, `MockSearch` for Brave behavior, `PendingChunkUpstream` for cancellation, or wiremock for HTTP-level routing/failover/proxy behavior.

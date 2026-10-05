@@ -22,7 +22,21 @@ then managed settings own those fields. Files remain bootstrap and recovery inpu
 
 Existing Recipes, Deployment, Benchmarks, Traffic, Access, Accounts and mesh
 administration continue using their existing APIs. Editors reuse shared panels,
-tables, status icons and local Monaco JSON editing, with mobile layouts.
+tables and status icons, with mobile layouts. Settings use labeled controls, supported
+choice lists, units, numeric bounds and inline help. Nested settings have dedicated
+fields; profiles and providers use shared tables with add/copy/edit and ordered
+backend selectors showing readable names. Copies receive fresh IDs and do not
+reuse masked credentials. Existing custom fields survive structured edits.
+
+Host settings use numeric sampling intervals with unit selectors and Collect
+toggles, plus RAM/GPU budget and allowlist controls. Physical GPU totals and GPU
+identity are read-only; Fleet still validates policy changes against loaded workloads.
+
+Monaco remains behind **Advanced JSON** for backend extensions and unusual
+configuration shapes. Invalid advanced edits block saving. Startup overrides are
+separate from document controls; sign-in and SSO options have readable labels.
+Changing a document setting removes its existing override. Server-side validation,
+revision checks and stage/apply semantics remain authoritative.
 
 ## Stage and apply
 
