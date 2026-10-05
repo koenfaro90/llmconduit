@@ -3,7 +3,8 @@
 The dashboard manages gateway configuration in SQL. Start the controller with
 `llmconduit supervise --config bootstrap.yaml --state-dir /data/managed-settings
 --with-debug-ui`. The first start imports YAML and supported environment overrides;
-subsequent starts read SQL. Files remain bootstrap and recovery inputs.
+subsequent starts read SQL. Legacy SQL routing precedence is imported once,
+then managed settings own those fields. Files remain bootstrap and recovery inputs.
 
 | Page | Configuration |
 | --- | --- |

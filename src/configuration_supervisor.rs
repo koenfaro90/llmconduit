@@ -383,6 +383,12 @@ pub async fn run(
             .await
             .map_err(|_| "Could not secure settings directory")?;
     }
+    // Install handlers before the first child becomes reachable: a shutdown
+    // during startup must be queued for graceful child cleanup, not orphan it.
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .map_err(|_| "Could not watch shutdown")?;
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .map_err(|_| "Could not watch shutdown")?;
     let store = settings::connect(backend, url).await?;
     if store.get_setting(settings::KEY).await?.is_none() {
         settings::validate(&bootstrap)?;
@@ -422,10 +428,8 @@ pub async fn run(
     }
     publish_ingress(&initial.active).await?;
     let mut timer = tokio::time::interval(Duration::from_secs(1));
-    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .map_err(|_| "Could not watch shutdown")?;
     loop {
-        tokio::select! {_=term.recv()=>{stop(&mut child).await;return Ok(())},_=tokio::signal::ctrl_c()=>{stop(&mut child).await;return Ok(())},_=timer.tick()=>{}}
+        tokio::select! {_=term.recv()=>{stop(&mut child).await;return Ok(())},_=interrupt.recv()=>{stop(&mut child).await;return Ok(())},_=timer.tick()=>{}}
         let (raw, mut state) = settings::read(store.as_ref()).await?;
         if state.pending {
             let result = preflight(&state.draft, &dir, backend, url).await;

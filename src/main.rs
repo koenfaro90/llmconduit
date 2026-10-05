@@ -141,6 +141,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     llmconduit::dashboard_settings::set(&mut complete, path, value);
                 }
             }
+            let management = llmconduit::dashboard_settings::connect(backend, url).await?;
+            // Import prior SQL routing precedence once. Managed revisions then
+            // own those same fields, rather than silently reapplying legacy rows.
+            if management
+                .get_setting(llmconduit::dashboard_settings::KEY)
+                .await?
+                .is_none()
+                && let Some(legacy) = management.load_legacy_operational().await?
+            {
+                let operational = match legacy {
+                    LegacyOperationalRead::SettingsDocument(raw) => {
+                        OperationalConfig::from_stored(&raw)?
+                    }
+                    LegacyOperationalRead::Relational(operational) => operational,
+                };
+                let value = serde_json::to_value(operational)?;
+                for (key, value) in value
+                    .as_object()
+                    .ok_or("Invalid legacy operational state")?
+                {
+                    llmconduit::dashboard_settings::set(
+                        &mut complete,
+                        &format!("/control_plane/operational/{key}"),
+                        value.clone(),
+                    );
+                }
+            }
             let referenced = llmconduit::dashboard_settings::referenced_environment(&complete);
             let bootstrap = llmconduit::dashboard_settings::Specification {
                 document: complete,
@@ -536,7 +563,9 @@ async fn prepare_control_plane_runtime(
             let (requests, sessions) = sql.display_number_watermarks().await?;
             display_numbers =
                 llmconduit::control_plane_store::DisplayNumbers::new(requests, sessions);
-            if let Some(legacy) = sql.load_legacy_operational().await? {
+            if std::env::var("LLMCONDUIT_MANAGED_REVISION").is_err()
+                && let Some(legacy) = sql.load_legacy_operational().await?
+            {
                 let operational = match legacy {
                     LegacyOperationalRead::SettingsDocument(document) => {
                         OperationalConfig::from_stored(&document).map_err(|error| {
