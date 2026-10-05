@@ -98,3 +98,7 @@ Fleet race/vet checks, 784 frontend tests, typed/linted frontend build and deskt
 page baselines cover these APIs. Browser workflows cover explicit stage/apply,
 Monaco add/format without accidental form submission and all nine pages at 390px.
 Native/live rollout results are recorded in the operations repository.
+
+The native lifecycle harness is reproducible with a built release binary:
+`python3 tests/managed_settings_runtime.py`. It uses a temporary private SQLite
+store and fake loopback upstream; it reads no production credentials or configuration.

@@ -87,7 +87,7 @@ pub async fn get(
     if let Some(r) = authorize_mesh_admin_read(&auth, &session, &headers) {
         return r;
     }
-    forward(&gateway, &id, Value::Null).await
+    forward(&gateway, &id, json!({})).await
 }
 #[utoipa::path(put,path="/dashboard/api/hosts/{id}/settings",params(("id"=String,Path)),request_body=Value,tag="dashboard",responses((status=200,body=Value),(status=400),(status=403),(status=409),(status=503)))]
 pub async fn save(

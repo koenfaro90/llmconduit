@@ -549,7 +549,7 @@ fn view(settings: &Settings, scope: &str) -> Option<Value> {
         })
         .collect();
     Some(
-        json!({"revision":settings.revision,"applied_revision":settings.applied_revision,"status":settings.status,"error":settings.error,"values":values,"active_values":active,"environment":environment,"impact":"Gateway restart; existing streams drain for up to 30 seconds. Failed readiness rolls back. Aliases and database records are retained.","source":"SQL managed settings","available_environment":KNOWN_ENVIRONMENT.iter().map(|s|s.to_string()).chain(referenced_environment(&settings.draft.document)).filter(|name|environment_scope(&settings.draft,name)==scope).collect::<std::collections::BTreeSet<_>>()}),
+        json!({"revision":settings.revision,"applied_revision":settings.applied_revision,"status":settings.status,"error":settings.error,"values":values,"active_values":active,"environment":environment,"impact":"Gateway restart; existing streams drain for up to 35 seconds. Failed readiness rolls back. Aliases and database records are retained.","source":"SQL managed settings","available_environment":KNOWN_ENVIRONMENT.iter().map(|s|s.to_string()).chain(referenced_environment(&settings.draft.document)).filter(|name|environment_scope(&settings.draft,name)==scope).collect::<std::collections::BTreeSet<_>>()}),
     )
 }
 fn error(status: StatusCode, message: &str) -> Response {

@@ -492,7 +492,9 @@ pub(super) async fn handle_stream(
                 ) {
                     (Some(settings), None, None, None) => {
                         fleet
-                            .host_settings((!settings.is_null()).then_some(&settings))
+                            .host_settings(crate::dashboard_management::host_settings_body(
+                                &settings,
+                            ))
                             .await
                     }
                     (None, Some(benchmark), None, None) => {

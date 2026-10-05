@@ -75,6 +75,11 @@ pub struct ManagedCommand {
     pub deployment_id: Option<String>,
     pub desired: Option<Value>,
 }
+/// `{}` is the explicit read command: JSON null would deserialize an Option
+/// as absent and fall through to a deployment report instead of host settings.
+pub fn host_settings_body(settings: &Value) -> Option<&Value> {
+    (!settings.is_null() && !settings.as_object().is_some_and(|v| v.is_empty())).then_some(settings)
+}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ManagedReply {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1121,6 +1126,19 @@ mod tests {
     }
     #[test]
     fn management_wire_fields_round_trip() {
+        let read = ManagedCommand {
+            settings: Some(serde_json::json!({})),
+            benchmark: None,
+            deployment_id: None,
+            desired: None,
+        };
+        let decoded: ManagedCommand =
+            serde_json::from_value(serde_json::to_value(&read).unwrap()).unwrap();
+        assert_eq!(decoded, read);
+        assert!(host_settings_body(decoded.settings.as_ref().unwrap()).is_none());
+        assert!(
+            host_settings_body(&serde_json::json!({"revision":0,"configuration":{}})).is_some()
+        );
         let settings = ManagedCommand {
             settings: Some(
                 serde_json::json!({"revision":7,"configuration":{"policy":{},"metrics":{"cpu":"100ms"}}}),
