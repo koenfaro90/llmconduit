@@ -241,7 +241,7 @@ function ConfiguredProvidersPanel({
 
   return (
     <Panel className="p-4" data-testid="configured-providers-panel">
-      <PanelHeader label="Additional providers" help="A provider is an external inference API endpoint. LLMConduit discovers its available models and retains its credential server-side. Gateway backend settings configure the core routing endpoints." actions={<Button type="submit" form={formId} disabled={!mutationsEnabled || busy || !name.trim() || !baseUrl.trim() || (!editing&&!apiKey)}>{editing?"Save provider":"Discover & add"}</Button>}><div>
+      <PanelHeader label="Additional providers" help="A provider is an external inference API endpoint. LLMConduit discovers its available models and retains its credential server-side. Gateway backend settings configure the core routing endpoints." actions={<><Button type="submit" form={formId} disabled={!mutationsEnabled || busy || !name.trim() || !baseUrl.trim() || (!editing&&!apiKey)}>{editing?"Save provider":"Discover & add"}</Button>{editing&&<Button type="button" variant="ghost" onClick={()=>{setEditing(null);setName('');setBaseUrl('');setApiKey('');setClearKey(false)}}>Cancel edit</Button>}</>}><div>
           <h2 className="text-sm font-semibold">Additional providers</h2>
           <p className="mt-1 text-[10px] leading-relaxed text-text-muted">
             Add an OpenAI-compatible endpoint. LLMConduit discovers its models; API keys remain server-side. <a className="text-accent underline" href="#/provider-settings">Gateway backend settings</a> · <a className="text-accent underline" href="#/profiles">Profiles &amp; routing</a>.
@@ -254,7 +254,7 @@ function ConfiguredProvidersPanel({
         <input aria-label="Provider API key" required={!editing} type="password" autoComplete="new-password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={editing?"Leave unchanged to keep credential":"API key"} className={INPUT} />
       </form>
 
-      {editing&&<div className="mt-2 flex flex-wrap gap-3 text-xs"><label className="flex gap-2"><input type="checkbox" checked={enabled} onChange={e=>setEnabled(e.target.checked)}/>Provider enabled</label><label className="flex gap-2"><input type="checkbox" checked={clearKey} onChange={e=>setClearKey(e.target.checked)}/>Clear credential</label><Button variant="ghost" onClick={()=>{setEditing(null);setName('');setBaseUrl('');setApiKey('');setClearKey(false)}}>Cancel edit</Button></div>}
+      {editing&&<div className="mt-2 flex flex-wrap gap-3 text-xs"><label className="flex gap-2"><input type="checkbox" checked={enabled} onChange={e=>setEnabled(e.target.checked)}/>Provider enabled</label><label className="flex gap-2"><input type="checkbox" checked={clearKey} onChange={e=>setClearKey(e.target.checked)}/>Clear credential</label></div>}
       {loading && <p className="mt-3 text-xs text-text-muted">Loading configured providers...</p>}
       {error && <p className="mt-3 text-xs text-status-down">Could not load configured providers: {error}</p>}
       {mutationError && <p className="mt-3 text-xs text-status-down">Provider change failed: {mutationError}</p>}

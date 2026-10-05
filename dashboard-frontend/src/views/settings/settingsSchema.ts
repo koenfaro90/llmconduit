@@ -6,7 +6,36 @@ export interface FieldSchema {
 const text=(label:string,help:string,extra:Partial<FieldSchema>={}):FieldSchema=>({kind:'text',label,help,...extra});
 const num=(label:string,help:string,unit='',min=0,max?:number):FieldSchema=>({kind:'number',label,help,unit,min,max,step:1});
 const bool=(label:string,help:string,extra:Partial<FieldSchema>={}):FieldSchema=>({kind:'boolean',label,help,...extra});
-const obj=(label:string,fields:Record<string,FieldSchema>,help?:string):FieldSchema=>({kind:'object',label,fields,help});
+// Purpose copy explains the concept, rather than repeating the section heading.
+const SECTION_HELP:Record<string,string>={
+ 'Model profile':'A profile describes a model to the gateway: its upstream model ID, generation defaults, context limit, capabilities and role handling. It selects inference behavior; deployment is managed separately.',
+ 'Backend':'A backend is an inference API endpoint. Its address, credential and enabled state determine how the gateway can connect to it. Profiles reference its stable identity.',
+ 'Upstream':'An upstream is an inference service used for routing or fallback. Its model and request defaults are applied only when that upstream is selected.',
+ 'Mesh':'The mesh connects LLMConduit with enrolled Fleet hosts over authenticated transport. The controller receives host reports and sends deployment commands; a worker connects a host and its local inference resources.',
+ 'Controller':'The controller accepts connections from Fleet hosts, identifies itself with its persisted private identity, stores enrolled-host state and decides which host models are approved for routing.',
+ 'Worker connection':'A worker connects to a specific controller identity and advertises its local inference endpoints. Its resources are the addresses and models the gateway can route to through this worker.',
+ 'Resource':'A resource is a local inference endpoint advertised by a mesh worker. Its target address points to the model server; the model list and availability determine which requests it can receive.',
+ 'Availability':'An availability schedule sets concurrent-request capacity by local time. Weekly windows and dated exceptions override the default capacity; zero refuses new work.',
+ 'Weekly window':'A recurring capacity override for the selected weekdays and local start/end times in the schedule timezone.',
+ 'Exception':'A dated capacity override that takes precedence over recurring weekly windows during its specified time interval.',
+ 'Advertised capabilities':'These flags describe what a model can do to clients: image input, structured output, thinking and other supported features. Advertising a feature does not add support to the inference engine.',
+ 'Capability':'Indicates whether the inference model supports this feature. It informs clients about support; it does not enable an engine feature by itself.',
+ 'Thinking':'Describe whether this model supports reasoning and which thinking modes clients may request.',
+ 'Effort':'Describe whether the model supports effort selection and which effort levels are available to clients.',
+ 'Context management':'Advertise the context-management operations supported by this model, such as clearing previous thinking or compacting context.',
+ 'Reasoning shorthand':'Translate canonical reasoning-effort choices into backend-specific names and thinking parameters. It is an alternative to explicit effort-to-request-fragment mappings.',
+ 'Role rule':'Adjust messages for an inference engine that handles some roles differently. A rule may accept, reject, drop or rewrite a role at a specified position in the conversation.',
+ 'Inference authentication':'Controls whether inference requests must carry an API key and which header identifies a conversation. Dashboard sign-in is configured separately.',
+ 'Policy authorization':'Enable opt-in policy-backed API authorization and select its durable policy store. User, group and key policies are managed on the Access and Traffic pages.',
+ 'Backend metrics':'Collect inference-engine telemetry such as queue lengths, running requests and cache utilization by polling backend metrics endpoints. This is separate from Fleet machine statistics.',
+ 'Metrics override':'Override collection for one backend or give its explicit metrics endpoint when the gateway cannot derive the address.',
+ 'Vision probes':'Periodically check whether configured model backends accept image input. These are capability checks, separate from normal client inference requests.',
+ 'Session detection':'Recognize API clients and extract their session and conversation identifiers. Session lineage links related requests in the dashboard; disabling detection does not disable inference.',
+ 'Client rule':'Recognize one type of API client, then extract its version and session identifiers from headers or request bodies. Sub-session policy controls how related conversations are linked.',
+ 'GPU capacity':'Detected VRAM is physical capacity reported by Fleet. The reservation budget is the amount Fleet may promise to workloads; it is not a measurement of current memory use.',
+ 'Host deployment policy':'Host-owned safety limits decide which containers Fleet may start, which resources they may reserve and whether GPU sharing or elevated container privileges are permitted.',
+};
+const obj=(label:string,fields:Record<string,FieldSchema>,help?:string):FieldSchema=>({kind:'object',label,fields,help:help??SECTION_HELP[label]});
 const list=(label:string,item:FieldSchema,help?:string):FieldSchema=>({kind:'list',label,item,help});
 const map=(label:string,item:FieldSchema,help?:string):FieldSchema=>({kind:'map',label,item,help});
 const choice=(label:string,options:readonly string[],help:string,labels?:Record<string,string>):FieldSchema=>text(label,help,{options,labels});

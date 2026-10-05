@@ -2,16 +2,17 @@ import { useState, type ChangeEvent } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { getConnection } from '../../api/connection';
 import type { ConvertedRecipe, ConvertRecipeRequest, RecipeImportOptions, ImportedRecipeSource } from '../../api/types';
+import {PanelHeader} from '../../components/ui/Panel';
 import { Button } from '../../components/ui/Button';
 const input = 'rounded border border-line bg-bg px-2 py-1.5 text-xs text-text';
 
 export function LilSourceImport({ mutationsEnabled, onLoaded }: { mutationsEnabled: boolean; onLoaded: (source: ImportedRecipeSource) => void }) {
   const [url, setUrl] = useState('');
   const load = useMutation({ mutationFn: (value: string) => getConnection().client.fetchRecipeSource(value), onSuccess: onLoaded });
-  return <div className="space-y-2 rounded border border-line p-3">
+  return <div className="space-y-2 rounded border border-line p-3"><PanelHeader label="Local Inference Lab import" help="Load a saved build and model configuration from Local Inference Lab. The source is fetched for review and conversion into Fleet; loading does not save a recipe or start a model." actions={    <Button type="button" onClick={() => load.mutate(url.trim())} disabled={!mutationsEnabled || load.isPending || !url.trim()}>{load.isPending ? 'Loading source…' : 'Load LiL recipe'}</Button>}><h3 className="font-semibold">Import a saved configuration</h3></PanelHeader>
     <label className="block space-y-1"><span>Local Inference Lab configuration URL</span><input aria-label="Local Inference Lab URL" type="url" className={`${input} w-full`} placeholder="https://docker.local-inference-lab.ai/?build=…&model=…" value={url} onChange={e => setUrl(e.target.value)} /></label>
     <p className="text-text-muted">Paste a saved build/model configuration. Its Compose file and selected options are loaded for review; deployment uses the Fleet controls.</p>
-    <Button onClick={() => load.mutate(url.trim())} disabled={!mutationsEnabled || load.isPending || !url.trim()}>{load.isPending ? 'Loading source…' : 'Load LiL recipe'}</Button>
+
     {load.error && <p role="alert">{String(load.error)}</p>}
   </div>;
 }
@@ -80,7 +81,7 @@ export function RecipeImport({ recipeId, description, sourceFormat, sourceConten
     ['readiness_url', 'Readiness URL', 'Optional host-loopback HTTP probe'],
   ];
   if (sourceFormat === 'sparkrun') fields.push(['runtime_cache_directory', 'Runtime cache directory', 'Optional existing approved cache path'], ['num_nodes', 'Distributed node count', 'Defaults to the recipe minimum'], ['node_rank', 'Distributed node rank', 'Leave blank to convert all ranks into one portable recipe'], ['head_address', 'Distributed head address', 'Head fabric IP'], ['host_address', 'Distributed host address', 'This rank’s fabric IP']);
-  return <div className="space-y-2" data-testid="recipe-import">
+  return <div className="space-y-2" data-testid="recipe-import"><PanelHeader label="Recipe conversion" help="Convert Compose or sparkrun source into a portable Fleet recipe. Preview checks unsupported features, environment and resource requirements before saving a deployable revision." actions={    <Button type="button" onClick={previewSource} disabled={!mutationsEnabled || busy || !sourceContent.trim()}>Preview conversion</Button>}><h3 className="font-semibold">Conversion settings</h3></PanelHeader>
     <p className="text-text-muted">Convert YAML to a Fleet recipe. Preview preserves commands, environment, bind paths and ports. Missing settings and unsupported features block saving a deployable revision.</p>
     {sourceUrl && <p className="break-all text-text-muted">Loaded from <a className="text-accent" href={sourceUrl} target="_blank" rel="noreferrer">{sourceUrl}</a></p>}
     <div className="grid gap-2 md:grid-cols-2">{fields.filter(([key]) => key !== 'service' || sourceFormat === 'compose').map(([key, label, placeholder]) => <label key={key} className="space-y-1"><span>{label}</span><input aria-label={label} className={`${input} block w-full`} placeholder={placeholder} value={options[key] ?? ''} onChange={change(key)} /></label>)}</div>
@@ -92,14 +93,14 @@ export function RecipeImport({ recipeId, description, sourceFormat, sourceConten
       <label className="block">Additional host devices, one per line<textarea aria-label="Conversion devices" className={`${input} block w-full font-mono`} rows={2} value={options.devices ?? ''} onChange={change('devices')} /></label>
       <p className="text-text-muted">Secrets stay in approved private files on the host. Do not paste credentials into the recipe or variables.</p>
     </div></details>
-    <Button onClick={previewSource} disabled={!mutationsEnabled || busy || !sourceContent.trim()}>Preview conversion</Button>
-    {preview && <div className="rounded border border-line p-3 space-y-2">
+
+    {preview && <div className="rounded border border-line p-3 space-y-2"><PanelHeader label="Conversion preview" help="Review the generated recipe and resolve all missing inputs before saving. Changes to the source invalidate this preview; saving retains an immutable revision and does not deploy it." actions={      <Button type="button" onClick={() => save.mutate()} disabled={!mutationsEnabled || busy || !matches || preview.response.required_inputs.length > 0 || !/^[a-z0-9][a-z0-9_-]{0,39}$/.test(recipeId) || !description.trim()}>Save converted revision</Button>}><h3 className="font-semibold">Converted recipe</h3></PanelHeader>
       {!matches && <p role="status">The source or settings changed. Refresh the preview before saving.</p>}
       {preview.response.services.length > 1 && <p>Services in this file: {preview.response.services.join(', ')}. Convert and deploy each required service separately.</p>}
       {preview.response.required_inputs.length > 0 && <div><strong>Resolve before saving</strong><ul className="list-disc pl-5">{preview.response.required_inputs.map((item) => <li key={item}>{item}</li>)}</ul></div>}
       {preview.response.warnings.length > 0 && <ul className="list-disc pl-5 text-text-muted">{preview.response.warnings.map((item) => <li key={item}>{item}</li>)}</ul>}
       <textarea aria-label="Converted Fleet specification" readOnly rows={10} className={`${input} w-full font-mono`} value={JSON.stringify(preview.response.model_spec, null, 2)} />
-      <Button onClick={() => save.mutate()} disabled={!mutationsEnabled || busy || !matches || preview.response.required_inputs.length > 0 || !/^[a-z0-9][a-z0-9_-]{0,39}$/.test(recipeId) || !description.trim()}>Save converted revision</Button>
+
     </div>}
     {message && <p role="status">{message}</p>}
     {(convert.error || save.error) && <p role="alert">{String(convert.error ?? save.error)}</p>}
