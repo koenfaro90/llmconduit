@@ -580,16 +580,19 @@ async fn create_generation(
             loaded.storage.backend,
             StorageBackend::Sqlite | StorageBackend::Postgres
         );
-        let (app, gateway) = llmconduit::build_runtime_generation(
-            loaded.config,
-            raw_output,
-            app_options,
-            loaded.routes,
-            loaded.unknown_model_policy,
-            client_auth,
-            runtime,
-            previous,
-        )?;
+        let (app, gateway) = llmconduit::runtime_configuration::prepare(move || {
+            llmconduit::build_runtime_generation(
+                loaded.config,
+                raw_output,
+                app_options,
+                loaded.routes,
+                loaded.unknown_model_policy,
+                client_auth,
+                runtime,
+                previous,
+            )
+        })
+        .await?;
         if app_options.with_debug_ui && gateway.dashboard_auth().is_none() {
             return Err("Dashboard authentication could not be prepared".into());
         }

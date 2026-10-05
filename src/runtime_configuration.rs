@@ -45,11 +45,9 @@ pub fn with_environment<T>(spec: &Specification, run: impl FnOnce() -> T) -> T {
     ENVIRONMENT.sync_scope(environment(spec, 0), run)
 }
 pub fn environment(spec: &Specification, revision: u64) -> Arc<BTreeMap<String, String>> {
+    let referenced = settings::referenced_environment(&spec.document);
     let mut values: BTreeMap<_, _> = std::env::vars()
-        .filter(|(name, _)| {
-            !settings::managed_env(name)
-                && !settings::referenced_environment(&spec.document).contains(name)
-        })
+        .filter(|(name, _)| !settings::managed_env(name) && !referenced.contains(name))
         .collect();
     values.extend(spec.environment.clone());
     values.insert("LLMCONDUIT_MANAGED_REVISION".into(), revision.to_string());
@@ -64,6 +62,25 @@ pub async fn scope<F: Future>(
         .scope(env, BACKGROUND.scope(tasks, future))
         .await
 }
+/// Startup constructors open local policy/capture resources. Prepare them on
+/// the blocking pool, preserving the generation scopes and runtime spawn context.
+pub async fn prepare<T: Send + 'static>(
+    run: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    let env = current_environment();
+    let background = BACKGROUND.try_with(Arc::clone).ok();
+    let handle = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        let _runtime = handle.enter();
+        ENVIRONMENT.sync_scope(env, || match background {
+            Some(tasks) => BACKGROUND.sync_scope(tasks, run),
+            None => run(),
+        })
+    })
+    .await
+    .map_err(|_| "Runtime resource preparation failed".to_owned())?
+}
+
 pub struct BackgroundTasks {
     handles: Mutex<Vec<AbortHandle>>,
     active: tokio::sync::watch::Sender<bool>,
@@ -414,14 +431,18 @@ mod tests {
             .insert("LLMCONDUIT_REQUEST_TIMEOUT_SECS".into(), "19".into());
         let tasks = Arc::new(BackgroundTasks::default());
         let (timer, inference) = scope(environment(&spec, 3), tasks.clone(), async {
-            assert_eq!(var("LLMCONDUIT_REQUEST_TIMEOUT_SECS").unwrap(), "19");
-            (
-                spawn(async { std::future::pending::<()>().await }),
-                tokio::spawn(async {
-                    tokio::task::yield_now().await;
-                    42
-                }),
-            )
+            prepare(|| {
+                assert_eq!(var("LLMCONDUIT_REQUEST_TIMEOUT_SECS").unwrap(), "19");
+                Ok((
+                    spawn(async { std::future::pending::<()>().await }),
+                    tokio::spawn(async {
+                        tokio::task::yield_now().await;
+                        42
+                    }),
+                ))
+            })
+            .await
+            .unwrap()
         })
         .await;
         tasks.activate();
