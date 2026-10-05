@@ -236,6 +236,11 @@ async fn stop(child: &mut Child) {
 async fn publish_ingress(spec: &Specification) -> Result<(), String> {
     if let Ok(path) = std::env::var("LLMCONDUIT_MANAGED_INGRESS_FILE") {
         let address = bind(spec)?;
+        if !address.ip().is_unspecified() {
+            return Err(
+                "Managed Traefik ingress requires a wildcard listener (0.0.0.0 or ::)".into(),
+            );
+        }
         let upstream = format!("http://llmconduit:{}", address.port());
         let document = serde_json::json!({"http":{"services":{"managed-gateway":{"loadBalancer":{"servers":[{"url":upstream}]}}}}});
         let ingress_path = PathBuf::from(path);
