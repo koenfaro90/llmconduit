@@ -1,3 +1,4 @@
+import type { AliasesResponse } from "../views/infrastructure/aliasModel";
 import {blankConfig,blankRuntime,type TrafficResponse} from '../views/traffic/trafficModel';
 let MOCK_TRAFFIC:TrafficResponse={revision:0,config:blankConfig(),runtime:blankRuntime(),scope:'single gateway process'};
 /**
@@ -63,6 +64,16 @@ import type {
 } from './types';
 import type { WsLike } from './ws';
 
+const initialAliases = (): AliasesResponse => ({revision: 0, persistent: true, targets: [
+  {id: '11111111-1111-4111-8111-111111111111', name: 'glm-5.3', upstream_models: ['GLM-5.3-NVFP4'], backends: ['gpu02'], available: true},
+  {id: '22222222-2222-4222-8222-222222222222', name: 'glm-5.3-flash', upstream_models: ['GLM-5.3-Flash-NVFP4'], backends: ['gpu01'], available: true},
+  {id: '33333333-3333-4333-8333-333333333333', name: 'gemma4-31b-nvfp4', upstream_models: ['Gemma-4-31B-it'], backends: ['gpu04'], available: true},
+], aliases: [
+  {id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', name: 'wielick-large', profiles: ['11111111-1111-4111-8111-111111111111'], error: null},
+  {id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', name: 'wielick-medium', profiles: ['22222222-2222-4222-8222-222222222222'], error: null},
+  {id: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', name: 'wielick-small', profiles: ['33333333-3333-4333-8333-333333333333'], error: null},
+]});
+let MOCK_ALIASES = initialAliases();
 const MOCK_CSRF = 'mock-csrf-token';
 
 let AUTH_USERS: AuthUser[] = [
@@ -579,6 +590,15 @@ export const mockFetch: typeof fetch = async (input, init): Promise<Response> =>
   const path = url.replace(/^https?:\/\/[^/]+/, '').split('?')[0] ?? url;
   const qs = new URLSearchParams(url.includes('?') ? url.slice(url.indexOf('?')) : '');
 
+  if (path === '/dashboard/api/aliases' && method === 'GET') return json(MOCK_ALIASES);
+  if (path === '/dashboard/api/aliases' && method === 'POST') {
+    if (!headerValue(init?.headers, 'X-CSRF-Token')) return json({error: 'missing csrf'}, 403);
+    const body = parseBody(init?.body);
+    if (body.revision !== MOCK_ALIASES.revision) return json({error: 'Aliases changed; reload before saving.'}, 409);
+    if (!Array.isArray(body.aliases)) return json({error: 'invalid aliases'}, 400);
+    MOCK_ALIASES = {...MOCK_ALIASES, revision: MOCK_ALIASES.revision + 1, aliases: body.aliases.map(a => ({...a, error: null}))};
+    return json(MOCK_ALIASES);
+  }
   if (path === '/dashboard/api/chat' && method === 'POST') {
     if (!headerValue(init?.headers, 'X-CSRF-Token')) return json({ error: 'missing csrf' }, 403);
     const body = parseBody(init?.body);
@@ -1346,6 +1366,7 @@ export const MOCK_KEYS: ApiKeyRecord[] = [
 
 /** Reset the mutable mock account state (tests). */
 export function resetMockAccounts(): void {
+  MOCK_ALIASES = initialAliases();
   MOCK_TRAFFIC={revision:0,config:blankConfig(),runtime:blankRuntime(),scope:'single gateway process'};
   mockSessionUser = null;
   mockHistoryCleared = false;

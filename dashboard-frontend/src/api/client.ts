@@ -1,3 +1,4 @@
+import { isAliasesResponse, type AliasesResponse, type AliasMapping } from "../views/infrastructure/aliasModel";
 import { isBenchmarkRun, type BenchmarkRun, type BenchmarkOptions } from '../views/infrastructure/benchmarkModel';
 import { isTrafficResponse, type TrafficResponse, type TrafficConfig, type Backend, type EngineSample } from '../views/traffic/trafficModel';
 /**
@@ -180,7 +181,15 @@ export class DashboardClient {
         const detail = await res.json().catch(() => null) as { error?: unknown } | null;
         if (typeof detail?.error === 'string') throw new Error(detail.error);
       }
-      throw new Error(`${init?.method ?? 'GET'} ${path} failed: ${res.status}`);
+      let detail = '';
+      if (path === '/aliases') {
+        try {
+          const body = await res.json() as { error?: string | { message?: string } };
+          const message = typeof body.error === 'string' ? body.error : body.error?.message;
+          if (typeof message === 'string') detail = `: ${message.slice(0, 500)}`;
+        } catch { /* Keep the status if the server returned a non-JSON error. */ }
+      }
+      throw new Error(`${init?.method ?? 'GET'} ${path} failed: ${res.status}${detail}`);
     }
     // 204/empty bodies decode to `undefined as T` at the call sites that allow it.
     const text = await res.text();
@@ -220,6 +229,14 @@ export class DashboardClient {
     if (csrf) headers['X-CSRF-Token'] = csrf;
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     return this.request<T>(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+  }
+
+  aliases(): Promise<AliasesResponse> { return this.request('/aliases', undefined, isAliasesResponse); }
+  saveAliases(revision: number, aliases: AliasMapping[]): Promise<AliasesResponse> {
+    return this.mutate('/aliases', 'POST', { revision, aliases }).then(value => {
+      if (!isAliasesResponse(value)) throw new Error('Aliases returned an invalid response');
+      return value;
+    });
   }
 
   // -- Accounts -------------------------------------------------------------

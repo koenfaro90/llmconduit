@@ -34,6 +34,7 @@ fn operational_route(name: &str, base_url: &str) -> OperationalRoutePlan {
         name: name.to_string(),
         primary_profile_id: profile_id,
         primary_profile_name: format!("{name}-profile"),
+        profile_ids: vec![profile_id],
         providers: vec![OperationalProviderPlan {
             backend_id: Uuid::new_v4(),
             backend_name: format!("{name}-backend"),

@@ -205,3 +205,25 @@ Fleet defaults `disk` to 30 seconds and `disk_io` to one second, independently o
 CPU/GPU/container sampling. These counters use host mounts and kernel statistics;
 no filesystem directory scans, Docker stats or Prometheus are involved. Mesh and
 SQL history cadence remain unchanged.
+
+## Client-facing model aliases
+
+Infrastructure → Aliases (`#/aliases`) manages stable names independently of host
+placement. The shared table sorts and filters aliases, primary/fallback profiles,
+upstream model IDs and backends. Administrators can add, rename, retarget, reorder
+fallbacks and delete; mutations use the existing origin/CSRF guard and SQL revision
+compare-and-swap. Names cannot conflict with profiles or explicit configured routes.
+
+Operational YAML aliases bootstrap SQL `model_aliases` once. Thereafter SQL is
+authoritative, including an empty alias collection. Config generation/sync must
+not re-import or resurrect old aliases. Backend/profile UUID references retain their
+current configured remaps and per-provider defaults; no credentials are copied into
+alias records or returned by the API. Removed profiles produce repairable errors.
+
+Each inference request freezes its route, request-level primary profile and replay
+cache revision before normalization/token budgeting/vision gating. Existing streams
+and tool loops finish against that snapshot after an edit. Backend authorization,
+admission and pre-first-chunk failover continue through the existing routing client.
+Renamed/deleted names return 404 instead of falling through to a default backend,
+even in passthrough mode. Key/traffic policy names are not rewritten automatically.
+See [configuration ownership and remaining gaps](dashboard-configuration.md).

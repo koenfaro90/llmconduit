@@ -290,6 +290,9 @@ async fn run_server(
         client_auth,
         runtime,
     )?;
+    if let Some(registry) = gateway.alias_registry() {
+        registry.snapshot().await?;
+    }
     spawn_persistent_backend_metrics(Arc::clone(&gateway));
     spawn_upstream_metrics_scraper(Arc::clone(&gateway), metrics_config);
     llmconduit::vision_probe::spawn(

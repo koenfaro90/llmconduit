@@ -143,6 +143,11 @@ pub struct Gateway {
     /// in the upstream routing stack; this map prevents pre-normalization from
     /// collapsing the alias and selects its request-level profile policy.
     operational_alias_profiles: BTreeMap<String, String>,
+    managed_aliases: Option<(
+        Arc<crate::managed_aliases::AliasRegistry>,
+        Arc<dyn UpstreamClient>,
+    )>,
+    alias_snapshot: Option<Arc<crate::managed_aliases::AliasSnapshot>>,
     operational_unknown_model_policy: crate::control_plane::UnknownModelPolicy,
     replay_store: ReplayStore,
     upstream: Arc<dyn UpstreamClient>,
@@ -801,6 +806,8 @@ impl Gateway {
             conversation_id_header: crate::control_plane::DEFAULT_CONVERSATION_ID_HEADER
                 .to_string(),
             operational_alias_profiles: BTreeMap::new(),
+            managed_aliases: None,
+            alias_snapshot: None,
             operational_unknown_model_policy: crate::control_plane::UnknownModelPolicy::Passthrough,
             replay_store,
             upstream,
@@ -880,7 +887,47 @@ impl Gateway {
         self
     }
 
+    pub fn with_managed_aliases(
+        mut self,
+        registry: Option<Arc<crate::managed_aliases::AliasRegistry>>,
+        base: Arc<dyn UpstreamClient>,
+    ) -> Self {
+        self.managed_aliases = registry.map(|r| (r, base));
+        self
+    }
+    pub fn alias_registry(&self) -> Option<&Arc<crate::managed_aliases::AliasRegistry>> {
+        self.managed_aliases.as_ref().map(|(r, _)| r)
+    }
+    /// Freeze routing, profile policy and replay state together before request normalization.
+    pub async fn request_snapshot(self: &Arc<Self>) -> AppResult<Arc<Self>> {
+        let Some((registry, base)) = &self.managed_aliases else {
+            return Ok(self.clone());
+        };
+        let snapshot = registry.snapshot().await?;
+        let mut gateway = (**self).clone();
+        gateway
+            .operational_alias_profiles
+            .extend(snapshot.profiles().clone());
+        gateway.upstream = Arc::new(crate::managed_aliases::AliasUpstream::frozen(
+            base.clone(),
+            registry.clone(),
+            snapshot.clone(),
+        ));
+        gateway.replay_store = snapshot.replay.clone();
+        gateway.upstream_model_catalog = Arc::new(Mutex::new(None));
+        gateway.alias_snapshot = Some(snapshot);
+        gateway.managed_aliases = None;
+        Ok(Arc::new(gateway))
+    }
+
     pub fn validate_operational_model(&self, model: &str) -> Result<(), &'static str> {
+        if self
+            .alias_snapshot
+            .as_ref()
+            .is_some_and(|s| s.is_retired(model))
+        {
+            return Err("requested alias is no longer configured");
+        }
         if self.operational_unknown_model_policy != crate::control_plane::UnknownModelPolicy::Reject
             || self
                 .operational_alias_profiles
@@ -1713,10 +1760,34 @@ impl Gateway {
         request: ResponsesRequest,
         api_call_id: Option<String>,
         persistence_capture: Option<Arc<crate::flow_persistence::PersistenceCapture>>,
+        authorization: crate::upstream::AuthorizationScope,
+        endpoint: crate::upstream::InferenceEndpoint,
+        auth_context: Option<crate::authz::AuthContext>,
+    ) -> AppResult<ReceiverStream<SseEvent>> {
+        let gateway = self.request_snapshot().await?;
+        gateway
+            .stream_responses_frozen(
+                request,
+                api_call_id,
+                persistence_capture,
+                authorization,
+                endpoint,
+                auth_context,
+            )
+            .await
+    }
+
+    async fn stream_responses_frozen(
+        self: Arc<Self>,
+        request: ResponsesRequest,
+        api_call_id: Option<String>,
+        persistence_capture: Option<Arc<crate::flow_persistence::PersistenceCapture>>,
         mut authorization: crate::upstream::AuthorizationScope,
         endpoint: crate::upstream::InferenceEndpoint,
         auth_context: Option<crate::authz::AuthContext>,
     ) -> AppResult<ReceiverStream<SseEvent>> {
+        self.validate_operational_model(&request.model)
+            .map_err(AppError::not_found)?;
         if let Some(traffic) = authorization.traffic.as_mut().and_then(Arc::get_mut)
             && traffic.session.is_none()
             && let Some(session) = request

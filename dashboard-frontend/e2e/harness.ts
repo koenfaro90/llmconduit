@@ -16,7 +16,7 @@ export type ViewName =
   | 'overview'
   | 'chat'
   | 'providers'
-  | 'access' | 'hosts' | 'recipes' | 'models' | 'deployment' | 'benchmarks';
+  | 'aliases' | 'access' | 'hosts' | 'recipes' | 'models' | 'deployment' | 'benchmarks';
 
 /** Each view: the nav-tab label to click + a route-specific "ready" marker (text/regex). */
 export const VIEWS: { name: ViewName; section: string; tab: string; ready: string | RegExp }[] = [
@@ -31,6 +31,7 @@ export const VIEWS: { name: ViewName; section: string; tab: string; ready: strin
   { name: 'chat', section: 'Chat', tab: 'Chat', ready: /^chat$/i },
   {name:'hosts', section:'Infrastructure', tab:'Hosts', ready:/Fleet system observations/i},
   {name:'recipes', section:'Infrastructure', tab:'Recipes', ready:/Review immutable revisions/i},
+  {name:'aliases', section:'Infrastructure', tab:'Aliases', ready:/Stable client names/i},
   {name:'models', section:'Infrastructure', tab:'Models', ready:/pinned configuration/i},
   {name:'deployment', section:'Infrastructure', tab:'Deployment', ready:/Choose a recipe revision and host/i},
   {name:'benchmarks', section:'Infrastructure', tab:'Benchmarks', ready:/Measure throughput and latency/i},

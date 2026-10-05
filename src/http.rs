@@ -278,6 +278,10 @@ fn protected_routes(gateway: Arc<Gateway>, auth: Arc<DashboardAuth>) -> Router<A
             get(crate::dashboard_traffic::get).post(crate::dashboard_traffic::save),
         )
         .route(
+            "/dashboard/api/aliases",
+            get(crate::dashboard_aliases::get).post(crate::dashboard_aliases::save),
+        )
+        .route(
             "/dashboard/api/traffic/preview",
             post(crate::dashboard_traffic::preview),
         )
@@ -1627,6 +1631,14 @@ async fn log_api_call(
                     .map(str::to_owned)
             }),
     };
+    let gateway = if is_client_api_path_with_model(uri.path()) {
+        match gateway.request_snapshot().await {
+            Ok(g) => g,
+            Err(e) => return e.into_response(),
+        }
+    } else {
+        gateway
+    };
     let requested_model = prepared_multipart
         .as_ref()
         .map(|p| p.model.model.clone())
@@ -2915,6 +2927,7 @@ async fn post_responses(
     persistence: Option<axum::Extension<Arc<crate::flow_persistence::PersistenceCapture>>>,
     Json(request): Json<ResponsesRequest>,
 ) -> AppResult<Response> {
+    let gateway = gateway.request_snapshot().await?;
     let requested = request.model.clone();
     let served = gateway.resolve_request_model(&request.model).await.0;
     let authorization = authorize_inference(
@@ -3332,6 +3345,7 @@ async fn handle_count_tokens(
     request: AnthropicRequest,
     auth: Option<crate::authz::AuthContext>,
 ) -> AppResult<Response> {
+    let gateway = gateway.request_snapshot().await?;
     use crate::engine::TokenizeCapability;
 
     if gateway.tokenize_capability() == TokenizeCapability::Unsupported {
@@ -3594,6 +3608,7 @@ async fn handle_chat_completions(
     persistence: Option<Arc<crate::flow_persistence::PersistenceCapture>>,
     request: ChatCompletionRequest,
 ) -> AppResult<Response> {
+    let gateway = gateway.request_snapshot().await?;
     let requested = request.model.clone();
     let model = gateway.resolve_request_model(&request.model).await.0;
     let authorization = authorize_inference(
@@ -3732,6 +3747,7 @@ async fn proxy_raw_endpoint(
     body: Bytes,
     endpoint: crate::upstream::InferenceEndpoint,
 ) -> AppResult<Response> {
+    let gateway = gateway.request_snapshot().await?;
     let request =
         crate::upstream::ProxyCompletionsRequest::new(headers, body).with_endpoint(endpoint);
     proxy_prepared_request(gateway, auth, request, None, true).await
@@ -3811,6 +3827,7 @@ async fn handle_post_messages(
     auth: Option<crate::authz::AuthContext>,
     caller: Option<crate::traffic::Caller>,
 ) -> AppResult<Response> {
+    let gateway = gateway.request_snapshot().await?;
     let requested = request.model.clone();
     let model = gateway.resolve_request_model(&request.model).await.0;
     let authorization = authorize_inference(

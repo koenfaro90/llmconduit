@@ -9,6 +9,7 @@ pub mod content_store;
 pub mod control_plane;
 pub mod control_plane_store;
 pub mod dashboard_access;
+pub mod dashboard_aliases;
 pub mod dashboard_api;
 pub mod dashboard_auth;
 pub mod dashboard_benchmarks;
@@ -32,6 +33,7 @@ pub mod flow_persistence;
 pub mod harness;
 pub mod http;
 pub mod log_rotation;
+pub mod managed_aliases;
 pub mod managed_providers;
 pub mod media_api;
 pub mod mesh;
@@ -275,6 +277,7 @@ pub fn build_app_with_gateway_control_plane_runtime(
     let conversation_id_header = conversation_id_header.to_string();
     let operational_models = operational_routes
         .iter()
+        .filter(|route| route.route_id == route.primary_profile_id)
         .map(|route| (route.name.clone(), route.primary_profile_name.clone()))
         .collect::<Vec<_>>();
     for operational in &operational_routes {
@@ -505,7 +508,10 @@ pub fn build_app_with_gateway_control_plane_runtime(
                 route.upstream_model.clone(),
             ));
         }
-        for route in &operational_routes {
+        for route in operational_routes
+            .iter()
+            .filter(|r| r.route_id == r.primary_profile_id)
+        {
             let index = route_providers.len();
             let legs = route
                 .providers
@@ -599,6 +605,40 @@ pub fn build_app_with_gateway_control_plane_runtime(
         } else {
             base_upstream
         };
+    let alias_registry = if !operational_routes.is_empty() || runtime.persistence_store.is_some() {
+        Some(crate::managed_aliases::AliasRegistry::new(
+            runtime.persistence_store.clone(),
+            &operational_routes,
+            config
+                .model_profiles
+                .keys()
+                .chain(config.model_routes.iter().map(|r| &r.name))
+                .map(|n| n.to_ascii_lowercase())
+                .collect(),
+            crate::managed_providers::ManagedProviderOptions {
+                http_client: http_client.clone(),
+                flatten_content,
+                min_completion_tokens,
+                max_sse_frame_bytes,
+                finalization_policies: finalization_policies.clone(),
+                flow_store: flow_store.clone(),
+                traffic: traffic.clone(),
+            },
+            Duration::from_secs(config.upstream_failure_cooldown_secs),
+            config.max_replay_entries,
+        )?)
+    } else {
+        None
+    };
+    let alias_base = upstream.clone();
+    let upstream: Arc<dyn crate::upstream::UpstreamClient> =
+        if let Some(registry) = alias_registry.clone() {
+            Arc::new(crate::managed_aliases::AliasUpstream::new(
+                upstream, registry,
+            ))
+        } else {
+            upstream
+        };
     let search = Arc::new(BraveSearchClient::new(http_client.clone(), config.clone()));
     // G4 image agent: a vision client + a shared per-session image cache. The
     // cache is constructed once and shared so the strip seam (in
@@ -671,6 +711,7 @@ pub fn build_app_with_gateway_control_plane_runtime(
     .with_turn_capture(turn_capture)
     .with_fleet(fleet)
     .with_managed_providers(managed_providers)
+    .with_managed_aliases(alias_registry, alias_base)
     .with_mesh_admin(mesh_admin)
     .with_operational_models(operational_models, unknown_model_policy);
     if let Some(client_auth) = client_auth {

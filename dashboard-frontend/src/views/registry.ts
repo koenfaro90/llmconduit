@@ -22,6 +22,8 @@ import { RecipesView } from './infrastructure/RecipesView';
 import { ModelsView } from './infrastructure/ModelsView';
 import { DeploymentView } from './infrastructure/DeploymentView';
 
+import { AliasesView } from "./infrastructure/AliasesView";
+
 export const VIEW_BY_ROUTE: Record<RouteName, ComponentType> = {
   traffic: TrafficView,
   flows: FlowsView,
@@ -40,6 +42,7 @@ export const VIEW_BY_ROUTE: Record<RouteName, ComponentType> = {
   benchmarks: BenchmarksView,
   recipes: RecipesView,
   models: ModelsView,
+  aliases: AliasesView,
   deployment: DeploymentView,
   access: AccessView,
 };

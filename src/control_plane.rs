@@ -1000,6 +1000,7 @@ impl OperationalConfig {
                 name: route_name.trim().to_string(),
                 primary_profile_id,
                 primary_profile_name,
+                profile_ids: profile_ids.to_vec(),
                 providers: provider_plans,
             })
         };
@@ -1031,6 +1032,8 @@ pub struct OperationalRoutePlan {
     /// the leaf applies each provider's final-model policy.
     pub primary_profile_id: Uuid,
     pub primary_profile_name: String,
+    /// Retain the ordered targets, including profiles whose backends are disabled.
+    pub profile_ids: Vec<Uuid>,
     pub providers: Vec<OperationalProviderPlan>,
 }
 

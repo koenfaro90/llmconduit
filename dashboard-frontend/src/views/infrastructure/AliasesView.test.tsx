@@ -1,0 +1,65 @@
+import { beforeEach, afterEach, expect, it, vi } from 'vitest';
+import { cleanup, fireEvent, screen, waitFor } from '@testing-library/react';
+import { renderWithQuery, resetWorld } from '../../components/testHarness';
+import { getConnection } from '../../api/connection';
+import { authStore } from '../../store/authStore';
+import { AliasesView } from './AliasesView';
+import { isAliasesResponse } from './aliasModel';
+beforeEach(() => resetWorld({mock:true}));
+afterEach(() => {cleanup(); vi.restoreAllMocks();});
+it('shows current mappings in the shared searchable table', async () => {
+  renderWithQuery(<AliasesView/>);
+  await screen.findByText('wielick-large');
+  expect(screen.getByTestId('model-aliases')).toHaveTextContent('GLM-5.3-NVFP4');
+  fireEvent.change(screen.getByLabelText('Search aliases'), {target:{value:'gemma'}});
+  expect(screen.queryByText('wielick-large')).toBeNull();
+  expect(screen.getByText('wielick-small')).toBeInTheDocument();
+});
+it('creates a mapping with ordered fallbacks, edits it, then confirms deletion', async () => {
+  const client = getConnection().client;
+  const save = vi.spyOn(client, 'saveAliases');
+  renderWithQuery(<AliasesView/>);
+  await screen.findByText('wielick-large');
+  fireEvent.click(screen.getByRole('button',{name:'Add alias'}));
+  fireEvent.change(screen.getByLabelText('Alias name'),{target:{value:'test-alias'}});
+  fireEvent.change(screen.getByLabelText('Primary model'),{target:{value:'11111111-1111-4111-8111-111111111111'}});
+  fireEvent.click(screen.getByRole('button',{name:'Add fallback model'}));
+  fireEvent.change(screen.getByLabelText('Fallback 1'),{target:{value:'22222222-2222-4222-8222-222222222222'}});
+  fireEvent.click(screen.getByRole('button',{name:'Move fallback 1 up'}));
+  fireEvent.click(screen.getByRole('button',{name:'Save alias'}));
+  await screen.findByText('test-alias');
+  expect(save).toHaveBeenCalledWith(0,expect.arrayContaining([expect.objectContaining({name:'test-alias',profiles:['22222222-2222-4222-8222-222222222222','11111111-1111-4111-8111-111111111111']})]));
+  fireEvent.click(screen.getByRole('button',{name:'Edit test-alias'}));
+  fireEvent.change(screen.getByLabelText('Alias name'),{target:{value:'renamed'}});
+  fireEvent.click(screen.getByRole('button',{name:'Save alias'}));
+  await screen.findByText('renamed');
+  fireEvent.click(screen.getByRole('button',{name:'Delete renamed'}));
+  expect(screen.getByText(/New requests for this alias will be rejected/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button',{name:'Delete alias'}));
+  await waitFor(()=>expect(screen.queryByText('renamed')).toBeNull());
+  expect(screen.getByText('wielick-large')).toBeInTheDocument();
+});
+it('keeps the draft on a revision conflict and supports reload',async()=>{
+  const client=getConnection().client;
+  renderWithQuery(<AliasesView/>); await screen.findByText('wielick-large');
+  fireEvent.click(screen.getByRole('button',{name:'Edit wielick-large'}));
+  vi.spyOn(client,'saveAliases').mockRejectedValue(new Error('POST /aliases failed: 409'));
+  fireEvent.change(screen.getByLabelText('Alias name'),{target:{value:'new-large'}});
+  fireEvent.click(screen.getByRole('button',{name:'Save alias'}));
+  expect(await screen.findByRole('alert')).toHaveTextContent('your draft has been kept');
+  expect(screen.getByLabelText('Alias name')).toHaveValue('new-large');
+  fireEvent.click(screen.getByRole('button',{name:'Cancel'}));
+  await waitFor(()=>expect(screen.queryByLabelText('Alias name')).toBeNull());
+});
+it('disables editing for read-only sessions',async()=>{
+  getConnection(); authStore.getState().setMutationsEnabled(false);
+  renderWithQuery(<AliasesView/>); await screen.findByText('wielick-large');
+  expect(screen.getByRole('button',{name:'Add alias'})).toBeDisabled();
+  expect(screen.getByRole('button',{name:'Edit wielick-large'})).toBeDisabled();
+});
+it('validates the response contract including nullable errors and ordered target IDs',async()=>{
+  const view=await getConnection().client.aliases();
+  expect(isAliasesResponse(JSON.parse(JSON.stringify(view)))).toBe(true);
+  expect(isAliasesResponse({...view,aliases:[{...view.aliases[0],profiles:[42]}]})).toBe(false);
+  expect(isAliasesResponse({...view,revision:-1})).toBe(false);
+});

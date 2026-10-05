@@ -135,6 +135,8 @@ impl utoipa::Modify for SecuritySchemes {
         (name = "ui", description = "Dashboard SPA and debug UI assets, plus their WebSocket feeds."),
     ),
     paths(
+crate::dashboard_aliases::get,
+crate::dashboard_aliases::save,
 crate::dashboard_benchmarks::list,
 crate::dashboard_benchmarks::get,
 crate::dashboard_benchmarks::create,

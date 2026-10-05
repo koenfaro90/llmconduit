@@ -19,6 +19,7 @@ const LABELS: Record<RouteName, string> = {
   hosts: 'Hosts',
   recipes: 'Recipes',
   models: 'Models',
+  aliases: 'Aliases',
   deployment: 'Deployment',
   benchmarks: 'Benchmarks',
   access: 'Access',
@@ -27,7 +28,7 @@ const LABELS: Record<RouteName, string> = {
 const SECTIONS: Array<{ label: string; landing: RouteName; routes: RouteName[] }> = [
   { label: 'Chat', landing: 'chat', routes: ['chat'] },
   { label: 'Observe', landing: 'overview', routes: ['overview', 'traffic', 'flows', 'requests', 'sessions', 'throughput', 'activity'] },
-  { label: 'Infrastructure', landing: 'hosts', routes: ['hosts', 'recipes', 'models', 'deployment', 'benchmarks', 'providers', 'topology', 'sankey', 'theater'] },
+  { label: 'Infrastructure', landing: 'hosts', routes: ['hosts', 'recipes', 'models', 'aliases', 'deployment', 'benchmarks', 'providers', 'topology', 'sankey', 'theater'] },
   { label: 'Admin', landing: 'access', routes: ['access', 'account'] },
 ];
 
