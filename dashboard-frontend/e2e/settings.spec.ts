@@ -2,7 +2,6 @@ import {test,expect,VIEWS,login,openView} from './harness';
 
 test('gateway changes stage and apply explicitly',async({page,consoleErrors})=>{
  await login(page);await openView(page,VIEWS.find(v=>v.name==='gateway-settings')!);
- await page.getByRole('button',{name:'Edit settings',exact:true}).click();
  await page.getByLabel('Request timeout',{exact:true}).fill('120');
  await page.getByRole('button',{name:'Validate & stage',exact:true}).click();
  await expect(page.getByText('Revision 1 · applied 0')).toBeVisible();
@@ -11,13 +10,12 @@ test('gateway changes stage and apply explicitly',async({page,consoleErrors})=>{
  await expect(page.getByText('Revision 1 · applied 1')).toBeVisible();
  expect(consoleErrors).toEqual([]);
 });
-test('profile forms use named controls and retain an optional advanced editor',async({page,consoleErrors})=>{
+test('profile forms use named controls and explain sections without JSON editors',async({page,consoleErrors})=>{
  await login(page);await openView(page,VIEWS.find(v=>v.name==='profiles')!);
- await page.getByRole('button',{name:'Edit settings',exact:true}).click();
- await page.getByRole('button',{name:'Add model profile',exact:true}).first().click();
+ const add=page.getByRole('button',{name:'Add model profile',exact:true}).first();const panel=add.locator('xpath=ancestor::*[@data-testid="panel-header"]');await expect(panel).toBeVisible();await page.getByRole('button',{name:'Help: Model profiles',exact:true}).hover();await expect(page.getByRole('tooltip')).toContainText('A model profile combines');await add.click();
  await page.getByLabel('Name',{exact:true}).fill('test-profile');
  await page.getByLabel('Served model',{exact:true}).fill('test-upstream');
- await expect(page.locator('.monaco-editor:visible')).toHaveCount(0);
+ await expect(page.locator('.monaco-editor')).toHaveCount(0);await expect(page.getByText(/Advanced JSON/)).toHaveCount(0);
  await page.getByRole('button',{name:'Update draft',exact:true}).click();
  await expect(page.getByText('test-profile',{exact:true})).toBeVisible();
  await expect(page.getByRole('button',{name:'Apply staged configuration',exact:true})).toHaveCount(0);
@@ -37,9 +35,8 @@ test('all new management pages fit mobile and preserve masked secrets',async({pa
 test('host policy and metric controls work on mobile without JSON',async({page,consoleErrors})=>{
  await login(page);await openView(page,VIEWS.find(v=>v.name==='host-settings')!);
  const host=page.getByTestId('host-settings-view').getByRole('combobox').first();await expect(host.locator('option')).not.toHaveCount(1);await host.selectOption({index:1});
- await page.getByRole('button',{name:'Edit host settings',exact:true}).click();
  await expect(page.getByLabel('Host RAM budget',{exact:true})).toBeVisible();await expect(page.getByLabel('Cpu sampling interval',{exact:true})).toHaveValue('5');
- await page.getByLabel('Cpu sampling interval',{exact:true}).fill('1');await expect(page.locator('.monaco-editor:visible')).toHaveCount(0);
+ await page.getByLabel('Cpu sampling interval',{exact:true}).fill('1');await expect(page.locator('.monaco-editor')).toHaveCount(0);await expect(page.getByText(/Advanced JSON/)).toHaveCount(0);
  await page.setViewportSize({width:390,height:844});const compact=page.getByRole('button',{name:'Compact mobile',exact:true});if(await compact.getAttribute('aria-pressed')!=='true')await compact.click();
  await expect(page.getByLabel('Host RAM budget',{exact:true})).toBeVisible();expect(await page.evaluate(()=>document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
  await page.screenshot({path:'test-results/host-settings-form-mobile.png',fullPage:true});

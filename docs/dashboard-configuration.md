@@ -32,17 +32,23 @@ Host settings use numeric sampling intervals with unit selectors and Collect
 toggles, plus RAM/GPU budget and allowlist controls. Physical GPU totals and GPU
 identity are read-only; Fleet still validates policy changes against loaded workloads.
 
-Monaco remains behind **Advanced JSON** for backend extensions and unusual
-configuration shapes. Invalid advanced edits block saving. Startup overrides are
+Settings have no JSON editors. Backend extensions use named, typed values with
+recursive list/object controls; client matching and extraction support header
+regular expressions, body fields and nested conditions. Role rules retain their
+backend wire format. Help icons explain each configuration section on hover,
+keyboard focus or tap. Panel and entry actions are in top-right headers. Startup overrides are
 separate from document controls; sign-in and SSO options have readable labels.
 Changing a document setting removes its existing override. Server-side validation,
 revision checks and stage/apply semantics remain authoritative.
 
 ## Stage and apply
 
-Edit settings, validate and stage, review the revision, then **Apply staged
+Edit a field or use Add/Edit/Copy/Remove directly to start a local draft, validate
+and stage, review the revision, then **Apply staged
 configuration**. Apply includes all staged pages. Revision checks prevent stale
-editors overwriting newer settings; a failed save retains the local draft.
+editors overwriting newer settings; the draft freezes the revision on the first
+interaction, including opening an entry editor. A failed save retains the draft;
+Discard restores saved values and closes unfinished entry editors.
 Reads require administrator access; writes also require the existing session and
 CSRF protection. Configuration administration remains available when ordinary
 mutations are disabled, so an administrator can reenable them through Authentication.
@@ -133,9 +139,9 @@ sampling and policy files on restart; use the page or central telemetry helper t
 ## Validation
 
 Rust suite and OpenAPI route inventory, Clippy, SQL migration/key-scope tests,
-Fleet race/vet checks, 784 frontend tests, typed/linted frontend build and desktop
+Fleet race/vet checks, 801 frontend tests, typed/linted frontend build and desktop
 page baselines cover these APIs. Browser workflows cover explicit stage/apply,
-Monaco add/format without accidental form submission and all nine pages at 390px.
+direct row actions, nested typed fields, help and header placement and all nine pages at 390px.
 Native/live rollout results are recorded in the operations repository.
 
 The native lifecycle harness is reproducible with a built release binary:

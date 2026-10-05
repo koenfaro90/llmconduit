@@ -1,4 +1,4 @@
-import { useMemo, useState, type FormEvent, type ReactNode } from 'react';
+import { useId, useMemo, useState, type FormEvent, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { getConnection, queryKeys } from '../../api/connection';
 import { FacetSelect, type FacetSelection } from '../../components/ui/FacetSelect';
@@ -8,7 +8,7 @@ import { EMPTY_FILTERS } from '../../components/FlowTable/filterTypes';
 import { useFlowRows } from '../../components/FlowTable/useFlowRows';
 import { fmtCost, fmtElapsed, fmtTokens } from '../../components/FlowTable/format';
 import { buildProviderLatency, fmtProviderLatencyMs } from '../../components/viz/providerLatency';
-import { Panel } from '../../components/ui/Panel';
+import { Panel, PanelHeader } from '../../components/ui/Panel';
 import { Button } from '../../components/ui/Button';
 import { DataTable } from '../../components/ui/DataTable';
 import type { DataTableColumn } from '../../components/ui/dataTableModel';
@@ -228,7 +228,7 @@ function ConfiguredProvidersPanel({
   onDelete: (id: string) => void;
   onUpdate:(id:string,body:{revision:number;name:string;base_url:string;enabled:boolean;api_key:string|null})=>Promise<ConfiguredProvider>;
 }) {
-  const [editing,setEditing]=useState<ConfiguredProvider|null>(null);
+  const formId=useId();const [editing,setEditing]=useState<ConfiguredProvider|null>(null);
   const [enabled,setEnabled]=useState(true);
   const [clearKey,setClearKey]=useState(false);
   const [name, setName] = useState('');
@@ -241,25 +241,17 @@ function ConfiguredProvidersPanel({
 
   return (
     <Panel className="p-4" data-testid="configured-providers-panel">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
+      <PanelHeader label="Additional providers" help="A provider is an external inference API endpoint. LLMConduit discovers its available models and retains its credential server-side. Gateway backend settings configure the core routing endpoints." actions={<Button type="submit" form={formId} disabled={!mutationsEnabled || busy || !name.trim() || !baseUrl.trim() || (!editing&&!apiKey)}>{editing?"Save provider":"Discover & add"}</Button>}><div>
           <h2 className="text-sm font-semibold">Additional providers</h2>
           <p className="mt-1 text-[10px] leading-relaxed text-text-muted">
             Add an OpenAI-compatible endpoint. LLMConduit discovers its models; API keys remain server-side. <a className="text-accent underline" href="#/provider-settings">Gateway backend settings</a> · <a className="text-accent underline" href="#/profiles">Profiles &amp; routing</a>.
           </p>
-        </div>
-        {!mutationsEnabled && (
-          <span className="rounded-sm bg-status-cooling/15 px-2 py-1 text-[10px] uppercase tracking-wide text-status-cooling">
-            mutations disabled
-          </span>
-        )}
-      </div>
+        </div></PanelHeader>
 
-      <form className="mt-3 grid gap-2 lg:grid-cols-[minmax(10rem,0.7fr)_minmax(16rem,1.4fr)_minmax(12rem,1fr)_auto]" onSubmit={submit}>
+      <form id={formId} className="mt-3 grid gap-2 lg:grid-cols-[minmax(10rem,0.7fr)_minmax(16rem,1.4fr)_minmax(12rem,1fr)]" onSubmit={submit}>
         <input aria-label="Provider name" required value={name} onChange={(event) => setName(event.target.value)} placeholder="provider name" className={INPUT} />
         <input aria-label="Provider URL" required type="url" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.example.com/v1" className={INPUT} />
         <input aria-label="Provider API key" required={!editing} type="password" autoComplete="new-password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={editing?"Leave unchanged to keep credential":"API key"} className={INPUT} />
-        <Button type="submit" disabled={!mutationsEnabled || busy || !name.trim() || !baseUrl.trim() || (!editing&&!apiKey)}>{editing?"Save provider":"Discover & add"}</Button>
       </form>
 
       {editing&&<div className="mt-2 flex flex-wrap gap-3 text-xs"><label className="flex gap-2"><input type="checkbox" checked={enabled} onChange={e=>setEnabled(e.target.checked)}/>Provider enabled</label><label className="flex gap-2"><input type="checkbox" checked={clearKey} onChange={e=>setClearKey(e.target.checked)}/>Clear credential</label><Button variant="ghost" onClick={()=>{setEditing(null);setName('');setBaseUrl('');setApiKey('');setClearKey(false)}}>Cancel edit</Button></div>}

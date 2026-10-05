@@ -147,8 +147,11 @@ Use the shared `SettingsField` and `settingsSchema` controls for configuration.
 Keep supported choices, units and bounds aligned with Rust/Fleet types; preserve
 unknown fields and unset/false distinctions. Use readable backend names for ordered
 references. Retain credential markers on edits; copies need fresh IDs and their own
-credentials. Physical host/GPU identity and totals are read-only. Advanced Monaco
-is optional, and invalid advanced edits must block save. Server-side stage/preflight
+credentials. Physical host/GPU identity and totals are read-only. Do not expose
+Advanced JSON in settings: recursive typed fields cover backend extensions and
+variant rules. Row actions and fields begin revision-frozen local drafts directly;
+no global Edit gate. Use PanelHeader for top-right actions and accessible HelpIcon
+copy explaining each configuration section. Discard resets unfinished entry editors. Server-side stage/preflight
 remains the authoritative validator; routine live-apply behavior must not change.
 
 ## Testing
