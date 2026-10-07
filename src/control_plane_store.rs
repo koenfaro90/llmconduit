@@ -587,14 +587,21 @@ pub trait PersistenceStore: PersistenceWriter {
     async fn prune_orphan_blobs(&self) -> StoreResult<u64>;
 
     async fn get_session(&self, id: &str) -> StoreResult<Option<crate::sessions::SessionRow>>;
-    /// A declared node by `(harness, external_id)`, or the anonymous bucket
-    /// for `(harness, client_label)` when `external_id` is `None`.
+    /// A declared node by `(harness, external_id)`.
     async fn find_session(
         &self,
         harness: &str,
-        external_id: Option<&str>,
-        client_label: Option<&str>,
+        external_id: &str,
     ) -> StoreResult<Option<crate::sessions::SessionRow>>;
+    /// The client's most recently active conversation nodes (inferred roots
+    /// with no parent), newest first, at most `limit` — the warm-up source for
+    /// content-matching undeclared requests.
+    async fn recent_conversations(
+        &self,
+        harness: &str,
+        client_key: &str,
+        limit: usize,
+    ) -> StoreResult<Vec<crate::sessions::SessionRow>>;
     /// Most recently active nodes at/after `since_ms`; `roots_only` limits to
     /// nodes without a parent.
     async fn list_sessions(
@@ -3184,33 +3191,47 @@ impl PersistenceStore for SqlStore {
     async fn find_session(
         &self,
         harness: &str,
-        external_id: Option<&str>,
-        client_label: Option<&str>,
+        external_id: &str,
     ) -> StoreResult<Option<crate::sessions::SessionRow>> {
         let pg = self.postgres();
-        let rows: Vec<crate::sessions::SessionRow> = match external_id {
-            Some(external_id) => {
-                let sql = format!(
-                    "{SESSION_COLUMNS} WHERE harness = {} AND external_id = {} \
-                     ORDER BY last_seen_ms DESC LIMIT 1",
-                    placeholder(pg, 1),
-                    placeholder(pg, 2)
-                );
-                fetch_all_decoded!(self, &sql, [harness, external_id], decode_session)
-            }
-            None => {
-                let sql = format!(
-                    "{SESSION_COLUMNS} WHERE harness = {} AND external_id IS NULL \
-                     AND parent_id IS NULL AND kind = 'inferred' \
-                     AND COALESCE(client_label, '') = {} ORDER BY last_seen_ms DESC LIMIT 1",
-                    placeholder(pg, 1),
-                    placeholder(pg, 2)
-                );
-                let label = client_label.unwrap_or_default();
-                fetch_all_decoded!(self, &sql, [harness, label], decode_session)
-            }
-        };
+        let sql = format!(
+            "{SESSION_COLUMNS} WHERE harness = {} AND external_id = {} \
+             ORDER BY last_seen_ms DESC LIMIT 1",
+            placeholder(pg, 1),
+            placeholder(pg, 2)
+        );
+        let rows: Vec<crate::sessions::SessionRow> =
+            fetch_all_decoded!(self, &sql, [harness, external_id], decode_session);
         Ok(rows.into_iter().next())
+    }
+
+    async fn recent_conversations(
+        &self,
+        harness: &str,
+        client_key: &str,
+        limit: usize,
+    ) -> StoreResult<Vec<crate::sessions::SessionRow>> {
+        let pg = self.postgres();
+        // The client key is the client label when present, else the virtual
+        // key id — `conversation_client_key`. Conversation nodes created
+        // before a label existed carry only `virtual_key_id`, so match either.
+        let sql = format!(
+            "{SESSION_COLUMNS} WHERE harness = {} AND kind = 'inferred' \
+             AND parent_id IS NULL AND external_id IS NULL \
+             AND (COALESCE(client_label, '') = {} OR COALESCE(virtual_key_id, '') = {}) \
+             ORDER BY last_seen_ms DESC LIMIT {}",
+            placeholder(pg, 1),
+            placeholder(pg, 2),
+            placeholder(pg, 3),
+            placeholder(pg, 4)
+        );
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        Ok(fetch_all_decoded!(
+            self,
+            &sql,
+            [harness, client_key, client_key, limit],
+            decode_session
+        ))
     }
 
     async fn list_sessions(
@@ -4790,7 +4811,7 @@ mod tests {
         };
         assert_eq!(
             migration_versions,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
         );
         let request_indexes: Vec<String> = match &store.pool {
             SqlPool::Sqlite(pool) => sqlx::query(
@@ -5136,7 +5157,7 @@ mod tests {
 
         assert_eq!(
             store
-                .find_session("claude-code", Some("s-1"), None)
+                .find_session("claude-code", "s-1")
                 .await
                 .unwrap()
                 .map(|row| row.id),
@@ -5144,28 +5165,52 @@ mod tests {
         );
         assert!(
             store
-                .find_session("claude-code", Some("nope"), None)
+                .find_session("claude-code", "nope")
                 .await
                 .unwrap()
                 .is_none()
         );
+        // Conversation nodes: inferred roots are returned newest-first, and
+        // only for the matching client key.
         store
             .upsert_session(session("bucket", None, None, 130))
             .await
             .unwrap();
+        let mut other_client = session("other-client", None, None, 140);
+        other_client.client_label = Some("key-other".to_string());
+        store.upsert_session(other_client).await.unwrap();
+        let conversations = store
+            .recent_conversations("claude-code", "key-abc", 10)
+            .await
+            .unwrap();
         assert_eq!(
+            conversations
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            ["bucket"]
+        );
+        assert!(
             store
-                .find_session("claude-code", None, Some("key-abc"))
+                .recent_conversations("claude-code", "key-other", 10)
                 .await
                 .unwrap()
-                .map(|row| row.id),
-            Some("bucket".to_string())
+                .iter()
+                .all(|row| row.id == "other-client")
+        );
+        // A declared node is never a conversation candidate.
+        assert!(
+            store
+                .recent_conversations("claude-code", "s-1", 10)
+                .await
+                .unwrap()
+                .is_empty()
         );
 
         let roots = store.list_sessions(0, true, None, None, 10).await.unwrap();
         assert_eq!(
             roots.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
-            ["root", "bucket"]
+            ["root", "other-client", "bucket"]
         );
         let all = store
             .list_sessions(115, false, None, None, 10)
@@ -5173,7 +5218,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             all.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
-            ["root", "bucket", "grand"]
+            ["root", "other-client", "bucket", "grand"]
         );
         store
             .upsert_session(session("bucket2", None, None, 130))
@@ -5185,7 +5230,7 @@ mod tests {
                 .iter()
                 .map(|row| row.id.as_str())
                 .collect::<Vec<_>>(),
-            ["root", "bucket2"]
+            ["root", "other-client"]
         );
         let second_page = store
             .list_sessions(0, true, Some(130), Some("bucket2"), 2)
@@ -6855,5 +6900,112 @@ mod tests {
         writer.release.notify_waiters();
         queue.flush().await.expect("flush");
         assert_eq!(*writer.writes.lock().unwrap(), vec!["begin", "event"]);
+    }
+
+    #[tokio::test]
+    async fn migration_0017_detaches_bucket_rows_and_reattaches_inferred_children() {
+        // The production mixing this migration cleans up: a per-client
+        // "bucket" inferred root that swallowed thousands of unrelated
+        // conversations, plus inferred sub-sessions nested under declared
+        // sessions (and under buckets, which have no declared ancestor).
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("sqlite://{}", dir.path().join("m.db").display());
+        let store = SqlStore::connect_sqlite(&url).await.unwrap();
+
+        let row =
+            |id: &str, parent: Option<&str>, kind: &str, external: Option<&str>, depth: i64| {
+                crate::sessions::SessionRow {
+                    display_number: None,
+                    id: id.to_string(),
+                    parent_id: parent.map(str::to_string),
+                    kind: kind.to_string(),
+                    harness: "oh-my-pi".to_string(),
+                    harness_version: None,
+                    external_id: external.map(str::to_string),
+                    session_kind: None,
+                    client_label: Some("key-abc".to_string()),
+                    virtual_key_id: None,
+                    user_id: None,
+                    depth,
+                    root_request_id: None,
+                    spawned_by_request_id: None,
+                    first_seen_ms: 1,
+                    last_seen_ms: 1,
+                    request_count: 0,
+                }
+            };
+        // declared root -> inferred child; bucket root -> inferred child.
+        store
+            .upsert_session(row("decl-1", None, "declared", Some("s-1"), 0))
+            .await
+            .unwrap();
+        store
+            .upsert_session(row("sub-1", Some("decl-1"), "inferred", None, 1))
+            .await
+            .unwrap();
+        store
+            .upsert_session(row("bucket-1", None, "inferred", None, 0))
+            .await
+            .unwrap();
+        store
+            .upsert_session(row("sub-2", Some("bucket-1"), "inferred", None, 1))
+            .await
+            .unwrap();
+
+        for (id, session) in [
+            ("r-bucket", "bucket-1"),
+            ("r-sub", "sub-1"),
+            ("r-sub2", "sub-2"),
+            ("r-decl", "decl-1"),
+        ] {
+            let mut req = request(id);
+            req.session_id = Some(session.to_string());
+            req.chain_parent_request_id = Some("r-prev".to_string());
+            req.divergence_kind = Some("append".to_string());
+            req.cache_bust = Some(false);
+            store.begin_request(req).await.unwrap();
+        }
+
+        // The connect-time migrate() ran 0017 against an EMPTY database, so
+        // the rows seeded above are still pre-0017 truth. Roll only the
+        // migration record (and its index) back out so the next migrate()
+        // applies exactly 0017 against them.
+        let pool = match &store.pool {
+            SqlPool::Sqlite(pool) => pool,
+            SqlPool::Postgres(_) => unreachable!("sqlite test"),
+        };
+        sqlx::query("DROP INDEX IF EXISTS idx_sessions_conversations")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version >= 17")
+            .execute(pool)
+            .await
+            .unwrap();
+        store.migrate().await.unwrap();
+
+        // Bucket-attached request: detached entirely (fabricated lineage).
+        let bucket_req = store.get_request("r-bucket").await.unwrap().unwrap();
+        assert_eq!(bucket_req.session_id, None);
+        assert_eq!(bucket_req.chain_parent_request_id, None);
+        assert_eq!(bucket_req.divergence_kind, None);
+        assert_eq!(bucket_req.cache_bust, None);
+        // Child of the bucket: no declared ancestor ⇒ detached too.
+        let sub2 = store.get_request("r-sub2").await.unwrap().unwrap();
+        assert_eq!(sub2.session_id, None);
+        // Inferred child of a declared session: reattached to the declared
+        // ancestor, lineage kept.
+        let sub = store.get_request("r-sub").await.unwrap().unwrap();
+        assert_eq!(sub.session_id.as_deref(), Some("decl-1"));
+        assert_eq!(sub.chain_parent_request_id.as_deref(), Some("r-prev"));
+        assert_eq!(sub.divergence_kind.as_deref(), Some("append"));
+        // Declared rows untouched.
+        let decl = store.get_request("r-decl").await.unwrap().unwrap();
+        assert_eq!(decl.session_id.as_deref(), Some("decl-1"));
+        // Every inferred session row is gone.
+        for id in ["sub-1", "bucket-1", "sub-2"] {
+            assert!(store.get_session(id).await.unwrap().is_none(), "{id}");
+        }
+        assert!(store.get_session("decl-1").await.unwrap().is_some());
     }
 }

@@ -474,6 +474,144 @@ async fn persistence_links_requests_into_sessions_and_flags_cache_busts() {
     assert_eq!(last.depth, 0);
 }
 
+#[tokio::test]
+async fn undeclared_conversations_content_match_into_separate_sessions() {
+    // The production omp shape: a client with a User-Agent but NO session
+    // identifier. Two unrelated conversations sharing the same system prompt
+    // and tools must land on two distinct conversation nodes (the old linker
+    // merged them into one per-client bucket), and each conversation's second
+    // turn must extend its own node with `append` lineage.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{"id": "served-model"}]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse(&[
+                    serde_json::json!({
+                        "id": "chat-1",
+                        "choices": [{"index": 0, "delta": {"content": "ok"}, "finish_reason": null}]
+                    }),
+                    serde_json::json!({
+                        "id": "chat-1",
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+                    }),
+                ])),
+        )
+        .mount(&server)
+        .await;
+    let config = Config::from_persisted(&PersistedConfig {
+        upstream_base_url: format!("{}/v1", server.uri()),
+        ..PersistedConfig::default()
+    })
+    .unwrap();
+    let (_unused, gateway) = llmconduit::build_app_with_gateway(config);
+    let writer = Arc::new(RecordingWriter::default());
+    let queue = PersistenceQueue::spawn(
+        Arc::clone(&writer) as Arc<dyn PersistenceWriter>,
+        NonZeroUsize::new(64).unwrap(),
+    );
+    let gateway = Arc::new(
+        gateway
+            .as_ref()
+            .clone()
+            .with_persistence_queue(queue.clone()),
+    );
+    let app = llmconduit::build_app_from_gateway(gateway);
+
+    let send = |messages: serde_json::Value| {
+        let app = app.clone();
+        async move {
+            let body = serde_json::json!({
+                "model": "served-model",
+                "messages": messages,
+                "stream": false
+            });
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/chat/completions")
+                        .header("content-type", "application/json")
+                        // oh-my-pi's User-Agent with NO session header and no
+                        // prompt_cache_key: the undeclared shape.
+                        .header("user-agent", "omp/18.6.1")
+                        .header("authorization", "Bearer client-key-omp")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let _ = axum::body::to_bytes(response.into_body(), 256 * 1024)
+                .await
+                .unwrap();
+        }
+    };
+    let sys = serde_json::json!({"role": "system", "content": "be brief"});
+    let u1 = serde_json::json!({"role": "user", "content": "first conversation"});
+    let a1 = serde_json::json!({"role": "assistant", "content": "ok"});
+    let u2 = serde_json::json!({"role": "user", "content": "second turn"});
+    let v1 = serde_json::json!({"role": "user", "content": "a DIFFERENT conversation"});
+    let a2 = serde_json::json!({"role": "assistant", "content": "ok"});
+    let v2 = serde_json::json!({"role": "user", "content": "its second turn"});
+    // Conversation A: turn 1, then conversation B: turn 1 (same system
+    // prompt — the old bug chained it onto A), then each continues.
+    send(serde_json::json!([sys.clone(), u1])).await;
+    send(serde_json::json!([sys.clone(), v1])).await;
+    send(serde_json::json!([sys, u1, a1, u2])).await;
+    send(serde_json::json!([sys, v1, a2, v2])).await;
+    queue.flush().await.unwrap();
+
+    let begins = writer.begins.lock().unwrap();
+    assert_eq!(begins.len(), 4);
+    assert!(
+        begins
+            .iter()
+            .all(|row| row.harness.as_deref() == Some("oh-my-pi"))
+    );
+    let a_node = begins[0].session_id.clone().expect("conversation A node");
+    let b_node = begins[1].session_id.clone().expect("conversation B node");
+    assert_ne!(a_node, b_node, "unrelated conversations never share a node");
+    // Each conversation continues on its own node with append lineage.
+    assert_eq!(begins[2].session_id.as_deref(), Some(a_node.as_str()));
+    assert_eq!(begins[2].divergence_kind.as_deref(), Some("append"));
+    assert_eq!(
+        begins[2].chain_parent_request_id.as_deref(),
+        Some(begins[0].id.as_str())
+    );
+    assert_eq!(begins[3].session_id.as_deref(), Some(b_node.as_str()));
+    assert_eq!(begins[3].divergence_kind.as_deref(), Some("append"));
+    assert_eq!(
+        begins[3].chain_parent_request_id.as_deref(),
+        Some(begins[1].id.as_str())
+    );
+    // Both are inferred conversation nodes carrying the client identity.
+    let sessions = writer.sessions.lock().unwrap();
+    for node in [&a_node, &b_node] {
+        let row = sessions
+            .iter()
+            .rev()
+            .find(|row| &row.id == node)
+            .unwrap_or_else(|| panic!("node {node} upserted"));
+        assert_eq!(row.kind, "inferred");
+        assert_eq!(row.parent_id, None);
+        assert!(
+            row.client_label
+                .as_deref()
+                .is_some_and(|l| l.starts_with("key-"))
+        );
+        assert_eq!(row.harness, "oh-my-pi");
+    }
+}
+
 #[async_trait]
 impl PersistenceWriter for RecordingWriter {
     async fn begin_request(&self, row: RequestRow) -> StoreResult<()> {

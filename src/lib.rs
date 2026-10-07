@@ -243,7 +243,6 @@ impl Default for ControlPlaneRuntime {
                 .to_string(),
             harness_detector: Arc::new(crate::harness::HarnessDetector::builtin()),
             session_linker: Arc::new(crate::sessions::SessionLinker::with_display_numbers(
-                true,
                 display_numbers,
             )),
             yaml_key_specs: Vec::new(),

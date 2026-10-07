@@ -20,6 +20,16 @@ upstream KV/prefix cache. It also fixes the pi-agent header convention.
 - For each request we know the **divergence point** from its predecessor in
   the same chain, classified, so KV-cache busting is a column you can filter
   on.
+- Requests from a client that declares **no** session id are matched into
+  **conversation nodes** by content: a request shares conversation messages
+  (user/assistant/tool turns) with a known conversation of that client, else
+  it opens its own conversation node. There is no per-client bucket and no
+  chaining after the previous head — both merged unrelated conversations
+  (observed in production: thousands of unrelated oh-my-pi conversations
+  chained onto one node because they shared only the system prompt and tools).
+  Instructions and tool lists never count as a match signal. Sub-sessions are
+  never inferred: a request inside a declared session that matches no chain
+  starts a new chain on that session's node.
 
 ## Vocabulary
 
@@ -27,21 +37,25 @@ upstream KV/prefix cache. It also fixes the pi-agent header convention.
 |---|---|
 | harness | The client program driving the model: `claude-code`, `codex`, `pi`, `oh-my-pi`, `pi-agent`, `unknown`. |
 | declared session | A session id the harness put on the wire (header or body field). |
-| inferred session | A session node the gateway created because a request did not extend any live chain in its parent. |
+| conversation node | An inferred node the gateway opened for a client that declared no session id: one per conversation, matched by shared conversation-message content. |
 | chain | The sequence of requests that each extend the previous one's item list. Every session node owns one chain. |
 | item | One addressable unit of a request body: the instructions/system block, one tool definition, one message or input item. |
 | divergence | The first item index at which a request's item hashes differ from its chain predecessor. |
 
-A session node is either declared or inferred, and both kinds nest. Examples:
+Only declared sessions nest. Examples:
 
 - Claude Code: one declared session per CLI process. A Task/Agent sub-agent
-  reuses the same session id but starts a new conversation. It appears as an
-  inferred sub-session whose parent is the declared session, and whose
-  `spawned_by_request_id` is the request that was in flight when it started.
+  reuses the same session id but starts a new conversation; both conversations
+  are chains on the one declared session node.
 - pi-agent: every sub-agent is its own process with its own session id. With
   the header convention below it declares its parent, so the tree is exact.
-- Upstream pi and Codex: declared session per process; sub-agents, if any,
-  are inferred as for Claude Code.
+- Codex: declared session per process; sub-threads declare their thread id
+  and parent, so the tree is exact.
+- oh-my-pi: sends `prompt_cache_key` (a per-session UUID) on the OpenAI
+  wire when the provider compat flag `supportsPromptCacheKey` is on, which
+  the `oh-my-pi` profile extracts as the session id — exact attribution.
+  Without it (or for any session-id-less client) conversations are matched
+  by content per client key.
 
 ## Harness detection
 
@@ -50,9 +64,6 @@ A session node is either declared or inferred, and both kinds nest. Examples:
 ```yaml
 control_plane:
   sessions:
-    # Whether to infer sub-sessions from prefix lineage when the harness did
-    # not declare them. Per-profile override below.
-    infer_sub_sessions: true
     # Shipped profiles are evaluated after `harnesses` unless `builtin: replace`.
     builtin: extend            # extend | replace | disable
     harnesses:
@@ -93,11 +104,12 @@ marked as such.
 | name | match | session_id | sub-session id | parent | sub-sessions |
 |---|---|---|---|---|---|
 | `pi-agent` | header `x-llm-harness` starts with `pi-agent` | `x-llm-session-id` | `x-llm-session-id` | `x-llm-parent-session-id` | declared |
-| `claude-code` | header `x-claude-code-session-id` present, or UA `^claude-cli/` (third-party observed), or body `/metadata/user_id` parses as JSON with `session_id` | `x-claude-code-session-id`, else body `/metadata/user_id` JSON `session_id`, else legacy `_session_<uuid>` capture | `x-claude-code-agent-id` (present only on sub-agent requests; fresh per spawn) | `x-claude-code-parent-agent-id` (nested agents), else the session | declared, infer as fallback |
-| `codex` | header `originator` starts with `codex` or UA `^codex_cli_rs/` | header `session-id` (legacy `session_id`), else body `/client_metadata/session_id` | header `thread-id`, else `x-client-request-id`, else body `/client_metadata/thread_id` | header `x-codex-parent-thread-id`, else body `/client_metadata/x-codex-parent-thread-id` | declared, infer as fallback |
-| `oh-my-pi` | UA `^omp/` | `x-claude-code-session-id` (Anthropic protocol), else `session_id`, else `x-client-request-id`, else body `/prompt_cache_key` | same | none on the wire | infer |
-| `pi` | UA `^pi (` or (`x-session-affinity` present and no other profile matched) | `x-session-affinity`, else `x-client-request-id`, else `session_id` | same | none on the wire | infer |
-| `generic` | always | first of `x-llm-session-id`, conversation header, `session-id`, `session_id`, `x-session-id`, `x-session-affinity`, `x-client-request-id`, body `/prompt_cache_key`, body `/user` | same | `x-llm-parent-session-id` | infer |
+| `oh-my-pi` | UA `^omp/` | `x-omp-session-id`, else `x-llm-session-id`, else `x-claude-code-session-id` (Anthropic protocol), else `session_id`, else `x-client-request-id`, else body `/prompt_cache_key` (sent when the provider compat `supportsPromptCacheKey` is on) | `x-omp-sub-session-id`, else `x-llm-sub-session-id` | `x-omp-parent-session-id`, else `x-llm-parent-session-id` | declared |
+| `claude-code` | header `x-claude-code-session-id` present, or UA `^claude-cli/` (third-party observed), or body `/metadata/user_id` parses as JSON with `session_id` | `x-claude-code-session-id`, else body `/metadata/user_id` JSON `session_id`, else legacy `_session_<uuid>` capture | `x-claude-code-agent-id` (present only on sub-agent requests; fresh per spawn) | `x-claude-code-parent-agent-id` (nested agents), else the session | declared |
+| `codex` | header `originator` starts with `codex` or UA `^codex_cli_rs/` | header `session-id` (legacy `session_id`), else body `/client_metadata/session_id` | header `thread-id`, else `x-client-request-id`, else body `/client_metadata/thread_id` | header `x-codex-parent-thread-id`, else body `/client_metadata/x-codex-parent-thread-id` | declared |
+| `opencode` | UA `^opencode/` | none on the wire | — | — | conversations matched by content |
+| `pi` | UA `^pi (` or (`x-session-affinity` present and no other profile matched) | `x-session-affinity`, else `x-client-request-id`, else `session_id` | same | — | conversations matched by content when no id |
+| `generic` | always | first of `x-llm-session-id`, conversation header, `session-id`, `session_id`, `x-session-id`, `x-session-affinity`, `x-client-request-id`, body `/prompt_cache_key`, body `/user` | same | `x-llm-parent-session-id` | conversations matched by content when no id |
 
 Notes from the verification:
 
@@ -112,11 +124,11 @@ Notes from the verification:
   `session_kind`.
 - Upstream pi only sends session headers on Chat Completions when
   `sendSessionAffinityHeaders` is on (default off for generic endpoints); on
-  Responses it always sends `x-client-request-id` and `session_id`. Its
-  sub-agent example spawns a separate process with a fresh session id and no
-  parent pointer, so pi sub-agents are inferred.
-- oh-my-pi's task tool runs sub-agents in-process with a fresh session id and
-  no parent header; inferred as well.
+  Responses it always sends `x-client-request-id` and `session_id`. When it
+  declares no id, its conversations are matched by content per client key.
+- oh-my-pi sub-agents re-use the session id (or `prompt_cache_key`), so both
+  the main conversation and sub-agent conversations are chains on the one
+  session node; omp's own `x-omp-*` headers give exact nesting when present.
 - Session kind values (`x-llm-session-kind`, `x-openai-subagent`) are stored
   verbatim on the session node.
 
@@ -259,9 +271,12 @@ recent sequences per session, warmed from SQL on first touch.
 upstream's reported `cached_tokens`, when present, is stored alongside so an
 operator can confirm the prediction against what the server actually reused.
 
-A `new_chain` request inside a declared session with `sub_sessions: infer`
-creates an inferred sub-session. Its `spawned_by_request_id` is the request
-in the same session that was still streaming when it arrived, if any.
+A `new_chain` request inside a declared session simply starts a new chain on
+the session's own node — sub-sessions are never inferred. For a client that
+declared no session id, a request that shares conversation messages with one
+of that client's known conversations extends that conversation node;
+otherwise it opens a fresh conversation node. Warm-up seeds the client's
+recent conversation nodes from durable rows after a restart.
 
 ## Dashboard
 
@@ -283,10 +298,11 @@ in the same session that was still streaming when it arrived, if any.
   (classifier + bounded in-memory linker with durable warm-up), migration
   0009 (`sessions` table, lineage columns on `requests`), linking at the
   HTTP persistence seam, and the `/dashboard/api/history/sessions*` reads.
-  Deviations from the design above: one chain per node (an inferred
-  sub-session *is* the chain), `spawned_by_request_id` is the parent chain's
-  latest request rather than an in-flight lookup, and ingress now also
-  writes `client_label`/`client_source` on the request row.
+  Deviations from the original design: one chain per node, ingress now also
+  writes `client_label`/`client_source` on the request row, and the 2026-10
+  rewrite (migration 0017) replaced per-client buckets and inferred
+  sub-sessions with content-matched conversation nodes after production
+  showed unrelated conversations merging onto single bucket nodes.
 - Phase 4 (pi-agent) landed in pi-agent on branch `codex-improvements`:
   `extensions/llm-session-headers` plus `extensions/shared/llm-session.ts`;
   the subagent manager passes `--parent-session-id` (a CLI flag, since

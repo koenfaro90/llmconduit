@@ -1224,8 +1224,9 @@ export const mockFetch: typeof fetch = async (input, init): Promise<Response> =>
 };
 
 // ---------------------------------------------------------------------------
-// Durable history seed: a claude-code session with an inferred sub-agent under it, a codex
-// session with a cache bust, and reassembled bodies for the chain diff.
+// Durable history seed: a claude-code session with a declared sub-agent under
+// it, a codex session with a cache bust, and reassembled bodies for the chain
+// diff.
 // ---------------------------------------------------------------------------
 
 const SEED_NOW = Date.now();
@@ -1308,7 +1309,7 @@ function MOCK_ACTIVE_SESSIONS(): ActiveSessionsResponse {
 }
 export const MOCK_SESSIONS: SessionRow[] = [
   mockSession({ id: 'sess_root', harness: 'claude-code', harness_version: '2.1.205', external_id: '11111111-1111-4111-8111-111111111111', root_request_id: 'api_002', request_count: 2 }),
-  mockSession({ id: 'sess_agent', harness: 'claude-code', harness_version: '2.1.205', parent_id: 'sess_root', kind: 'inferred', depth: 1, spawned_by_request_id: 'api_002', root_request_id: 'api_agent_1', request_count: 1, first_seen_ms: SEED_NOW - 30_000, last_seen_ms: SEED_NOW - 29_000 }),
+  mockSession({ id: 'sess_agent', harness: 'claude-code', harness_version: '2.1.205', parent_id: 'sess_root', kind: 'declared', external_id: 'agent-thread-1', depth: 1, root_request_id: 'api_agent_1', request_count: 1, first_seen_ms: SEED_NOW - 30_000, last_seen_ms: SEED_NOW - 29_000 }),
   mockSession({ id: 'sess_codex', harness: 'codex', harness_version: '0.104.0', external_id: 'codex-session-1', root_request_id: 'api_005', request_count: 2, client_label: 'python-httpx/0.27', first_seen_ms: SEED_NOW - 120_000, last_seen_ms: SEED_NOW - 40_000 }),
 ];
 

@@ -45,6 +45,7 @@ describe('sessionsModel', () => {
   it('badges declared vs inferred nodes', () => {
     expect(kindBadge(node()).inferred).toBe(false);
     expect(kindBadge(node({ kind: 'inferred' }))).toMatchObject({ label: 'inferred', inferred: true });
+    expect(kindBadge(node({ kind: 'inferred' })).title).toContain('matched by conversation content');
   });
 
   it('formats ages in the coarsest sensible unit', () => {

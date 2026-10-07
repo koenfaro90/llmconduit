@@ -37,10 +37,6 @@ pub const BUILTIN_PROFILES_YAML: &str = include_str!("harness_profiles.yaml");
 /// `control_plane.sessions` section.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SessionsBootstrap {
-    /// Infer sub-sessions from prefix lineage when a harness does not declare
-    /// them. Profiles with `sub_sessions: none` opt out individually.
-    #[serde(default = "default_true")]
-    pub infer_sub_sessions: bool,
     /// How the built-in profile set combines with `harnesses`.
     #[serde(default)]
     pub builtin: BuiltinPolicy,
@@ -55,7 +51,6 @@ pub struct SessionsBootstrap {
 impl Default for SessionsBootstrap {
     fn default() -> Self {
         Self {
-            infer_sub_sessions: true,
             builtin: BuiltinPolicy::Extend,
             harnesses: Vec::new(),
             extra: BTreeMap::new(),
@@ -251,7 +246,6 @@ impl HarnessProfile {
 #[derive(Debug)]
 pub struct HarnessDetector {
     profiles: Vec<HarnessProfile>,
-    infer_sub_sessions: bool,
 }
 
 /// What detection found for one request.
@@ -322,10 +316,7 @@ impl HarnessDetector {
             .iter()
             .map(|profile| compile_profile(profile, conversation_id_header))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self {
-            profiles,
-            infer_sub_sessions: config.infer_sub_sessions,
-        })
+        Ok(Self { profiles })
     }
 
     /// The built-in set with default settings; never fails.
@@ -339,10 +330,6 @@ impl HarnessDetector {
 
     pub fn profile_names(&self) -> Vec<&str> {
         self.profiles.iter().map(|p| p.name.as_str()).collect()
-    }
-
-    pub fn infer_sub_sessions(&self) -> bool {
-        self.infer_sub_sessions
     }
 
     /// Run detection. `body` is the parsed inbound JSON when available.
@@ -686,7 +673,6 @@ mod tests {
                 "generic"
             ]
         );
-        assert!(detector.infer_sub_sessions());
     }
 
     #[test]
@@ -1030,10 +1016,9 @@ harnesses:
         assert_eq!(identity.harness, "unknown");
         assert_eq!(identity.session_id, None);
 
-        let disabled = profile_yaml("builtin: disable\ninfer_sub_sessions: false\n");
+        let disabled = profile_yaml("builtin: disable\n");
         let detector = HarnessDetector::from_config(&disabled, "x-conversation-id").unwrap();
         assert!(detector.profile_names().is_empty());
-        assert!(!detector.infer_sub_sessions());
 
         let off = profile_yaml(
             "harnesses:\n  - name: claude-code\n    enabled: false\n    match: { always: true }\n",

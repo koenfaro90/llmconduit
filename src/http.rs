@@ -1735,7 +1735,13 @@ async fn log_api_call(
         let link = match persistence_inbound.as_ref() {
             Some(inbound) => match (&inbound.harness, &inbound.split) {
                 (Some(identity), Some(split)) => {
-                    warm_session_index(&gateway, identity, attribution.label.as_deref()).await;
+                    warm_session_index(
+                        &gateway,
+                        identity,
+                        attribution.label.as_deref(),
+                        virtual_key_id,
+                    )
+                    .await;
                     let items = split
                         .items
                         .iter()
@@ -2317,50 +2323,65 @@ async fn offload_redacted_inbound_section(body: Bytes) -> (Option<String>, Vec<u
 }
 
 /// Upper bound on the time a cold-session warm-up may spend reading durable
-/// rows on the request path. On timeout the request links cold (a fresh node).
+/// rows on the request path. On timeout the request links cold.
 const SESSION_WARM_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(250);
-/// Upper bound on descendants warmed for one session.
-const SESSION_WARM_DESCENDANTS: usize = 64;
+/// Upper bound on the client's recent conversation nodes warmed at once, and
+/// on the descendants warmed for one declared session.
+const SESSION_WARM_NODES: usize = 64;
 
-/// Seed the in-memory session index from the durable store for a session the
-/// process has not seen since startup. Declared sessions are looked up by
-/// `(harness, session_id)`; requests without a session id warm their
-/// per-client bucket. Failures and timeouts are logged and ignored.
+/// Seed the in-memory session index from the durable store for a session or
+/// client the process has not seen since startup. Declared sessions are
+/// looked up by `(harness, session_id)` plus their sub-session descendants;
+/// clients that declared no session id warm their recent conversation nodes
+/// (content-matching candidates). Failures and timeouts are logged and
+/// ignored.
 async fn warm_session_index(
     gateway: &Gateway,
     identity: &crate::harness::HarnessIdentity,
     client_label: Option<&str>,
+    virtual_key_id: Option<&str>,
 ) {
     let Some(store) = gateway.persistence_store() else {
         return;
     };
     let linker = gateway.session_linker();
     let external_id = identity.session_id.as_deref();
-    if let Some(external_id) = external_id
-        && linker.knows_declared(&identity.harness, external_id)
-    {
-        return;
-    }
-    if external_id.is_none() && linker.knows_anonymous(&identity.harness, client_label) {
+    if let Some(external_id) = external_id {
+        if linker.knows_declared(&identity.harness, external_id) {
+            return;
+        }
+    } else if linker.knows_conversations(&identity.harness, client_label) {
         return;
     }
     let warm = async {
-        let Some(root) = store
-            .find_session(&identity.harness, external_id, client_label)
-            .await?
-        else {
-            return Ok::<_, String>(());
-        };
-        let mut nodes = vec![root.clone()];
-        nodes.extend(
-            store
-                .session_descendants(&root.id, SESSION_WARM_DESCENDANTS)
-                .await?,
-        );
-        let mut seeded = Vec::with_capacity(nodes.len());
-        for node in nodes {
-            let head = store.chain_head(&node.id).await?;
-            seeded.push((node, head));
+        let mut seeded = Vec::new();
+        match external_id {
+            Some(external_id) => {
+                let Some(root) = store.find_session(&identity.harness, external_id).await? else {
+                    return Ok::<_, String>(());
+                };
+                let mut nodes = vec![root.clone()];
+                nodes.extend(
+                    store
+                        .session_descendants(&root.id, SESSION_WARM_NODES)
+                        .await?,
+                );
+                for node in nodes {
+                    let head = store.chain_head(&node.id).await?;
+                    seeded.push((node, head));
+                }
+            }
+            None => {
+                let client_key =
+                    crate::sessions::conversation_client_key(client_label, virtual_key_id);
+                for node in store
+                    .recent_conversations(&identity.harness, &client_key, SESSION_WARM_NODES)
+                    .await?
+                {
+                    let head = store.chain_head(&node.id).await?;
+                    seeded.push((node, head));
+                }
+            }
         }
         linker.seed(seeded);
         Ok(())

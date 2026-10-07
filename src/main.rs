@@ -772,11 +772,9 @@ async fn prepare_control_plane_runtime(
     .map_err(|error| error.to_string())?;
     tracing::info!(
         profiles = ?harness_detector.profile_names(),
-        infer_sub_sessions = harness_detector.infer_sub_sessions(),
         "harness detection profiles compiled"
     );
     let session_linker = Arc::new(llmconduit::sessions::SessionLinker::with_display_numbers(
-        harness_detector.infer_sub_sessions(),
         display_numbers.clone(),
     ));
     let runtime = ControlPlaneRuntime {

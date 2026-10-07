@@ -735,6 +735,8 @@ export interface SessionRow {
   id: string;
   display_number?: number | null;
   parent_id: string | null;
+  /** `declared` = harness-provided id; `inferred` = a per-conversation node
+   * the gateway opened by content-matching a client that declared no id. */
   kind: 'declared' | 'inferred' | string;
   harness: string;
   harness_version: string | null;

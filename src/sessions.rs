@@ -1,16 +1,24 @@
 //! Session tree and prefix lineage.
 //!
-//! Every persisted request belongs to exactly one **session node**. Nodes
-//! nest arbitrarily (session, sub-session, sub-sub-session) and are either
+//! Every persisted request belongs to exactly one **session node**. Nodes nest
+//! arbitrarily (session, sub-session, sub-sub-session) and are either
 //! *declared* — the harness put the id on the wire (see `crate::harness`) —
-//! or *inferred* — the gateway created them because a request did not extend
-//! any known conversation in its parent.
+//! or *inferred* — a **conversation node** the gateway opened for a client
+//! that declared no session id. Inference is content-based only: an
+//! undeclared request is matched against that client's known conversation
+//! heads by shared conversation messages, and a request that matches nothing
+//! opens its own conversation node. There is no per-client bucket and no
+//! chaining after the previous head — both silently merged unrelated
+//! conversations into one node, which was worse than no attribution.
+//!
+//! Sub-sessions are never inferred: a request inside a declared session that
+//! matches no chain simply starts a new chain on that session's node.
 //!
 //! Each node owns one **chain**: the sequence of requests that each extend the
 //! previous one's item list. Linking a request means finding the chain whose
 //! item hashes are the longest prefix of the new request's, recording the
 //! predecessor and the **divergence** (where and how the new request differs),
-//! and creating nodes as needed. A divergence inside the shared prefix is what
+//! and advancing the chain. A divergence inside the shared prefix is what
 //! breaks an upstream KV/prefix cache, so it is stored as a flag per request.
 //!
 //! The linker is an in-memory index guarded by a mutex; it returns the rows to
@@ -27,11 +35,22 @@ use std::sync::Mutex;
 pub const MAX_NODES: usize = 20_000;
 /// Upper bound on item hashes retained per chain head.
 pub const MAX_HEAD_ITEMS: usize = 8_192;
-/// Upper bound on inferred children examined when matching a request.
+/// Upper bound on conversation nodes examined when matching an undeclared
+/// request, and on the per-client candidate list retained for that matching.
 const MAX_CANDIDATE_CHAINS: usize = 256;
 
 pub const KIND_DECLARED: &str = "declared";
 pub const KIND_INFERRED: &str = "inferred";
+
+/// The per-client key conversation nodes are matched under: the client label
+/// (key hash / configured id), else the virtual key id, else the empty
+/// string. Shared with the warm-up path so both agree on the bucket.
+pub fn conversation_client_key(client_label: Option<&str>, virtual_key_id: Option<&str>) -> String {
+    client_label
+        .or(virtual_key_id)
+        .unwrap_or_default()
+        .to_string()
+}
 
 /// Whether two prefix-less item lists are the same conversation with some
 /// items changed (a rewritten system prompt, an edited tool) rather than two
@@ -224,7 +243,10 @@ pub struct SessionRow {
     pub request_count: i64,
 }
 
-/// What linking produced for one request.
+/// What linking produced for one request. The session node always exists: a
+/// declared request lands on its declared node, an undeclared request either
+/// extends the conversation it content-matches or opens a fresh conversation
+/// node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionLink {
     /// The node whose chain the request extends or starts.
@@ -265,28 +287,25 @@ struct Index {
     display_numbers: crate::control_plane_store::DisplayNumbers,
     nodes: HashMap<String, Node>,
     declared: HashMap<(String, String), String>,
-    anonymous: HashMap<(String, String), String>,
+    /// Conversation nodes per (harness, client key), most recent first.
+    /// Entries may reference evicted nodes; matching skips missing ones.
+    conversations: HashMap<(String, String), Vec<String>>,
     /// Touch order for eviction (front = oldest). May hold stale ids.
     order: VecDeque<String>,
 }
 
 /// In-memory session index. Cheap to clone the handle (`Arc` it).
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct SessionLinker {
     index: std::sync::Arc<Mutex<Index>>,
-    infer_sub_sessions: bool,
 }
 
 impl SessionLinker {
-    pub fn new(infer_sub_sessions: bool) -> Self {
-        Self::with_display_numbers(
-            infer_sub_sessions,
-            crate::control_plane_store::DisplayNumbers::default(),
-        )
+    pub fn new() -> Self {
+        Self::with_display_numbers(crate::control_plane_store::DisplayNumbers::default())
     }
 
     pub fn with_display_numbers(
-        infer_sub_sessions: bool,
         display_numbers: crate::control_plane_store::DisplayNumbers,
     ) -> Self {
         Self {
@@ -294,19 +313,7 @@ impl SessionLinker {
                 display_numbers,
                 ..Index::default()
             })),
-            infer_sub_sessions,
         }
-    }
-
-    pub(crate) fn with_inference_policy(&self, infer_sub_sessions: bool) -> Self {
-        Self {
-            index: self.index.clone(),
-            infer_sub_sessions,
-        }
-    }
-
-    pub fn infer_sub_sessions(&self) -> bool {
-        self.infer_sub_sessions
     }
 
     /// Drop remembered lineage after durable history is cleared, so the next
@@ -335,14 +342,15 @@ impl SessionLinker {
             .contains_key(&(harness.to_string(), external_id.to_string()))
     }
 
-    /// Whether the per-client bucket for requests without a session id is
-    /// already in memory.
-    pub fn knows_anonymous(&self, harness: &str, client_label: Option<&str>) -> bool {
+    /// Whether any conversation node for this client is already in memory.
+    /// The caller uses this to decide whether to warm the client's recent
+    /// conversations from durable rows first.
+    pub fn knows_conversations(&self, harness: &str, client_label: Option<&str>) -> bool {
         let index = self
             .index
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        index.anonymous.contains_key(&(
+        index.conversations.contains_key(&(
             harness.to_string(),
             client_label.unwrap_or_default().to_string(),
         ))
@@ -384,11 +392,14 @@ impl SessionLinker {
         let identity = input.identity;
         let mut touched: Vec<String> = Vec::new();
 
-        // 1. The anchor: the declared session/sub-session, or the per-client
-        //    anonymous bucket when nothing was declared.
-        let anchor = match identity.session_id.as_deref() {
+        // 1. The node the request belongs to.
+        let (node_id, lineage, chain_parent) = match identity.session_id.as_deref() {
+            // A declared session id is exact attribution. Sub-sessions nest
+            // only when declared (pi-agent/codex/claude-code style); a request
+            // that matches no chain simply starts a new chain on its node,
+            // chained after the node's previous head.
             Some(session_id) => {
-                let parent = match (identity.sub_sessions, identity.parent_session_id.as_deref()) {
+                let anchor = match (identity.sub_sessions, identity.parent_session_id.as_deref()) {
                     // A declared session naming a parent (pi-agent sub-agent
                     // process): nest it under that parent, creating a
                     // placeholder when the parent has not been seen yet.
@@ -402,11 +413,11 @@ impl SessionLinker {
                 let session = index.declared_node(
                     identity,
                     session_id,
-                    parent.as_deref(),
+                    anchor.as_deref(),
                     &input,
                     &mut touched,
                 );
-                match (identity.sub_sessions, identity.sub_session_id.as_deref()) {
+                let node_id = match (identity.sub_sessions, identity.sub_session_id.as_deref()) {
                     (SubSessionPolicy::Declared, Some(sub_id)) => {
                         let parent = match identity.parent_session_id.as_deref() {
                             Some(parent_id) => index.declared_node(
@@ -421,86 +432,88 @@ impl SessionLinker {
                         index.declared_node(identity, sub_id, Some(&parent), &input, &mut touched)
                     }
                     _ => session,
-                }
-            }
-            None => index.anonymous_node(identity, &input, &mut touched),
-        };
-
-        // 2. Candidate chains: the anchor's own and its inferred descendants'.
-        let mut candidates = vec![anchor.clone()];
-        index.collect_descendants(&anchor, &mut candidates);
-        // Score = (shared prefix, set overlap): a chain that shares a prefix
-        // beats one that only shares items; among prefix-less matches the
-        // one with more items in common wins (a changed system prompt keeps
-        // the rest of the conversation). An overlap-only match must be
-        // substantial (see [`overlap_is_a_match`]): a side call that shares
-        // one user message with the main conversation is not its rewrite.
-        let mut best: Option<(String, (usize, usize))> = None;
-        for candidate in &candidates {
-            let Some(head) = index
-                .nodes
-                .get(candidate)
-                .and_then(|node| node.head.as_ref())
-            else {
-                continue;
-            };
-            let prefix = shared_prefix(&head.items, input.items);
-            let common = overlap(&head.items, input.items);
-            if prefix == 0 && !overlap_is_a_match(common, &head.items, input.items) {
-                continue;
-            }
-            let score = (prefix, common);
-            if score != (0, 0) && best.as_ref().is_none_or(|(_, current)| score > *current) {
-                best = Some((candidate.clone(), score));
-            }
-        }
-
-        // 3. Decide the node and the lineage.
-        let inference_allowed =
-            self.infer_sub_sessions && identity.sub_sessions != SubSessionPolicy::None;
-        let (node_id, lineage, chain_parent) = match best {
-            Some((node_id, _)) => {
-                let head = index
+                };
+                let (lineage, chain_parent) = index
                     .nodes
                     .get(&node_id)
                     .and_then(|node| node.head.as_ref())
-                    .expect("best candidate has a head");
-                let lineage = classify(&head.items, input.items);
-                let parent = head.request_id.clone();
-                (node_id, lineage, Some(parent))
-            }
-            None => {
-                let anchor_head = index
-                    .nodes
-                    .get(&anchor)
-                    .and_then(|node| node.head.as_ref())
-                    .cloned();
-                match anchor_head {
-                    None => (anchor.clone(), new_chain(), None),
-                    // An unrelated conversation is a sub-session only when it
-                    // is smaller than the chain it appears next to: a
-                    // sub-agent starts from a fresh, shorter prompt while its
-                    // parent has grown through tool round-trips. A larger
-                    // conversation arriving after a short side call (a title
-                    // request, a summary) is the session's real chain.
-                    Some(head) if inference_allowed && head.items.len() > input.items.len() => {
-                        let child = index.inferred_child(
-                            &anchor,
-                            identity,
-                            &input,
+                    .map(|head| {
+                        (
+                            classify(&head.items, input.items),
                             Some(head.request_id.clone()),
-                            &mut touched,
-                        );
-                        (child, new_chain(), None)
+                        )
+                    })
+                    .unwrap_or_else(|| (new_chain(), None));
+                (node_id, lineage, chain_parent)
+            }
+            // No declared session id: content-match against this client's
+            // known conversations. Instructions and tools are shared by every
+            // conversation a harness runs, so only shared conversation
+            // messages count as a match — a request that shares just the
+            // system prompt (the production failure: thousands of unrelated
+            // conversations chained onto one node) matches nothing and opens
+            // its own conversation node.
+            None => {
+                let client_key = conversation_client_key(input.client_label, input.virtual_key_id);
+                let candidates = index
+                    .conversations
+                    .get(&(identity.harness.clone(), client_key.clone()))
+                    .cloned()
+                    .unwrap_or_default();
+                let mut best: Option<(String, (usize, usize))> = None;
+                for candidate in candidates.iter().take(MAX_CANDIDATE_CHAINS) {
+                    let Some(head) = index
+                        .nodes
+                        .get(candidate)
+                        .and_then(|node| node.head.as_ref())
+                    else {
+                        continue;
+                    };
+                    let prefix = shared_prefix(&head.items, input.items);
+                    let common = overlap(&head.items, input.items);
+                    if common == 0 {
+                        continue;
                     }
-                    // No chain matched (no prefix, no substantial overlap):
-                    // a new conversation on the anchor, after the previous one.
-                    Some(head) => (anchor.clone(), new_chain(), Some(head.request_id)),
+                    // Score = (shared prefix, set overlap): a chain that
+                    // shares a prefix beats one that only shares items; among
+                    // prefix-less matches the one with more conversation
+                    // messages in common wins (a changed system prompt keeps
+                    // the rest of the conversation). An overlap-only match
+                    // must be substantial (see [`overlap_is_a_match`]): a
+                    // side call that shares one user message with the main
+                    // conversation is not its rewrite.
+                    if prefix == 0 && !overlap_is_a_match(common, &head.items, input.items) {
+                        continue;
+                    }
+                    let score = (prefix, common);
+                    if best.as_ref().is_none_or(|(_, current)| score > *current) {
+                        best = Some((candidate.clone(), score));
+                    }
+                }
+                match best {
+                    Some((node_id, _)) => {
+                        let head = index
+                            .nodes
+                            .get(&node_id)
+                            .and_then(|node| node.head.as_ref())
+                            .expect("best candidate has a head")
+                            .clone();
+                        index.promote_conversation(&identity.harness, &client_key, &node_id);
+                        (
+                            node_id,
+                            classify(&head.items, input.items),
+                            Some(head.request_id),
+                        )
+                    }
+                    None => {
+                        let node_id = index.conversation_node(identity, &input, &mut touched);
+                        (node_id, new_chain(), None)
+                    }
                 }
             }
         };
 
-        // 4. Advance the chosen chain and account the request on its node.
+        // 2. Advance the chosen chain and account the request on its node.
         if let Some(node) = index.nodes.get_mut(&node_id) {
             let mut items = input.items.to_vec();
             items.truncate(MAX_HEAD_ITEMS);
@@ -556,9 +569,14 @@ impl Index {
             self.declared
                 .insert((row.harness.clone(), external_id.clone()), row.id.clone());
         } else if row.kind == KIND_INFERRED && row.parent_id.is_none() {
-            let key = row.client_label.clone().unwrap_or_default();
-            self.anonymous
-                .insert((row.harness.clone(), key), row.id.clone());
+            let key = (
+                row.harness.clone(),
+                conversation_client_key(row.client_label.as_deref(), row.virtual_key_id.as_deref()),
+            );
+            let list = self.conversations.entry(key).or_default();
+            list.retain(|id| id != &row.id);
+            list.insert(0, row.id.clone());
+            list.truncate(MAX_CANDIDATE_CHAINS);
         }
         if let Some(parent_id) = &row.parent_id
             && let Some(parent) = self.nodes.get_mut(parent_id)
@@ -594,10 +612,9 @@ impl Index {
                 if let Some(external_id) = &node.row.external_id {
                     self.declared
                         .remove(&(node.row.harness.clone(), external_id.clone()));
-                } else if node.row.kind == KIND_INFERRED && node.row.parent_id.is_none() {
-                    let key = node.row.client_label.clone().unwrap_or_default();
-                    self.anonymous.remove(&(node.row.harness.clone(), key));
                 }
+                // Conversation lists keep evicted ids; matching skips missing
+                // nodes and the cap bounds the stale tail.
                 if let Some(parent_id) = &node.row.parent_id
                     && let Some(parent) = self.nodes.get_mut(parent_id)
                 {
@@ -684,22 +701,15 @@ impl Index {
         id
     }
 
-    /// Find or create the per-client bucket for requests without a session id.
-    fn anonymous_node(
+    /// Open a fresh conversation node for an undeclared request that matched
+    /// no known conversation. Registered under the client's candidate list so
+    /// later turns of the same conversation can match it.
+    fn conversation_node(
         &mut self,
         identity: &HarnessIdentity,
         input: &LinkInput<'_>,
         touched: &mut Vec<String>,
     ) -> String {
-        let client_key = input
-            .client_label
-            .or(input.virtual_key_id)
-            .unwrap_or("")
-            .to_string();
-        let key = (identity.harness.clone(), client_key.clone());
-        if let Some(id) = self.anonymous.get(&key).cloned() {
-            return id;
-        }
         let row = SessionRow {
             id: new_id(),
             display_number: Some(self.display_numbers.next_session()),
@@ -708,7 +718,7 @@ impl Index {
             harness: identity.harness.clone(),
             harness_version: identity.version.clone(),
             external_id: None,
-            session_kind: None,
+            session_kind: identity.session_kind.clone(),
             client_label: input.client_label.map(str::to_string),
             virtual_key_id: input.virtual_key_id.map(str::to_string),
             user_id: input.user_id.map(str::to_string),
@@ -725,63 +735,15 @@ impl Index {
         id
     }
 
-    fn inferred_child(
-        &mut self,
-        parent_id: &str,
-        identity: &HarnessIdentity,
-        input: &LinkInput<'_>,
-        spawned_by: Option<String>,
-        touched: &mut Vec<String>,
-    ) -> String {
-        let depth = self
-            .nodes
-            .get(parent_id)
-            .map(|parent| parent.row.depth + 1)
-            .unwrap_or(1);
-        let row = SessionRow {
-            id: new_id(),
-            display_number: Some(self.display_numbers.next_session()),
-            parent_id: Some(parent_id.to_string()),
-            kind: KIND_INFERRED.to_string(),
-            harness: identity.harness.clone(),
-            harness_version: identity.version.clone(),
-            external_id: None,
-            session_kind: identity.session_kind.clone(),
-            client_label: input.client_label.map(str::to_string),
-            virtual_key_id: input.virtual_key_id.map(str::to_string),
-            user_id: input.user_id.map(str::to_string),
-            depth,
-            root_request_id: None,
-            spawned_by_request_id: spawned_by,
-            first_seen_ms: input.now_ms,
-            last_seen_ms: input.now_ms,
-            request_count: 0,
-        };
-        let id = row.id.clone();
-        touched.push(id.clone());
-        self.insert_node(row, None);
-        id
-    }
-
-    /// Inferred descendants of `node`, breadth-first, bounded.
-    fn collect_descendants(&self, node: &str, out: &mut Vec<String>) {
-        let mut queue: VecDeque<String> = VecDeque::new();
-        queue.push_back(node.to_string());
-        while let Some(current) = queue.pop_front() {
-            if out.len() >= MAX_CANDIDATE_CHAINS {
-                break;
-            }
-            let Some(state) = self.nodes.get(&current) else {
-                continue;
-            };
-            for child in &state.children {
-                if let Some(child_node) = self.nodes.get(child)
-                    && child_node.row.kind == KIND_INFERRED
-                {
-                    out.push(child.clone());
-                    queue.push_back(child.clone());
-                }
-            }
+    /// Move a matched conversation node to the front of the client's
+    /// candidate list (most recent first).
+    fn promote_conversation(&mut self, harness: &str, client_key: &str, node_id: &str) {
+        if let Some(list) = self
+            .conversations
+            .get_mut(&(harness.to_string(), client_key.to_string()))
+        {
+            list.retain(|id| id != node_id);
+            list.insert(0, node_id.to_string());
         }
     }
 }
@@ -830,11 +792,22 @@ mod tests {
         items: &'a [ItemFingerprint],
         now: i64,
     ) -> SessionLink {
+        link_with_client(linker, id, identity, "key-abc", items, now)
+    }
+
+    fn link_with_client<'a>(
+        linker: &SessionLinker,
+        id: &'a str,
+        identity: &'a HarnessIdentity,
+        client: &str,
+        items: &'a [ItemFingerprint],
+        now: i64,
+    ) -> SessionLink {
         linker.link(LinkInput {
             api_call_id: id,
             identity,
-            client_label: Some("key-abc"),
-            virtual_key_id: Some("vk-1"),
+            client_label: Some(client),
+            virtual_key_id: None,
             user_id: None,
             items,
             now_ms: now,
@@ -927,7 +900,7 @@ mod tests {
 
     #[test]
     fn declared_session_extends_its_chain_and_flags_cache_busts() {
-        let linker = SessionLinker::new(true);
+        let linker = SessionLinker::new();
         let id = identity("claude-code", Some("s-1"));
         let first = link(&linker, "r1", &id, &convo(&["u1"]), 10);
         assert_eq!(first.lineage.kind, DivergenceKind::NewChain);
@@ -987,44 +960,36 @@ mod tests {
     fn a_side_call_sharing_one_message_is_not_a_rewrite_of_the_main_chain() {
         // opencode's title request reuses the user's message verbatim; with a
         // different system prompt and no tools it must not be classified as
-        // the main conversation with changed instructions (a false cache bust).
-        let linker = SessionLinker::new(true);
+        // the main conversation with changed instructions (a false cache
+        // bust). It opens its own conversation node instead.
+        let linker = SessionLinker::new();
         let id = identity("opencode", None);
         let main = link(&linker, "r1", &id, &convo(&["u1", "a1", "u2"]), 10);
         let side = vec![fp("title-sys", ItemSection::Instructions, None), msg("u1")];
         let title = link(&linker, "r2", &id, &side, 11);
-        assert_ne!(title.lineage.kind, DivergenceKind::InstructionsChanged);
+        assert_ne!(title.session_id, main.session_id);
+        assert_eq!(title.lineage.kind, DivergenceKind::NewChain);
         assert!(!title.lineage.cache_bust);
-        // Nor the other way round: the main conversation arriving after the
-        // title call, sharing two of its three items, is not its rewrite.
-        let linker2 = SessionLinker::new(true);
-        let mut short = vec![fp("title-sys", ItemSection::Instructions, None), msg("u1")];
-        short.push(msg("a1"));
-        link(&linker2, "t1", &id, &short, 20);
-        let big = link(
-            &linker2,
-            "t2",
+        // The main conversation continuing afterwards still lands on its own
+        // node (it shares more conversation messages with its own head than
+        // the two-item side call does).
+        let next = link(
+            &linker,
+            "r3",
             &id,
-            &convo(&["u1", "a1", "u2", "a2", "u3", "a3"]),
-            21,
+            &convo(&["u1", "a1", "u2", "a2", "u3"]),
+            12,
         );
-        assert_eq!(big.lineage.kind, DivergenceKind::NewChain);
-        assert!(!big.lineage.cache_bust);
-        // A genuinely rewritten system prompt still matches by overlap.
-        let mut resent = convo(&["u1", "a1", "u2"]);
-        resent[0].hash = "sys-v2".into();
-        let rewrite = link(&linker, "r3", &id, &resent, 12);
-        assert_eq!(rewrite.session_id, main.session_id);
-        assert_eq!(rewrite.lineage.kind, DivergenceKind::InstructionsChanged);
-        assert!(rewrite.lineage.cache_bust);
+        assert_eq!(next.session_id, main.session_id);
+        assert_eq!(next.lineage.kind, DivergenceKind::Append);
+        assert_eq!(next.chain_parent_request_id.as_deref(), Some("r1"));
     }
 
     #[test]
     fn a_larger_conversation_is_not_a_sub_session_of_a_side_call() {
         // Claude Code fires a two-item "title" request alongside the first real
-        // turn. The real conversation (many more items) must stay the session's
-        // own chain, not become an inferred child of the side call.
-        let linker = SessionLinker::new(true);
+        // turn; the declared session owns both chains (no inferred children).
+        let linker = SessionLinker::new();
         let id = identity("claude-code", Some("s-1"));
         let mut side = vec![fp("title-sys", ItemSection::Instructions, None)];
         side.push(msg("title-prompt"));
@@ -1042,45 +1007,23 @@ mod tests {
     }
 
     #[test]
-    fn a_new_conversation_inside_a_session_becomes_an_inferred_sub_session() {
-        let linker = SessionLinker::new(true);
+    fn an_unrelated_conversation_inside_a_declared_session_stays_on_its_node() {
+        // Sub-sessions are never inferred: a request inside a declared
+        // session that matches no chain starts a new chain on the session's
+        // own node, chained after the previous head.
+        let linker = SessionLinker::new();
         let id = identity("claude-code", Some("s-1"));
-        // The main chain has already made a tool round-trip when it spawns.
         let main = link(&linker, "r1", &id, &convo(&["u1", "a1", "u2"]), 10);
-        // A sub-agent shares the session id but starts from a different prompt.
         let mut agent_items = convo(&["agent-task"]);
         agent_items[0].hash = "agent-sys".into();
         let sub = link(&linker, "r2", &id, &agent_items, 11);
-        assert_ne!(sub.session_id, main.session_id);
+        assert_eq!(sub.session_id, main.session_id);
         assert_eq!(sub.lineage.kind, DivergenceKind::NewChain);
-        let sub_row = sub
-            .upserts
-            .iter()
-            .find(|row| row.id == sub.session_id)
-            .unwrap();
-        assert_eq!(sub_row.kind, KIND_INFERRED);
-        assert_eq!(sub_row.parent_id.as_deref(), Some(main.session_id.as_str()));
-        assert_eq!(sub_row.depth, 1);
-        assert_eq!(sub_row.spawned_by_request_id.as_deref(), Some("r1"));
-
-        // The sub-agent's next turn extends the sub-session, not the main chain.
-        let sub_next = link(
-            &linker,
-            "r3",
-            &id,
-            &{
-                let mut items = agent_items.clone();
-                items.push(msg("agent-a1"));
-                items.push(msg("agent-u2"));
-                items
-            },
-            12,
-        );
-        assert_eq!(sub_next.session_id, sub.session_id);
-        assert_eq!(sub_next.lineage.kind, DivergenceKind::Append);
-        assert_eq!(sub_next.chain_parent_request_id.as_deref(), Some("r2"));
-
-        // And the main thread continues on its own chain afterwards.
+        assert!(!sub.lineage.cache_bust);
+        assert_eq!(sub.chain_parent_request_id.as_deref(), Some("r1"));
+        assert_eq!(linker.node_count(), 1);
+        // The main thread continues after the side conversation, still on the
+        // session node, classified against the current head.
         let main_next = link(
             &linker,
             "r4",
@@ -1089,39 +1032,11 @@ mod tests {
             13,
         );
         assert_eq!(main_next.session_id, main.session_id);
-        assert_eq!(main_next.chain_parent_request_id.as_deref(), Some("r1"));
-        assert_eq!(linker.node_count(), 2);
-    }
-
-    #[test]
-    fn inference_off_keeps_everything_on_the_declared_chain() {
-        let linker = SessionLinker::new(false);
-        let id = identity("codex", Some("s-1"));
-        let main = link(&linker, "r1", &id, &convo(&["u1"]), 10);
-        // An unrelated conversation stays on the declared chain, recorded as a
-        // new chain (not a cache bust) with the previous request as parent.
-        let mut other = convo(&["x"]);
-        other[0].hash = "other-sys".into();
-        let next = link(&linker, "r2", &id, &other, 11);
-        assert_eq!(next.session_id, main.session_id);
-        assert_eq!(next.lineage.kind, DivergenceKind::NewChain);
-        assert!(!next.lineage.cache_bust);
-        assert_eq!(next.chain_parent_request_id.as_deref(), Some("r1"));
-        // A re-sent conversation with a changed system prompt is a cache bust.
-        let mut resent = other.clone();
-        resent[0].hash = "other-sys-v2".into();
-        resent.push(msg("x-a1"));
-        let bust = link(&linker, "r3", &id, &resent, 12);
-        assert_eq!(bust.session_id, main.session_id);
-        assert_eq!(bust.lineage.kind, DivergenceKind::InstructionsChanged);
-        assert!(bust.lineage.cache_bust);
-        assert_eq!(bust.chain_parent_request_id.as_deref(), Some("r2"));
-        assert_eq!(linker.node_count(), 1);
     }
 
     #[test]
     fn declared_sub_sessions_nest_under_their_declared_parents() {
-        let linker = SessionLinker::new(true);
+        let linker = SessionLinker::new();
         // Codex: the root thread, then a spawned thread naming the session as
         // parent, then a nested thread naming the spawned thread.
         let root = identity("codex", Some("s-1"));
@@ -1161,7 +1076,7 @@ mod tests {
 
     #[test]
     fn pi_agent_child_process_declares_its_parent_session() {
-        let linker = SessionLinker::new(true);
+        let linker = SessionLinker::new();
         let parent = identity("pi-agent", Some("p-1"));
         let main = link(&linker, "r1", &parent, &convo(&["u1"]), 10);
         let mut child = identity("pi-agent", Some("c-1"));
@@ -1179,7 +1094,7 @@ mod tests {
 
         // A child seen before its parent gets a placeholder parent that the
         // parent's own first request later fills in.
-        let linker = SessionLinker::new(true);
+        let linker = SessionLinker::new();
         let sub = link(&linker, "r1", &child, &convo(&["task"]), 10);
         assert_eq!(sub.upserts.len(), 2, "placeholder parent + child");
         let placeholder = sub
@@ -1194,32 +1109,84 @@ mod tests {
     }
 
     #[test]
-    fn requests_without_a_session_id_bucket_per_client_and_infer_chains() {
-        let linker = SessionLinker::new(true);
+    fn undeclared_requests_content_match_into_conversation_nodes() {
+        let linker = SessionLinker::new();
         let id = identity("generic", None);
         let first = link(&linker, "r1", &id, &convo(&["u1"]), 10);
-        let bucket = &first.upserts[0];
-        assert_eq!(bucket.kind, KIND_INFERRED);
-        assert_eq!(bucket.external_id, None);
-        assert_eq!(bucket.client_label.as_deref(), Some("key-abc"));
+        let row = first
+            .upserts
+            .iter()
+            .find(|row| row.id == first.session_id)
+            .unwrap();
+        assert_eq!(row.kind, KIND_INFERRED);
+        assert_eq!(row.external_id, None);
+        assert_eq!(row.parent_id, None);
+        assert_eq!(row.client_label.as_deref(), Some("key-abc"));
         let cont = link(&linker, "r2", &id, &convo(&["u1", "a1", "u2"]), 11);
         assert_eq!(cont.session_id, first.session_id);
         assert_eq!(cont.lineage.kind, DivergenceKind::Append);
+        // A conversation with nothing in common opens a SEPARATE node.
         let mut other = convo(&["v1"]);
         other[0].hash = "other".into();
         let second_convo = link(&linker, "r3", &id, &other, 12);
         assert_ne!(second_convo.session_id, first.session_id);
-        let row = second_convo
-            .upserts
-            .iter()
-            .find(|row| row.id == second_convo.session_id)
-            .unwrap();
-        assert_eq!(row.parent_id.as_deref(), Some(first.session_id.as_str()));
+        assert_eq!(
+            second_convo
+                .upserts
+                .iter()
+                .find(|row| row.id == second_convo.session_id)
+                .unwrap()
+                .parent_id,
+            None,
+            "a new conversation node has no parent"
+        );
+    }
+
+    #[test]
+    fn production_bug_regression_same_client_unrelated_conversations_stay_separate() {
+        // The production failure this rewrite fixes (oh-my-pi against the
+        // chat-completions ingress): one client sent thousands of unrelated
+        // conversations sharing the same system prompt and tool list. The
+        // old scoring chained every new conversation onto the previous one's
+        // node (6356 requests on a single session). Shared instructions and
+        // tools alone are NEVER a match now.
+        let linker = SessionLinker::new();
+        let id = identity("oh-my-pi", None);
+        let first = link(&linker, "r1", &id, &convo(&["u1"]), 10);
+        let second = link(&linker, "r2", &id, &convo(&["v1"]), 11);
+        assert_ne!(
+            second.session_id, first.session_id,
+            "unrelated conversation ⇒ its own node, never the previous one"
+        );
+        assert_eq!(second.lineage.kind, DivergenceKind::NewChain);
+        assert_eq!(second.chain_parent_request_id, None);
+        assert!(!second.lineage.cache_bust);
+        assert_eq!(linker.node_count(), 2);
+
+        // Each conversation then continues on its own node.
+        let first_next = link(&linker, "r3", &id, &convo(&["u1", "a1", "u2"]), 12);
+        assert_eq!(first_next.session_id, first.session_id);
+        let second_next = link(&linker, "r4", &id, &convo(&["v1", "a1", "v2"]), 13);
+        assert_eq!(second_next.session_id, second.session_id);
+        assert_eq!(linker.node_count(), 2);
+    }
+
+    #[test]
+    fn undeclared_conversations_never_cross_clients() {
+        let linker = SessionLinker::new();
+        let id = identity("generic", None);
+        let a = link_with_client(&linker, "r1", &id, "key-a", &convo(&["u1"]), 10);
+        // Identical messages from a different client: no shared candidates.
+        let b = link_with_client(&linker, "r2", &id, "key-b", &convo(&["u1"]), 11);
+        assert_ne!(a.session_id, b.session_id);
+        // The same client's continuation still finds its node.
+        let a2 = link_with_client(&linker, "r3", &id, "key-a", &convo(&["u1", "a1"]), 12);
+        assert_eq!(a2.session_id, a.session_id);
     }
 
     #[test]
     fn seeding_restores_a_declared_session_and_its_head() {
-        let linker = SessionLinker::new(true);
+        let linker = SessionLinker::new();
         let row = SessionRow {
             display_number: None,
             id: "node-1".to_string(),
@@ -1257,8 +1224,52 @@ mod tests {
     }
 
     #[test]
+    fn seeding_restores_conversation_candidates_for_content_matching() {
+        // The warm-up path: a process restart seeds the client's recent
+        // conversation nodes, and turn 2 of a conversation still matches.
+        let linker = SessionLinker::new();
+        let row = SessionRow {
+            display_number: None,
+            id: "conv-1".to_string(),
+            parent_id: None,
+            kind: KIND_INFERRED.to_string(),
+            harness: "generic".to_string(),
+            harness_version: None,
+            external_id: None,
+            session_kind: None,
+            client_label: Some("key-abc".to_string()),
+            virtual_key_id: None,
+            user_id: None,
+            depth: 0,
+            root_request_id: Some("old-1".to_string()),
+            spawned_by_request_id: None,
+            first_seen_ms: 1,
+            last_seen_ms: 2,
+            request_count: 1,
+        };
+        linker.seed(vec![(
+            row,
+            Some(ChainHead {
+                request_id: "old-1".to_string(),
+                items: convo(&["u1"]),
+            }),
+        )]);
+        assert!(linker.knows_conversations("generic", Some("key-abc")));
+        let id = identity("generic", None);
+        let next = link(&linker, "r1", &id, &convo(&["u1", "a1", "u2"]), 10);
+        assert_eq!(next.session_id, "conv-1");
+        assert_eq!(next.lineage.kind, DivergenceKind::Append);
+        assert_eq!(next.chain_parent_request_id.as_deref(), Some("old-1"));
+        // And an unrelated conversation still opens its own node.
+        let mut other = convo(&["v1"]);
+        other[0].hash = "other".into();
+        let unrelated = link(&linker, "r2", &id, &other, 11);
+        assert_ne!(unrelated.session_id, "conv-1");
+    }
+
+    #[test]
     fn eviction_keeps_the_index_bounded() {
-        let linker = SessionLinker::new(true);
+        let linker = SessionLinker::new();
         for n in 0..(MAX_NODES + 50) {
             let id = identity("generic", Some(&format!("s-{n}")));
             link(&linker, "r", &id, &convo(&["u"]), n as i64);

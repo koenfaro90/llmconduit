@@ -28,13 +28,15 @@ export function sessionLabel(node: SessionRow): string {
   return id.length > 18 ? `${id.slice(0, 8)}…${id.slice(-6)}` : id;
 }
 
-/** `declared` nodes came from the wire; `inferred` ones were opened by the gateway. */
+/** `declared` nodes came from the wire; `inferred` ones are per-conversation
+ * nodes the gateway opened by CONTENT-MATCHING a client that declared no
+ * session id (never a guess — an unmatched request gets its own node). */
 export function kindBadge(node: SessionRow): { label: string; title: string; inferred: boolean } {
   const inferred = node.kind === 'inferred';
   return {
     label: inferred ? 'inferred' : 'declared',
     title: inferred
-      ? 'opened by the gateway: this request started a new conversation inside its parent'
+      ? 'opened by the gateway: a client that declared no session id, matched by conversation content'
       : 'the harness put this session id on the wire',
     inferred,
   };

@@ -838,7 +838,7 @@ impl Gateway {
             persistence_keep_media: true,
             harness_detector: Arc::new(crate::harness::HarnessDetector::builtin()),
             native_vision_cache: crate::vision_probe::NativeVisionCache::default(),
-            session_linker: Arc::new(crate::sessions::SessionLinker::new(true)),
+            session_linker: Arc::new(crate::sessions::SessionLinker::new()),
             display_numbers: crate::control_plane_store::DisplayNumbers::default(),
             session_hub: crate::session_hub::SessionHub::disabled(),
             yaml_key_specs: Vec::new(),
@@ -1419,11 +1419,7 @@ impl Gateway {
         self.provider_health = previous.provider_health.clone();
         self.users_configured = previous.users_configured.clone();
         self.unknown_tool_call_counts = previous.unknown_tool_call_counts.clone();
-        self.session_linker = Arc::new(
-            previous
-                .session_linker
-                .with_inference_policy(self.harness_detector.infer_sub_sessions()),
-        );
+        self.session_linker = Arc::clone(&previous.session_linker);
         self
     }
     pub(crate) fn apply_live_mesh_policy(&self) {
