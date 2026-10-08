@@ -95,6 +95,20 @@ afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
 });
+it('starts the image container standard with explicit public upload and a file reference',async()=>{
+ const c=getConnection().client;vi.mocked(c.benchmarks).mockResolvedValue([]);
+ const start=vi.spyOn(c,'startBenchmark').mockResolvedValue({...run,options:{...run.options,engine:'container_standard'}});
+ renderWithQuery(<BenchmarksView/>);
+ fireEvent.change(await screen.findByLabelText('Benchmark tool'),{target:{value:'container_standard'}});
+ expect(screen.queryByLabelText('Benchmark duration')).not.toBeInTheDocument();
+ expect(screen.queryByLabelText('LiL upload identifier file')).not.toBeInTheDocument();
+ fireEvent.click(screen.getByLabelText('Upload publicly to LiL under my GitHub account'));
+ fireEvent.change(screen.getByLabelText('LiL upload identifier file'),{target:{value:'/run/fleet-secrets/lil-bench.token'}});
+ fireEvent.click(screen.getByLabelText('Privileged hardware diagnostics (host permission required)'));
+ await waitFor(()=>expect(screen.getByRole('button',{name:'Run benchmark'})).not.toBeDisabled());
+ fireEvent.click(screen.getByRole('button',{name:'Run benchmark'}));
+ await waitFor(()=>expect(start).toHaveBeenCalledWith(expect.objectContaining({options:expect.objectContaining({engine:'container_standard',standard:{upload:true,token_file:'/run/fleet-secrets/lil-bench.token',privileged:true}})})));
+});
 it("shows partial cells and supports cancellation without inventing unfinished measurements", async () => {
   const cancel = vi
     .spyOn(getConnection().client, "cancelBenchmark")

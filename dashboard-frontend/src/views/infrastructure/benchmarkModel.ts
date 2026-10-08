@@ -1,4 +1,6 @@
 export interface BenchmarkOptions {
+  engine?: 'standalone' | 'container_standard';
+  standard?: {upload:boolean;token_file?:string;privileged:boolean};
   concurrency: number[];
   contexts: number[];
   duration_seconds: number;
@@ -27,6 +29,7 @@ export interface BenchmarkCell {
   server_accept_len_effective: number | null;
 }
 export interface BenchmarkReport {
+  standard?: {result_path:string;public_url:string;artifact_available:boolean;summary?:Record<string,unknown>};
   live?: {
     context_tokens: number;
     concurrency: number;

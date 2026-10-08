@@ -29,14 +29,36 @@ pub enum BenchmarkCommand {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BenchmarkOptions {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub engine: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standard: Option<ContainerStandardOptions>,
     pub concurrency: Vec<u32>,
     pub contexts: Vec<u32>,
     pub duration_seconds: u32,
     pub max_tokens: u32,
     pub prefill: bool,
 }
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ContainerStandardOptions {
+    pub upload: bool,
+    #[serde(default)]
+    pub token_file: String,
+    pub privileged: bool,
+}
 impl BenchmarkOptions {
     fn valid(&self) -> bool {
+        if self.engine == "container_standard" {
+            return self.standard.as_ref().is_some_and(|s| {
+                s.token_file.len() <= 512
+                    && s.upload == !s.token_file.is_empty()
+                    && (!s.upload || s.token_file.starts_with('/'))
+            });
+        }
+        if (!self.engine.is_empty() && self.engine != "standalone") || self.standard.is_some() {
+            return false;
+        }
         !self.concurrency.is_empty()
             && self.concurrency.len() <= 6
             && !self.contexts.is_empty()
@@ -529,8 +551,22 @@ fn valid_report(report: &Value, id: &str) -> bool {
 mod tests {
     use super::*;
     #[test]
+    fn container_standard_upload_requires_explicit_file_reference() {
+        let mut o: BenchmarkOptions = serde_json::from_value(json!({"engine":"container_standard","standard":{"upload":false,"privileged":false},"concurrency":[1,8,16],"contexts":[0,65536,131072],"duration_seconds":30,"max_tokens":2048,"prefill":true})).unwrap();
+        assert!(o.valid());
+        o.standard.as_mut().unwrap().upload = true;
+        assert!(!o.valid());
+        o.standard.as_mut().unwrap().token_file = "/run/fleet-secrets/lil-bench.token".into();
+        assert!(o.valid());
+        o.engine = "standalone".into();
+        assert!(!o.valid());
+        assert!(serde_json::from_value::<BenchmarkOptions>(json!({"engine":"container_standard","standard":{"upload":true,"privileged":false,"token":"do-not-store"},"concurrency":[],"contexts":[],"duration_seconds":0,"max_tokens":0,"prefill":true})).is_err());
+    }
+    #[test]
     fn bounds_and_report_contract() {
         let mut o = BenchmarkOptions {
+            engine: String::new(),
+            standard: None,
             concurrency: vec![1, 2],
             contexts: vec![0, 8192],
             duration_seconds: 5,
@@ -593,6 +629,8 @@ mod tests {
             deployment_id: "dep".into(),
             model: "model".into(),
             options: BenchmarkOptions {
+                engine: String::new(),
+                standard: None,
                 concurrency: vec![1, 2],
                 contexts: vec![0],
                 duration_seconds: 5,

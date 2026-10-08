@@ -1,5 +1,27 @@
 # Benchmarks through Fleet
 
+The tool selector also offers **LiL container standard · lil-bench**. This runs
+the serving image's own standard CLI through Fleet, including inventory, PCIe/P2P,
+32k/128k prefill and C1/C8/C16 decode at 0/64k/128k. Its matrix and measurement
+settings are defined by that image. The dashboard reuses the existing tables,
+keeps capacity skips explicit and links to the LiL result after a successful upload.
+
+Enable container benchmarks in Host settings; privileged diagnostics have a separate
+host permission and per-run checkbox. Public upload is off by default and requires
+an explicit checkbox plus the path of a host-private `lilb_…` identifier file already
+allowlisted and mounted read-only into Fleet. The identifier value never enters SQL
+or mesh job requests. The full standard archive stays in the container and Fleet
+(authenticated `/v1/benchmarks/{id}/artifact`); central exports retain the bounded
+summary, cells and public URL. Native jobs have a 60-minute deadline and cancellation
+also stops the benchmark process group inside Docker. Old Fleet agents reject this
+mode; upgrade the selected host before enabling it.
+
+Extra API options are `engine: "container_standard"` and
+`standard: {upload: boolean, privileged: boolean, token_file?: string}`. Existing
+requests without an engine retain the private standalone behavior below.
+
+## Private configurable engine
+
 The Infrastructure → Benchmarks page starts LiL inference throughput/latency jobs
 on ready managed chat deployments. Quick and standard-decode presets or a custom
 bounded matrix select context lengths, concurrency, seconds per cell, output tokens

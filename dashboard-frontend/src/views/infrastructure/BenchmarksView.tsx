@@ -21,6 +21,7 @@ import {
   terminal,
   type Metric,
   type BenchmarkRun,
+  type BenchmarkOptions,
 } from "./benchmarkModel";
 const field =
   "rounded-md border border-line bg-panel px-3 py-2 text-xs outline-none focus:border-accent";
@@ -49,6 +50,10 @@ export function BenchmarksView() {
   const [duration, setDuration] = useState(5);
   const [tokens, setTokens] = useState(256);
   const [prefill, setPrefill] = useState(true);
+  const [engine,setEngine]=useState<'standalone'|'container_standard'>('standalone');
+  const [upload,setUpload]=useState(false);
+  const [tokenFile,setTokenFile]=useState('');
+  const [privileged,setPrivileged]=useState(false);
   const [selected, setSelected] = useState<string | null>(()=>decodeURIComponent(window.location.hash.split('/')[2]??'')||null);
   const [metric, setMetric] = useState<Metric>("aggregate_tps");
   const [message, setMessage] = useState("");
@@ -94,6 +99,11 @@ export function BenchmarksView() {
   const start = useMutation({
     mutationFn: async () => {
       if (!target) throw Error("Select a ready chat deployment.");
+      if(engine==='container_standard') {
+        if(upload&&!tokenFile.trim().startsWith('/'))throw Error('Select an absolute, host-allowlisted upload identifier file.');
+        const options:BenchmarkOptions={...PRESETS.standard,engine,standard:{upload,token_file:upload?tokenFile.trim():undefined,privileged}};
+        return client.startBenchmark({id:crypto.randomUUID(),deployment_id:target.id,model:target.model,options});
+      }
       if (!concurrency || !contexts) throw Error("Select at least one concurrency and context depth.");
       const options = {
         concurrency: parseMatrix(concurrency, 1, 32, 6),
@@ -195,7 +205,7 @@ export function BenchmarksView() {
           </p>
         </div>
         <span className="rounded-full border border-line px-3 py-1 text-[10px] text-text-muted">
-          Local execution · private results · 2-second updates
+          Host execution · 2-second updates
         </span>
       </header>
       <Panel className="p-4 space-y-4">
@@ -222,7 +232,13 @@ export function BenchmarksView() {
               ))}
             </select>
           </label>
-          <label className="space-y-1 text-xs">
+          <label className="space-y-1 text-xs">Benchmark tool
+            <select aria-label="Benchmark tool" className={`${field} block w-full`} value={engine} onChange={e=>setEngine(e.target.value as typeof engine)}>
+              <option value="standalone">Private configurable decode bench</option>
+              <option value="container_standard">LiL container standard · lil-bench</option>
+            </select>
+          </label>
+          {engine==='standalone'?<><label className="space-y-1 text-xs">
             Preset
             <select
               aria-label="Benchmark preset"
@@ -291,6 +307,12 @@ export function BenchmarksView() {
             />
             Measure prefill at selected context depths
           </label>
+          </>:<>
+            <div className="rounded-md border border-line p-3 text-xs md:col-span-2">Runs the serving image’s own standard: prefill 32k/128k; decode C1/C8/C16 at 0/64k/128k. Includes hardware, PCIe topology, P2P diagnostics and GPU clock series. Unsupported cells stay visible as skips.</div>
+            <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={privileged} onChange={e=>setPrivileged(e.target.checked)}/>Privileged hardware diagnostics (host permission required)</label>
+            <label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={upload} onChange={e=>setUpload(e.target.checked)}/>Upload publicly to LiL under my GitHub account</label>
+            {upload&&<label className="space-y-1 text-xs">Private host upload identifier file<input aria-label="LiL upload identifier file" className={`${field} block w-full`} value={tokenFile} onChange={e=>setTokenFile(e.target.value)} placeholder="/run/fleet-secrets/lil-bench.token"/></label>}
+          </>}
           <div className="flex items-end justify-end">
             <Button
               disabled={!allowed || !target || !!hostBusy || start.isPending}
@@ -301,9 +323,7 @@ export function BenchmarksView() {
           </div>
         </div>
         <p className="text-[10px] text-text-muted">
-          Runs put load on the selected model. Warmup and capacity checks use
-          the LiL engine; limits and skipped cells stay visible. No external
-          upload or privileged fabric diagnostic.
+          {engine==='container_standard'?'The model must be idle. Fleet retains live cells and the full standard result; upload is public only when selected. Enable container benchmarks and optional diagnostics/identifier-file permissions in Host settings.':'Runs put load on the selected model. Warmup and capacity checks use the LiL engine; limits and skipped cells stay visible. Results remain private.'}
         </p>
         {hostBusy && (
           <p className="text-xs text-status-cooling">
@@ -342,6 +362,7 @@ export function BenchmarksView() {
                 </p>
               </div>
               <div className="flex gap-2">
+                {report?.standard?.public_url?.startsWith('https://docker.local-inference-lab.ai/')&&<a className="rounded-md border border-line px-3 py-2 text-xs text-accent" href={report.standard.public_url} target="_blank" rel="noreferrer">Open LiL result</a>}
                 <Button
                   variant="ghost"
                   onClick={() => download({ ...run, host: hostName(run) })}
@@ -428,7 +449,7 @@ export function BenchmarksView() {
           <Panel className="p-4 space-y-3" data-testid="prefill-depths">
             <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-sm font-semibold">Prefill by context depth</h3><span className="text-xs text-text-muted">{run.options.prefill?'Measured separately from decode':'Disabled for this run'}</span></div>
             <p className="text-[10px] text-text-muted">Each selected nonzero depth gets a fresh-prompt scout. Results arrive as depths finish; missing or skipped measurements stay explicit. TTFT includes the full request latency.</p>
-            <DataTable interactive id="benchmark-prefill-depths" rows={[...new Set([...run.options.contexts.filter(n=>n>0),...(report?.prefill??[]).map(p=>p.context_tokens).filter(n=>n>0)])].sort((a,b)=>a-b).map(context=>{const measured=report?.prefill.find(p=>p.context_tokens===context);return {context_tokens:context,tok_per_sec:measured?.tok_per_sec??null,ttft:measured?.ttft??null,samples:measured?.samples??null,status:measured?.status??(!run.options.prefill?'disabled':active?'pending':'unmeasured')};})} rowKey={p=>String(p.context_tokens)} minWidth={600} columns={[
+            <DataTable interactive id="benchmark-prefill-depths" rows={[...new Set([...(run.options.engine==='container_standard'?[32768,131072]:run.options.contexts.filter(n=>n>0)),...(report?.prefill??[]).map(p=>p.context_tokens).filter(n=>n>0)])].sort((a,b)=>a-b).map(context=>{const measured=report?.prefill.find(p=>p.context_tokens===context);return {context_tokens:context,tok_per_sec:measured?.tok_per_sec??null,ttft:measured?.ttft??null,samples:measured?.samples??null,status:measured?.status??(!run.options.prefill?'disabled':active?'pending':'unmeasured')};})} rowKey={p=>String(p.context_tokens)} minWidth={600} columns={[
               {id:'context',label:'Context depth · tokens',required:true,value:p=>p.context_tokens,render:p=>`${contextLabel(p.context_tokens)} · ${p.context_tokens.toLocaleString()}`},
               {id:'status',label:'State',render:p=>p.status},
               {id:'rate',label:'Prefill · tok/s',value:p=>p.status==='complete'?p.tok_per_sec:null,render:p=><strong className="font-mono text-accent">{p.status==='complete'?fmt(p.tok_per_sec):p.status==='pending'?'…':'—'}</strong>},
