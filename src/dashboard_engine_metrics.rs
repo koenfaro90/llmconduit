@@ -135,7 +135,7 @@ pub fn start(gateway: Arc<Gateway>) {
             };
             let nodes: Vec<_> = nodes.into_iter().filter(|n| n.enabled).collect();
             let replies = futures::future::join_all(nodes.iter().map(|node| {
-                let query = cursors.get(&node.endpoint_id).cloned().unwrap_or_default();
+                let mut query = cursors.get(&node.endpoint_id).cloned().unwrap_or_default();
                 let registry = admin.registry();
                 async move {
                     let endpoint = node.endpoint_id.parse().ok()?;
@@ -150,30 +150,47 @@ pub fn start(gateway: Arc<Gateway>) {
                     {
                         return None;
                     }
-                    let reply = tokio::time::timeout(
-                        Duration::from_millis(900),
-                        registry.manage_fleet(
-                            endpoint,
-                            ManagedCommand {
-                                settings: None,
-                                benchmark: None,
-                                engine_metrics: Some(query),
-                                deployment_id: None,
-                                desired: None,
-                            },
-                        ),
-                    )
-                    .await
-                    .ok()?
-                    .ok()?;
-                    let batch: Batch = serde_json::from_value(reply.result?).ok()?;
-                    Some((node.endpoint_id.clone(), batch))
+                    // A host can produce several samples per second. Drain bounded
+                    // batches so replay never competes with ongoing capture.
+                    let mut batches = Vec::new();
+                    let deadline = tokio::time::Instant::now() + Duration::from_millis(900);
+                    for _ in 0..8 {
+                        let reply = tokio::time::timeout_at(
+                            deadline,
+                            registry.manage_fleet(
+                                endpoint,
+                                ManagedCommand {
+                                    settings: None,
+                                    benchmark: None,
+                                    engine_metrics: Some(query.clone()),
+                                    deployment_id: None,
+                                    desired: None,
+                                },
+                            ),
+                        )
+                        .await;
+                        let Ok(Ok(reply)) = reply else { break };
+                        let Some(result) = reply.result else { break };
+                        let Ok(batch) = serde_json::from_value::<Batch>(result) else {
+                            break;
+                        };
+                        let done = batch.samples_gzip_base64.is_empty();
+                        query = EngineMetricQuery {
+                            after: batch.cursor,
+                            stream: batch.stream.clone(),
+                        };
+                        batches.push((node.endpoint_id.clone(), batch));
+                        if done {
+                            break;
+                        }
+                    }
+                    Some(batches)
                 }
             }))
             .await;
             let mut changed = false;
             cursors.retain(|id, _| nodes.iter().any(|n| &n.endpoint_id == id));
-            for (endpoint, batch) in replies.into_iter().flatten() {
+            for (endpoint, batch) in replies.into_iter().flatten().flatten() {
                 if batch.stream.len() != 24
                     || !batch.stream.bytes().all(|b| b.is_ascii_hexdigit())
                     || batch.samples_gzip_base64.len() > 256
