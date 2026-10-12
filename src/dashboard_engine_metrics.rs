@@ -114,7 +114,18 @@ pub fn start(gateway: Arc<Gateway>) {
         return;
     };
     crate::runtime_configuration::spawn(async move {
-        let mut cursors: BTreeMap<String, EngineMetricQuery> = BTreeMap::new();
+        let mut cursors: BTreeMap<String, EngineMetricQuery> = store
+            .get_setting("fleet_engine_metric_cursors_v1")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default();
+        cursors.retain(|id, q| {
+            id.parse::<iroh::EndpointId>().is_ok()
+                && q.stream.len() == 24
+                && q.stream.bytes().all(|b| b.is_ascii_hexdigit())
+        });
         let mut timer = tokio::time::interval(Duration::from_secs(1));
         timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
@@ -160,6 +171,8 @@ pub fn start(gateway: Arc<Gateway>) {
                 }
             }))
             .await;
+            let mut changed = false;
+            cursors.retain(|id, _| nodes.iter().any(|n| &n.endpoint_id == id));
             for (endpoint, batch) in replies.into_iter().flatten() {
                 if batch.stream.len() != 24
                     || !batch.stream.bytes().all(|b| b.is_ascii_hexdigit())
@@ -205,6 +218,7 @@ pub fn start(gateway: Arc<Gateway>) {
                     }
                 }
                 if good {
+                    changed = true;
                     cursors.insert(
                         endpoint,
                         EngineMetricQuery {
@@ -213,6 +227,15 @@ pub fn start(gateway: Arc<Gateway>) {
                         },
                     );
                 }
+            }
+            if changed
+                && let Ok(raw) = serde_json::to_string(&cursors)
+                && raw.len() <= 256 * 1024
+                && let Err(error) = store
+                    .set_setting("fleet_engine_metric_cursors_v1", &raw)
+                    .await
+            {
+                tracing::warn!(%error,"engine telemetry cursor persistence unavailable");
             }
         }
     });

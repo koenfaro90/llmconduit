@@ -33,7 +33,7 @@ export function ModelsView(){
       ...['1 min','15 min','1 hour','4 hours','24 hours'].map((label,i)=>({id:`requests-${i}`,label,align:'right' as const,value:(r:ModelRow)=>r.counts?.[i],render:(r:ModelRow)=>r.counts?.[i]??'—'})),
       {id:'configuration',label:'Configuration',render:r=><Button variant="ghost" onClick={e=>{e.stopPropagation();setDetails(r.aggregate?r.children[0]!:r);}}>Review</Button>}
     ]} canExpand={r=>r.aggregate} expandedRows={r=>r.children} expandedKeys={expanded} expandOnRowClick onToggleExpanded={r=>setExpanded(ids=>ids.includes(r.id)?ids.filter(id=>id!==r.id):[...ids,r.id])} emptyMessage="No running or desired inference models."/>
-    <EngineMetricsPanel targets={deployments.map(r=>({id:r.id,endpoint:r.deployment.endpoint_id,model:r.model,host:r.host}))}/>
+    <EngineMetricsPanel targets={deployments.filter(r=>typeof (runtimeSpec(r).readiness as {url?:unknown}|undefined)?.url==='string').map(r=>({id:r.id,endpoint:r.deployment.endpoint_id,model:r.model,host:r.host}))}/>
     {details&&<Panel className="p-3 space-y-3"><div className="flex justify-between gap-2"><h2 className="text-sm font-semibold">{details.model} · {details.host}</h2><Button variant="ghost" onClick={()=>setDetails(null)}>Close</Button></div><p className="text-xs break-all">Image: {String(runtimeSpec(details).image??'—')}</p><p className="text-xs">Deployment {details.id} · recipe {details.deployment.recipe_id} · revision {details.revision?.revision??'—'}</p><pre className="max-h-96 overflow-auto text-xs">{JSON.stringify(runtimeSpec(details),null,2)}</pre></Panel>}
   </div>;
 }

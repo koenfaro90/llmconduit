@@ -24,8 +24,9 @@ LiteLLM/client path. This does not attribute direct traffic to individual users.
 Samples travel through bounded authenticated Fleet management batches, separate
 from heartbeats. Gzip/base64 retains names, labels, HELP/TYPE, numeric values and
 explicit nonfinite values. SQL migration 0018 stores each sample idempotently by
-host/deployment/time. Per-agent cursors resume a bounded five-minute ring; a restart
-starts a new stream. Missing intervals remain visible as graph gaps. Capture does
+host/deployment/time. Per-agent cursors are saved in SQL and resume a bounded five-minute ring; an agent
+restart starts a new stream. Headless ranks without an HTTP exporter use their
+coordinator’s metrics and are not selectable as independent sources. Missing intervals remain visible as graph gaps. Capture does
 not retain prompts, headers or tokens; credential-named labels are redacted.
 
 Authenticated API: `GET /dashboard/api/hosts/{endpoint}/engine-metrics` with
