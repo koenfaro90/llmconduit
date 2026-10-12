@@ -344,7 +344,7 @@ impl FleetHostSnapshot {
             && matches!(c.gpu_backend.as_str(), "" | "nvml" | "nvidia-smi")
             && [&c.gpu_sampled_at, &c.containers_sampled_at].iter().all(|v| v.as_ref().is_none_or(|v| chrono::DateTime::parse_from_rfc3339(v).is_ok()))
             && metric(c.gpu_duration_ms)
-            && c.metrics.len() <= 20 && c.metrics.iter().all(|(name, value)| value.validate(name)))
+            && c.metrics.len() <= 21 && c.metrics.iter().all(|(name, value)| value.validate(name)))
             && self.engine_observations.len()<=4 && self.engine_observations.iter().all(EngineObservation::validate)
             && self.schema_version == 1
             && chrono::DateTime::parse_from_rfc3339(&self.sampled_at).is_ok()
@@ -616,6 +616,50 @@ mod tests {
         assert_eq!(
             serde_json::to_value(legacy).unwrap(),
             serde_json::json!({"sequence":1,"resources":[]})
+        );
+    }
+    #[test]
+    fn all_machine_intervals_plus_engine_stream_fit_the_heartbeat() {
+        let mut sample = fixture();
+        let names = [
+            "cpu",
+            "memory",
+            "network",
+            "disk",
+            "disk_io",
+            "gpu_utilization",
+            "gpu_memory",
+            "gpu_temperature",
+            "gpu_power",
+            "gpu_clock",
+            "gpu_memory_clock",
+            "gpu_fan",
+            "pcie_rx",
+            "pcie_tx",
+            "pcie_link",
+            "pcie_errors",
+            "container_inventory",
+            "container_cpu",
+            "container_memory",
+            "container_pids",
+            "engine_metrics",
+        ];
+        let metrics: serde_json::Map<String, serde_json::Value> = names
+            .into_iter()
+            .map(|name| {
+                (
+                    name.to_owned(),
+                    serde_json::json!({"interval_ms":1000,"sampled_at":null}),
+                )
+            })
+            .collect();
+        sample.collection=Some(serde_json::from_value(serde_json::json!({"metrics":metrics,"host_interval_ms":1000,"gpu_interval_ms":5000,"container_interval_ms":5000,"gpu_backend":"nvml","gpu_sampled_at":null,"containers_sampled_at":null,"gpu_duration_ms":null})).unwrap());
+        assert!(sample.validate());
+        let wire = serde_json::to_value(&sample).unwrap();
+        let round_trip: FleetHostSnapshot = serde_json::from_value(wire).unwrap();
+        assert_eq!(
+            round_trip.collection.unwrap().metrics["engine_metrics"].interval_ms,
+            1000
         );
     }
 }
