@@ -1,0 +1,6 @@
+import {it,expect} from 'vitest';
+import {engineSeries,metricKey,type EngineMetric,type EngineMetricSample} from './engineMetricsModel';
+const metric:EngineMetric={name:'vllm:generation_tokens_total',family:'vllm:generation_tokens',type:'counter',help:'Generated tokens',labels:{model_name:'Gemma',engine:'0'},value:10,special:''};
+const sample=(at:number,value:number):EngineMetricSample=>({seq:1,deployment_id:'gemma',generation:1,recipe_digest:'pinned',image:'image',sampled_at_ms:at,duration_ms:1,error:'',metrics:[{...metric,value}]});
+it('uses labeled series, actual elapsed time, and gaps for resets or lost scrapes',()=>{const key=metricKey(metric);const result=engineSeries([sample(1000,10),sample(2000,15),sample(3000,1),sample(6000,7)],[key],true);expect(result[0]!.points).toEqual([[1000,null],[2000,5],[3000,null],[4000,null],[6000,null]]);expect(metricKey({...metric,labels:{engine:'0',model_name:'Gemma'}})).toBe(key);});
+it('keeps gauge values and separates distinct model labels',()=>{const value={...metric,type:'gauge'};const samples=[{...sample(1000,10),metrics:[value,{...value,labels:{model_name:'Other'}}]}];expect(engineSeries(samples,[metricKey(value)],true)[0]!.points).toEqual([[1000,10]]);});

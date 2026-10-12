@@ -702,6 +702,24 @@ pub trait PersistenceStore: PersistenceWriter {
         Err("host history is unsupported by this store".into())
     }
 
+    async fn record_engine_metrics(
+        &self,
+        _endpoint: &str,
+        _sample: MetricSample,
+    ) -> StoreResult<()> {
+        Err("engine history unsupported".into())
+    }
+    async fn engine_metrics_history(
+        &self,
+        _endpoint: &str,
+        _deployment: &str,
+        _since: i64,
+        _until: i64,
+        _limit: usize,
+    ) -> StoreResult<Vec<MetricSample>> {
+        Err("engine history unsupported".into())
+    }
+
     async fn prune_backend_metrics(&self, before_ms: i64) -> StoreResult<()>;
 
     async fn list_users(&self) -> StoreResult<Vec<UserRecord>>;
@@ -1167,6 +1185,7 @@ impl SqlStore {
             "sessions",
             "display_counters",
             "host_metrics",
+            "engine_metrics",
             "recipe_evidence",
         ];
         #[derive(Clone)]
@@ -3862,6 +3881,49 @@ impl PersistenceStore for SqlStore {
             decode_metric
         ))
     }
+    async fn record_engine_metrics(&self, endpoint: &str, sample: MetricSample) -> StoreResult<()> {
+        if sample.data.len() > 40000 {
+            return Err("engine sample exceeds bounds".into());
+        }
+        let sql = format!(
+            "INSERT INTO engine_metrics (endpoint,deployment,ts_ms,data) VALUES ({}) ON CONFLICT (endpoint,deployment,ts_ms) DO NOTHING",
+            placeholders(self.postgres(), 4)
+        );
+        execute!(
+            self,
+            &sql,
+            endpoint,
+            sample.backend,
+            sample.ts_ms,
+            sample.data
+        );
+        Ok(())
+    }
+    async fn engine_metrics_history(
+        &self,
+        endpoint: &str,
+        deployment: &str,
+        since: i64,
+        until: i64,
+        limit: usize,
+    ) -> StoreResult<Vec<MetricSample>> {
+        let pg = self.postgres();
+        let sql = format!(
+            "SELECT deployment AS backend,ts_ms,data FROM engine_metrics WHERE endpoint={} AND deployment={} AND ts_ms>={} AND ts_ms<={} ORDER BY ts_ms DESC LIMIT {}",
+            placeholder(pg, 1),
+            placeholder(pg, 2),
+            placeholder(pg, 3),
+            placeholder(pg, 4),
+            placeholder(pg, 5)
+        );
+        let limit = i64::try_from(limit.min(3601)).unwrap_or(3601);
+        Ok(fetch_all_decoded!(
+            self,
+            &sql,
+            [endpoint, deployment, since, until, limit],
+            decode_metric
+        ))
+    }
     async fn record_host_metrics(&self, sample: MetricSample) -> StoreResult<()> {
         let sql = format!(
             "INSERT INTO host_metrics (backend, ts_ms, data) VALUES ({}) ON CONFLICT (backend, ts_ms) DO NOTHING",
@@ -4811,7 +4873,9 @@ mod tests {
         };
         assert_eq!(
             migration_versions,
-            vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+            vec![
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18
+            ]
         );
         let request_indexes: Vec<String> = match &store.pool {
             SqlPool::Sqlite(pool) => sqlx::query(
@@ -6978,7 +7042,7 @@ mod tests {
             .execute(pool)
             .await
             .unwrap();
-        sqlx::query("DELETE FROM _sqlx_migrations WHERE version >= 17")
+        sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 17")
             .execute(pool)
             .await
             .unwrap();
@@ -7007,5 +7071,45 @@ mod tests {
             assert!(store.get_session(id).await.unwrap().is_none(), "{id}");
         }
         assert!(store.get_session("decl-1").await.unwrap().is_some());
+    }
+    #[tokio::test]
+    async fn engine_history_preserves_each_second_and_idempotent_replay() {
+        let store = SqlStore::connect_sqlite("sqlite::memory:").await.unwrap();
+        for ts_ms in [1000, 2000, 3000, 2000] {
+            store
+                .record_engine_metrics(
+                    "host",
+                    MetricSample {
+                        backend: "gemma".into(),
+                        ts_ms,
+                        data: "gzip-sample".into(),
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        let rows = store
+            .engine_metrics_history("host", "gemma", 0, 4000, 100)
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.ts_ms).collect::<Vec<_>>(),
+            vec![3000, 2000, 1000]
+        );
+        assert_eq!(
+            store
+                .engine_metrics_history("host", "gemma", 0, 2000, 1)
+                .await
+                .unwrap()[0]
+                .ts_ms,
+            2000
+        );
+        assert!(
+            store
+                .engine_metrics_history("host", "other", 0, 4000, 100)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

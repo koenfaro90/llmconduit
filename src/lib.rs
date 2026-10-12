@@ -15,6 +15,7 @@ pub mod dashboard_api;
 pub mod dashboard_auth;
 pub mod dashboard_benchmarks;
 pub mod dashboard_deployment_groups;
+pub mod dashboard_engine_metrics;
 pub mod dashboard_fleet;
 pub mod dashboard_fleet_host;
 pub mod dashboard_flow;
@@ -805,6 +806,7 @@ pub fn build_runtime_generation(
     crate::dashboard_benchmarks::start_reconciler(Arc::clone(&gateway));
     crate::dashboard_traffic::start(Arc::clone(&gateway));
     crate::dashboard_host_history::start(Arc::clone(&gateway));
+    crate::dashboard_engine_metrics::start(Arc::clone(&gateway));
     let app = build_router(Arc::clone(&gateway), router_options);
     Ok((app, gateway))
 }

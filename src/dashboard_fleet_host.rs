@@ -54,7 +54,11 @@ impl HostMetricCollection {
             "cpu" | "memory" | "network" | "disk" | "disk_io" | "gpu_utilization"
             | "gpu_memory" | "gpu_temperature" | "gpu_power" | "gpu_clock" | "gpu_memory_clock"
             | "gpu_fan" | "pcie_rx" | "pcie_tx" | "pcie_link" | "pcie_errors" => 100,
-            "container_inventory" | "container_cpu" | "container_memory" | "container_pids" => 1000,
+            "container_inventory"
+            | "container_cpu"
+            | "container_memory"
+            | "container_pids"
+            | "engine_metrics" => 1000,
             _ => return false,
         };
         (self.interval_ms == 0 || (minimum..=60000).contains(&self.interval_ms))

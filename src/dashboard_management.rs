@@ -72,6 +72,8 @@ pub struct ManagedCommand {
     pub settings: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub benchmark: Option<crate::dashboard_benchmarks::BenchmarkCommand>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_metrics: Option<crate::dashboard_engine_metrics::EngineMetricQuery>,
     pub deployment_id: Option<String>,
     pub desired: Option<Value>,
 }
@@ -893,6 +895,7 @@ async fn reconcile_deployment(
             endpoint,
             ManagedCommand {
                 settings: None,
+                engine_metrics: None,
                 benchmark: None,
                 deployment_id: Some(id.to_string()),
                 desired: Some(desired),
@@ -1128,6 +1131,7 @@ mod tests {
     fn management_wire_fields_round_trip() {
         let read = ManagedCommand {
             settings: Some(serde_json::json!({})),
+            engine_metrics: None,
             benchmark: None,
             deployment_id: None,
             desired: None,
@@ -1143,6 +1147,7 @@ mod tests {
             settings: Some(
                 serde_json::json!({"revision":7,"configuration":{"policy":{},"metrics":{"cpu":"100ms"}}}),
             ),
+            engine_metrics: None,
             benchmark: None,
             deployment_id: None,
             desired: None,
@@ -1154,6 +1159,7 @@ mod tests {
         );
         let command = ManagedCommand {
             settings: None,
+            engine_metrics: None,
             benchmark: None,
             deployment_id: Some("fixture".into()),
             desired: Some(serde_json::json!({"generation":1,"model":{"image":"fixture"}})),

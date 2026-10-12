@@ -266,6 +266,10 @@ fn protected_routes(gateway: Arc<Gateway>, auth: Arc<DashboardAuth>) -> Router<A
             get(crate::dashboard_host_history::history),
         )
         .route(
+            "/dashboard/api/hosts/{id}/engine-metrics",
+            axum::routing::get(crate::dashboard_engine_metrics::history),
+        )
+        .route(
             "/dashboard/api/traffic/layout",
             get(crate::dashboard_traffic::layout),
         )

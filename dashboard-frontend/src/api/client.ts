@@ -401,6 +401,11 @@ export class DashboardClient {
   recipeEvidence(): Promise<Array<{id:string;recipe_id:string;revision_digest:string;endpoint_id:string;kind:string;recorded_at_ms:number;data:Record<string,unknown>}>> {return this.request('/management/recipe-evidence');}
   deployGroup(body:{size?:string;group_id?:string;recipe_id:string;revision_digest:string;hosts:Array<{endpoint_id:string;address:string;gpus?:number[]}>;expected_generations?:Record<string,number>;desired_state:'ready'|'unloaded'}):Promise<{group_id:string;deployments:Record<string,DesiredDeployment>}> {return this.mutate('/management/deployment-groups','POST',body);}
 
+  engineMetrics(endpoint:string,deployment:string,since:number,until?:number,names:string[]=[],limit=1):Promise<import('../views/infrastructure/engineMetricsModel').EngineMetricHistory> {
+    const query=new URLSearchParams({deployment_id:deployment,since_ms:String(since),limit:String(limit)});if(until!=null)query.set('until_ms',String(until));if(names.length)query.set('names',names.join(','));
+    return this.request(`/hosts/${encodeURIComponent(endpoint)}/engine-metrics?${query}`);
+  }
+
   hostHistory(id: string, since: number, until?: number): Promise<{samples: FleetHostSnapshot[]; bucket_ms:number}> {
     return this.request(`/hosts/${encodeURIComponent(id)}/history?since_ms=${since}${until ? `&until_ms=${until}` : ''}`);
   }

@@ -208,6 +208,26 @@ impl FleetClient {
         self.request_body(method, path, timeout, None).await
     }
 
+    pub async fn engine_metrics(
+        &self,
+        query: &crate::dashboard_engine_metrics::EngineMetricQuery,
+    ) -> Result<serde_json::Value, FleetProxyError> {
+        if query.stream.len() > 24 || !query.stream.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(FleetProxyError::new(
+                StatusCode::BAD_REQUEST,
+                "invalid engine cursor",
+            ));
+        }
+        self.request(
+            reqwest::Method::GET,
+            &format!(
+                "/v1/engine-metrics?after={}&stream={}",
+                query.after, query.stream
+            ),
+        )
+        .await
+    }
+
     pub async fn host_settings(
         &self,
         body: Option<&serde_json::Value>,
@@ -323,7 +343,11 @@ impl FleetClient {
     ) -> Result<T, FleetProxyError> {
         let token = self.token().await?;
         let mut url = self.base_url.clone();
+        let (path, query) = path
+            .split_once('?')
+            .map_or((path, None), |(p, q)| (p, Some(q)));
         url.set_path(path);
+        url.set_query(query);
         let request = self
             .client
             .request(method, url)

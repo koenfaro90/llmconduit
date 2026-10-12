@@ -33,6 +33,7 @@ async fn forward(gateway: &Gateway, id: &str, settings: Value) -> Response {
             endpoint,
             ManagedCommand {
                 settings: Some(settings),
+                engine_metrics: None,
                 benchmark: None,
                 deployment_id: None,
                 desired: None,
