@@ -8,6 +8,7 @@ use sha2::Digest;
 use sha2::Sha256;
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 use tokio::task;
@@ -99,6 +100,10 @@ impl MeshStore {
             tokio::fs::create_dir_all(parent).await?;
         }
         self.with_conn(|conn| {
+            // Heartbeats write while authorization/dashboard requests read.
+            // Rollback journaling lets those readers starve the writer and can
+            // disconnect otherwise authorized workers under disk contention.
+            conn.pragma_update(None, "journal_mode", "WAL")?;
             conn.execute_batch(SCHEMA)?;
             Ok(())
         })
@@ -372,6 +377,7 @@ impl MeshStore {
         let path = self.path.clone();
         task::spawn_blocking(move || {
             let mut conn = Connection::open(path)?;
+            conn.busy_timeout(Duration::from_secs(10))?;
             conn.pragma_update(None, "foreign_keys", "ON")?;
             f(&mut conn)
         })
@@ -480,6 +486,36 @@ mod tests {
 
     fn temp_db(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("llmconduit-{name}-{}.sqlite", Uuid::new_v4()))
+    }
+
+    #[tokio::test]
+    async fn heartbeat_writes_do_not_wait_for_an_authorization_read_snapshot() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("mesh.sqlite");
+        let store = MeshStore::open(&path).await.expect("open store");
+        let reader = Connection::open(&path).expect("reader");
+        reader
+            .execute_batch("BEGIN; SELECT count(*) FROM mesh_join_keys;")
+            .expect("read snapshot");
+        let created = tokio::time::timeout(
+            Duration::from_secs(2),
+            store.create_join_key(None, None, None),
+        )
+        .await
+        .expect("reader must not block writer")
+        .expect("create join key");
+        assert_eq!(
+            reader
+                .query_row("SELECT count(*) FROM mesh_join_keys", [], |r| r
+                    .get::<_, i64>(0))
+                .expect("old snapshot"),
+            0
+        );
+        reader.execute_batch("COMMIT").expect("end read snapshot");
+        assert_eq!(
+            store.list_join_keys().await.expect("new snapshot")[0].id,
+            created.id
+        );
     }
 
     #[tokio::test]
