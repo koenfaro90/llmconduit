@@ -860,6 +860,7 @@ export const mockFetch: typeof fetch = async (input, init): Promise<Response> =>
   if (path === '/dashboard/api/traffic/layout') return json({mobile_compact:false});
   if (path === '/dashboard/api/management/recipe-evidence' && method === 'GET') return json([]);
   if (/^\/dashboard\/api\/hosts\/[^/]+\/history$/.test(path) && method === 'GET') return json({samples:[],bucket_ms:15000,since_ms:Date.now()-3600_000,until_ms:Date.now(),sampling:'latest observation per interval'});
+  if (path === '/dashboard/api/preparations' && method === 'GET') return json([]);
   if (path === '/dashboard/api/benchmarks' && method === 'GET') return json([]);
   if (path === '/dashboard/api/management' && method === 'GET') return json({ recipes: {}, deployments: {} });
   if (path === '/dashboard/api/management/model-activity' && method === 'GET') return json([]);

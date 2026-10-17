@@ -310,6 +310,14 @@ fn protected_routes(gateway: Arc<Gateway>, auth: Arc<DashboardAuth>) -> Router<A
             post(crate::dashboard_traffic::preview),
         )
         .route(
+            "/dashboard/api/preparations",
+            get(crate::dashboard_preparations::list).post(crate::dashboard_preparations::create),
+        )
+        .route(
+            "/dashboard/api/preparations/{id}/cancel",
+            post(crate::dashboard_preparations::cancel),
+        )
+        .route(
             "/dashboard/api/benchmarks",
             get(crate::dashboard_benchmarks::list).post(crate::dashboard_benchmarks::create),
         )

@@ -34,6 +34,7 @@ async fn forward(gateway: &Gateway, id: &str, settings: Value) -> Response {
             ManagedCommand {
                 settings: Some(settings),
                 engine_metrics: None,
+                preparation: None,
                 benchmark: None,
                 deployment_id: None,
                 desired: None,

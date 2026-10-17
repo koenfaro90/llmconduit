@@ -482,6 +482,7 @@ async fn reconcile_run(gateway: &Gateway, run: &BenchmarkRun) {
             ManagedCommand {
                 settings: None,
                 engine_metrics: None,
+                preparation: None,
                 benchmark: Some(command),
                 deployment_id: None,
                 desired: None,

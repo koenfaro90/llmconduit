@@ -485,27 +485,33 @@ pub(super) async fn handle_stream(
             };
             if let Some(fleet) = &runtime.fleet {
                 let result = match (
+                    command.preparation,
                     command.engine_metrics,
                     command.settings,
                     command.benchmark,
                     command.deployment_id,
                     command.desired,
                 ) {
-                    (None, Some(settings), None, None, None) => {
+                    (Some(command), None, None, None, None, None) => {
+                        fleet.preparation_command(&command).await
+                    }
+                    (None, None, Some(settings), None, None, None) => {
                         fleet
                             .host_settings(crate::dashboard_management::host_settings_body(
                                 &settings,
                             ))
                             .await
                     }
-                    (None, None, Some(benchmark), None, None) => {
+                    (None, None, None, Some(benchmark), None, None) => {
                         fleet.benchmark_command(&benchmark).await
                     }
-                    (None, None, None, Some(id), Some(desired)) => {
+                    (None, None, None, None, Some(id), Some(desired)) => {
                         fleet.apply_managed(&id, &desired).await
                     }
-                    (None, None, None, None, None) => fleet.managed_report().await,
-                    (Some(query), None, None, None, None) => fleet.engine_metrics(&query).await,
+                    (None, None, None, None, None, None) => fleet.managed_report().await,
+                    (None, Some(query), None, None, None, None) => {
+                        fleet.engine_metrics(&query).await
+                    }
                     _ => Err(crate::dashboard_fleet::FleetProxyError::new(
                         axum::http::StatusCode::BAD_REQUEST,
                         "invalid managed command",

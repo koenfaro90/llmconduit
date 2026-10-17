@@ -69,6 +69,8 @@ pub struct DesiredDeployment {
 #[serde(deny_unknown_fields)]
 pub struct ManagedCommand {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preparation: Option<crate::dashboard_preparations::PreparationCommand>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub benchmark: Option<crate::dashboard_benchmarks::BenchmarkCommand>,
@@ -139,6 +141,8 @@ pub(crate) fn source_has_credentials(value: &serde_yaml::Value) -> bool {
 #[serde(deny_unknown_fields)]
 pub(crate) struct RecipeMetadata {
     #[serde(default)]
+    pub checkpoints: Vec<crate::dashboard_preparations::Checkpoint>,
+    #[serde(default)]
     pub source_url: Option<String>,
     #[serde(default)]
     pub size_name: Option<String>,
@@ -187,6 +191,11 @@ fn validate_metadata(spec: &serde_json::Map<String, Value>) -> Result<(), &'stat
     };
     let metadata: RecipeMetadata =
         serde_json::from_value(value.clone()).map_err(|_| "invalid recipe metadata")?;
+    if metadata.checkpoints.len() > 8 || metadata.checkpoints.iter().any(|c| !c.valid()) {
+        return Err(
+            "checkpoints require owner/repository names and immutable 40-character revisions",
+        );
+    };
     if metadata
         .source_url
         .as_ref()
@@ -887,6 +896,31 @@ async fn reconcile_deployment(
             return;
         }
     };
+    if deployment.desired_state == "ready" {
+        match crate::dashboard_preparations::ensure_prepared(
+            gateway,
+            deployment,
+            &revision.model_spec,
+        )
+        .await
+        {
+            Ok(true) => {}
+            result => {
+                let message = result.err().unwrap_or_else(|| {
+                    "Fleet is preparing declared checkpoints; see Deployment progress".into()
+                });
+                persist_observation(
+                    store.as_ref(),
+                    id,
+                    deployment.generation,
+                    deployment.observed.clone(),
+                    Some(message),
+                )
+                .await;
+                return;
+            }
+        }
+    }
     model["id"] = Value::String(format!("managed-{id}"));
     let desired = serde_json::json!({"generation":deployment.generation,"recipe_digest":deployment.revision_digest,"desired_state":deployment.desired_state,"model":model});
     let result = admin
@@ -896,6 +930,7 @@ async fn reconcile_deployment(
             ManagedCommand {
                 settings: None,
                 engine_metrics: None,
+                preparation: None,
                 benchmark: None,
                 deployment_id: Some(id.to_string()),
                 desired: Some(desired),
@@ -1132,6 +1167,7 @@ mod tests {
         let read = ManagedCommand {
             settings: Some(serde_json::json!({})),
             engine_metrics: None,
+            preparation: None,
             benchmark: None,
             deployment_id: None,
             desired: None,
@@ -1148,6 +1184,7 @@ mod tests {
                 serde_json::json!({"revision":7,"configuration":{"policy":{},"metrics":{"cpu":"100ms"}}}),
             ),
             engine_metrics: None,
+            preparation: None,
             benchmark: None,
             deployment_id: None,
             desired: None,
@@ -1160,6 +1197,7 @@ mod tests {
         let command = ManagedCommand {
             settings: None,
             engine_metrics: None,
+            preparation: None,
             benchmark: None,
             deployment_id: Some("fixture".into()),
             desired: Some(serde_json::json!({"generation":1,"model":{"image":"fixture"}})),

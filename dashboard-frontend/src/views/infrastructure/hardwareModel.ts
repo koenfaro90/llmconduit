@@ -13,7 +13,7 @@ export function gpuFamily(name:string,unified=false):string {
 export function hostFamilies(node:MeshNode){return [...new Set(node.host_snapshot?.gpus.map(g=>gpuFamily(g.name,g.unified_memory))??[])];}
 export function hardwareLabel(node:MeshNode){const families=hostFamilies(node);return families.map(f=>GPU_FAMILIES[f as keyof typeof GPU_FAMILIES]??f).join(' / ')||'GPU type unavailable';}
 export function rankSpecs(spec:Record<string,unknown>):Record<string,unknown>[]{return Array.isArray(spec.distributed)?spec.distributed as Record<string,unknown>[]:[spec];}
-export interface RecipeMetadata {source_url?:string;size_name?:string;size_source_digest?:string;memory_estimate_note?:string;gpu_families?:string[];image_sources?:Record<string,string>;image_source_urls?:Record<string,string>}
+export interface RecipeMetadata {checkpoints?:import('./preparationModel').CheckpointRequirement[];source_url?:string;size_name?:string;size_source_digest?:string;memory_estimate_note?:string;gpu_families?:string[];image_sources?:Record<string,string>;image_source_urls?:Record<string,string>}
 export function metadata(spec:Record<string,unknown>):RecipeMetadata {return spec.metadata&&typeof spec.metadata==='object'?spec.metadata as RecipeMetadata:{};}
 export function gpuDevices(spec:Record<string,unknown>):number[]|null {
   const value=String(spec.gpus??''); const match=value.match(/^device=([0-9,]+)$/);

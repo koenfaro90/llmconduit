@@ -1,0 +1,160 @@
+<!-- Public LiL build 08edd314, ds41-flash, 512GiB LMCache; extracted 2026-10-17. -->
+<div id="pane-compose">
+        <pre><code>name: lil-ds41-flash
+services:
+  model:
+    image: ghcr.io/local-inference-lab/vllm@sha256:f5f9efe1b10ec7b853a495e66b7dbf15ff54f62741e444dea0b44e16736a10a9
+    container_name: lil-ds41-flash
+    init: true
+    network_mode: host
+    ipc: host
+    shm_size: 32g
+    restart: on-failure
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      stack:
+        soft: 67108864
+        hard: 67108864
+    volumes:
+    - lil-hf:/root/.cache/huggingface
+    - lil-ds41-flash-runtime:/cache
+    entrypoint:
+    - /usr/local/bin/lil-serve
+    command:
+    - --profile
+    - ds41-flash
+    - --hardware
+    - rtx-pro-6000-pcie
+    - --
+    - --cache-l1-gib
+    - &#39;512.0&#39;
+    - --cache-mode
+    - lmcache
+    - --no-cache-l2-enabled
+    deploy:
+      resources:
+        reservations:
+          devices:
+          - driver: nvidia
+            device_ids:
+            - &#39;0&#39;
+            - &#39;1&#39;
+            - &#39;2&#39;
+            - &#39;3&#39;
+            capabilities:
+            - gpu
+    stop_grace_period: 30s
+    environment:
+    - HF_TOKEN
+volumes:
+  lil-hf:
+    name: lil-hf
+  lil-ds41-flash-runtime:
+    name: lil-ds41-flash-runtime
+x-lil-configurator:
+  schema: lil-web-deployment/v1
+  setup:
+    image: karmic-kraken-beta-08edd314f7ee880c5cc29eb4692afc2aa7a2c51736c188335b655cdbf5ed6eea
+    profile: ds41-flash
+    options:
+      cache-l1-gib: 512.0
+      cache-mode: lmcache
+      cache-l2-enabled: false
+    environment: {}
+    argv: []
+    name: lil-ds41-flash
+    gpus:
+    - &#39;0&#39;
+    - &#39;1&#39;
+    - &#39;2&#39;
+    - &#39;3&#39;
+    restart: on-failure
+  image_digest: ghcr.io/local-inference-lab/vllm@sha256:f5f9efe1b10ec7b853a495e66b7dbf15ff54f62741e444dea0b44e16736a10a9
+  service_sha256: c732f84af0cbc5fa2996373443f788e18bd7dd31aea7b9aecb030e3051b191b3
+</code></pre></div>
+<div id="pane-vllm">
+        <p class="note">What the container runs; for reading, not for pasting on a host without the image's environment.</p>
+        <pre><code>/opt/venv/bin/python -m vllm.entrypoints.cli.main serve local-inference-lab/DeepSeek-V4.1-Flash-lossless-CSF \
+  --async-scheduling \
+  --attention-backend B12X \
+  --block-size 256 \
+  --compilation-config &#39;{
+    &#34;cudagraph_mode&#34;: &#34;FULL_AND_PIECEWISE&#34;
+  }&#39; \
+  --decode-context-parallel-size 1 \
+  --decode-refill-target auto \
+  --default-chat-template-kwargs &#39;{
+    &#34;thinking&#34;: true,
+    &#34;reasoning_effort&#34;: &#34;high&#34;
+  }&#39; \
+  --dtype bfloat16 \
+  --enable-auto-tool-choice \
+  --enable-chunked-prefill \
+  --enable-force-include-usage \
+  --enable-prefix-caching \
+  --enable-prompt-tokens-details \
+  --enable-request-id-headers \
+  --engram-config &#39;{
+    &#34;cpu_offload&#34;: false,
+    &#34;table_memory&#34;: &#34;ram&#34;,
+    &#34;disk_resident_scales&#34;: false,
+    &#34;projection_tp&#34;: false
+  }&#39; \
+  --generation-config vllm \
+  --gpu-memory-utilization 0.95 \
+  --host 0.0.0.0 \
+  --jit-monitor-mode warn \
+  --kv-cache-dtype fp8 \
+  --kv-transfer-config &#39;{
+    &#34;kv_connector&#34;: &#34;LMCacheMPConnector&#34;,
+    &#34;kv_connector_module_path&#34;: &#34;lmcache.integration.vllm.lmcache_mp_connector&#34;,
+    &#34;kv_role&#34;: &#34;kv_both&#34;,
+    &#34;kv_load_failure_policy&#34;: &#34;recompute&#34;,
+    &#34;kv_connector_extra_config&#34;: {
+      &#34;lmcache.mp.host&#34;: &#34;127.0.0.1&#34;,
+      &#34;lmcache.mp.port&#34;: 18000,
+      &#34;lmcache.mp.mp_transfer_mode&#34;: &#34;engine_driven&#34;,
+      &#34;lmcache.mp.mq_timeout&#34;: 60.0,
+      &#34;lmcache.mp.heartbeat_interval&#34;: 10.0
+    }
+  }&#39; \
+  --linear-backend b12x \
+  --load-format mxfp4_csf \
+  --max-cudagraph-capture-size 128 \
+  --max-model-len -1 \
+  --max-num-batched-tokens 4096 \
+  --max-num-seqs 32 \
+  --max-parallel-prefills 1 \
+  --moe-backend b12x \
+  --override-generation-config &#39;{
+    &#34;temperature&#34;: 1.0,
+    &#34;top_p&#34;: 0.95
+  }&#39; \
+  --pipeline-parallel-size 1 \
+  --port 8000 \
+  --prefill-compute-share 0.4 \
+  --prefill-policy round-robin \
+  --prefill-schedule-interval 1 \
+  --quantization mxfp4_csf \
+  --reasoning-parser deepseek_v41 \
+  --revision 9c60bcbf1670e06f154b5d61080e50c9b3b7b4a3 \
+  --safetensors-load-strategy lazy \
+  --no-scheduler-reserve-full-isl \
+  --served-model-name DeepSeek-V4.1-Flash \
+  --speculative-config &#39;{
+    &#34;method&#34;: &#34;dspark&#34;,
+    &#34;attention_backend&#34;: &#34;B12X&#34;,
+    &#34;draft_sample_method&#34;: &#34;probabilistic&#34;,
+    &#34;rejection_sample_method&#34;: &#34;standard&#34;,
+    &#34;num_speculative_tokens&#34;: 7,
+    &#34;draft_tensor_parallel_size&#34;: 4,
+    &#34;enable_adaptive_verification&#34;: true,
+    &#34;adaptive_verification_cost_scale&#34;: 1.0,
+    &#34;revision&#34;: &#34;9c60bcbf1670e06f154b5d61080e50c9b3b7b4a3&#34;
+  }&#39; \
+  --swa-block-size 128 \
+  --tensor-parallel-size 4 \
+  --tokenizer-mode deepseek_v41 \
+  --tool-call-parser deepseek_v41</code></pre></div>

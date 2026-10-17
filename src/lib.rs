@@ -23,6 +23,7 @@ pub mod dashboard_host_history;
 pub mod dashboard_host_settings;
 pub mod dashboard_management;
 pub mod dashboard_mesh;
+pub mod dashboard_preparations;
 pub mod dashboard_recipe_evidence;
 mod dashboard_recipe_sizes;
 mod dashboard_resource_admission;
@@ -804,6 +805,7 @@ pub fn build_runtime_generation(
     };
     crate::dashboard_management::start_reconciler(Arc::clone(&gateway));
     crate::dashboard_benchmarks::start_reconciler(Arc::clone(&gateway));
+    crate::dashboard_preparations::start_reconciler(Arc::clone(&gateway));
     crate::dashboard_traffic::start(Arc::clone(&gateway));
     crate::dashboard_host_history::start(Arc::clone(&gateway));
     crate::dashboard_engine_metrics::start(Arc::clone(&gateway));

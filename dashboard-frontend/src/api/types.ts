@@ -2353,6 +2353,7 @@ export interface SelectDeployment {
 }
 
 export interface RecipeImportOptions {
+  checkpoints?:import('../views/infrastructure/preparationModel').CheckpointRequirement[];
   source_url?: string;
   volume_paths?: Record<string, string>;
   service?: string;
@@ -2386,6 +2387,7 @@ export interface ConvertedRecipe {
   warnings: string[];
 }
 export interface ImportedRecipeSource {
+  checkpoints?:import('../views/infrastructure/preparationModel').CheckpointRequirement[];
   source_url: string;
   source_format: 'compose';
   source_content: string;

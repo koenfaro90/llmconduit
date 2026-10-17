@@ -1,0 +1,14 @@
+export interface CheckpointRequirement {repository:string;revision:string}
+export interface PreparationReport {cache_directory?:string;id:string;recipe_digest:string;image:string;checkpoints:CheckpointRequirement[];status:string;phase:string;message:string;started_at_ms:number;updated_at_ms:number;total_bytes:number;completed_bytes:number;downloaded_bytes:number;verified_files:number;total_files:number;current_file:string;sequence:number}
+export interface PreparationRun {cache_directory?:string;id:string;endpoint_id:string;recipe_id:string;revision_digest:string;rank:number;image:string;checkpoints:CheckpointRequirement[];created_at_ms:number;cancel_requested:boolean;report:PreparationReport|null;error:string|null}
+export interface CreatePreparation {id:string;endpoint_id:string;recipe_id:string;revision_digest:string;rank:number}
+export const preparationTerminal=(r:PreparationRun)=>['complete','failed','cancelled','interrupted'].includes(r.report?.status??'');
+export const preparationState=(r:PreparationRun)=>r.cancel_requested&&!preparationTerminal(r)?'cancelling':r.report?.status??'queued';
+export const validCheckpoint=(c:CheckpointRequirement)=>/^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}\/[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$/.test(c.repository)&&!c.repository.includes('..')&&/^[a-f0-9]{40}$/.test(c.revision);
+export function isPreparationRun(v:unknown):v is PreparationRun {
+ if(!v||typeof v!=='object')return false;const r=v as Record<string,unknown>;
+ if(!['id','endpoint_id','recipe_id','revision_digest','image'].every(k=>typeof r[k]==='string')||!Number.isFinite(r.created_at_ms)||!Number.isInteger(r.rank)||typeof r.cancel_requested!=='boolean'||!Array.isArray(r.checkpoints)||!r.checkpoints.every(c=>c&&typeof c==='object'&&validCheckpoint(c as CheckpointRequirement)))return false;
+ if(r.report==null)return true;if(typeof r.report!=='object')return false;const report=r.report as Record<string,unknown>;
+ return report.id===r.id&&report.recipe_digest===r.revision_digest&&report.image===r.image&&['running','cancelling','complete','failed','cancelled','interrupted'].includes(String(report.status))&&['total_bytes','completed_bytes','downloaded_bytes','verified_files','total_files','sequence'].every(k=>typeof report[k]==='number'&&Number.isSafeInteger(report[k])&&report[k]>=0)&&Number(report.completed_bytes)<=Number(report.total_bytes)&&Number(report.verified_files)<=Number(report.total_files);
+}
+export function preparationRate(run:PreparationRun):number|null {const r=run.report;if(!r||!r.downloaded_bytes||!Number.isFinite(r.updated_at_ms)||!Number.isFinite(r.started_at_ms)||r.updated_at_ms<=r.started_at_ms)return null;return r.downloaded_bytes/((r.updated_at_ms-r.started_at_ms)/1000);}

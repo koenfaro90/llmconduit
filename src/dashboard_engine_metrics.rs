@@ -161,6 +161,7 @@ pub fn start(gateway: Arc<Gateway>) {
                                 endpoint,
                                 ManagedCommand {
                                     settings: None,
+                                    preparation: None,
                                     benchmark: None,
                                     engine_metrics: Some(query.clone()),
                                     deployment_id: None,
@@ -363,6 +364,7 @@ mod tests {
     fn metrics_command_round_trips_and_old_commands_omit_the_extension() {
         let command = ManagedCommand {
             settings: None,
+            preparation: None,
             benchmark: None,
             engine_metrics: Some(EngineMetricQuery {
                 after: 42,

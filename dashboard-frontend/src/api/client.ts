@@ -1,3 +1,4 @@
+import {validCheckpoint,isPreparationRun,type PreparationRun,type CreatePreparation} from '../views/infrastructure/preparationModel';
 import {isSettingsView,isHostSettings,type SettingsView,type HostSettings,type Json} from '../views/settings/settingsModel';
 import { isAliasesResponse, type AliasesResponse, type AliasMapping } from "../views/infrastructure/aliasModel";
 import { isBenchmarkRun, type BenchmarkRun, type BenchmarkOptions } from '../views/infrastructure/benchmarkModel';
@@ -397,6 +398,9 @@ export class DashboardClient {
     return this.request('/mesh', undefined, isMeshAdminState);
   }
 
+  preparations():Promise<PreparationRun[]> {return this.request('/preparations',undefined,(v):v is PreparationRun[]=>Array.isArray(v)&&v.every(isPreparationRun));}
+  startPreparation(body:CreatePreparation):Promise<PreparationRun> {return this.mutate<PreparationRun>('/preparations','POST',body).then(v=>{if(!isPreparationRun(v))throw Error('Invalid preparation response');return v;});}
+  cancelPreparation(id:string):Promise<PreparationRun> {return this.mutate<PreparationRun>(`/preparations/${encodeURIComponent(id)}/cancel`,'POST').then(v=>{if(!isPreparationRun(v))throw Error('Invalid preparation response');return v;});}
   benchmarks(): Promise<BenchmarkRun[]> {return this.request('/benchmarks',undefined,(v):v is BenchmarkRun[]=>Array.isArray(v)&&v.every(isBenchmarkRun));}
   recipeEvidence(): Promise<Array<{id:string;recipe_id:string;revision_digest:string;endpoint_id:string;kind:string;recorded_at_ms:number;data:Record<string,unknown>}>> {return this.request('/management/recipe-evidence');}
   deployGroup(body:{size?:string;group_id?:string;recipe_id:string;revision_digest:string;hosts:Array<{endpoint_id:string;address:string;gpus?:number[]}>;expected_generations?:Record<string,number>;desired_state:'ready'|'unloaded'}):Promise<{group_id:string;deployments:Record<string,DesiredDeployment>}> {return this.mutate('/management/deployment-groups','POST',body);}
@@ -441,6 +445,7 @@ export class DashboardClient {
     return this.mutate('/management/recipes/source', 'POST', { url }).then((value) => {
       const result = value as import('./types').ImportedRecipeSource;
       if (!result || result.source_format !== 'compose' || typeof result.source_url !== 'string' || typeof result.source_content !== 'string' || typeof result.suggested_id !== 'string' || !Array.isArray(result.named_volumes) || result.named_volumes.some(name => typeof name !== 'string')) throw new Error('Recipe source returned an invalid response');
+      if(result.checkpoints!==undefined&&(!Array.isArray(result.checkpoints)||!result.checkpoints.every(validCheckpoint)))throw new Error('Recipe source returned invalid checkpoint references');
       return result;
     });
   }

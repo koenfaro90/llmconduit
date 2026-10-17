@@ -298,6 +298,41 @@ impl FleetClient {
         Ok(value)
     }
 
+    pub async fn preparation_command(
+        &self,
+        command: &crate::dashboard_preparations::PreparationCommand,
+    ) -> Result<serde_json::Value, FleetProxyError> {
+        use crate::dashboard_preparations::PreparationCommand;
+        let (method, path, body, id) = match command {
+            PreparationCommand::Start { request } => (
+                reqwest::Method::POST,
+                "/v1/preparations".to_string(),
+                Some(request),
+                request.get("id").and_then(serde_json::Value::as_str),
+            ),
+            PreparationCommand::Get { id } => (
+                reqwest::Method::GET,
+                format!("/v1/preparations/{id}"),
+                None,
+                Some(id.as_str()),
+            ),
+            PreparationCommand::Cancel { id } => (
+                reqwest::Method::POST,
+                format!("/v1/preparations/{id}/cancel"),
+                None,
+                Some(id.as_str()),
+            ),
+        };
+        if !id.is_some_and(|id| uuid::Uuid::parse_str(id).is_ok()) {
+            return Err(FleetProxyError::new(
+                StatusCode::BAD_REQUEST,
+                "invalid preparation ID",
+            ));
+        };
+        self.request_body(method, &path, FLEET_REQUEST_TIMEOUT, body)
+            .await
+    }
+
     pub async fn benchmark_command(
         &self,
         command: &crate::dashboard_benchmarks::BenchmarkCommand,
@@ -652,6 +687,48 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn preparation_client_routes_typed_commands_and_keeps_local_credentials() {
+        use crate::dashboard_preparations::PreparationCommand;
+        let server = MockServer::start().await;
+        let id = uuid::Uuid::new_v4().to_string();
+        for (verb, target) in [
+            ("POST", "/v1/preparations".to_string()),
+            ("GET", format!("/v1/preparations/{id}")),
+            ("POST", format!("/v1/preparations/{id}/cancel")),
+        ] {
+            Mock::given(method(verb))
+                .and(path(target))
+                .and(header("authorization", "Bearer secret-token"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({"id":id,"status":"running"})),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let client = test_client(&server.uri());
+        for command in [
+            PreparationCommand::Start {
+                request: serde_json::json!({"id":id,"deployment_id":"dep"}),
+            },
+            PreparationCommand::Get { id: id.clone() },
+            PreparationCommand::Cancel { id: id.clone() },
+        ] {
+            let value = client.preparation_command(&command).await.unwrap();
+            assert_eq!(value["id"], id);
+            assert!(!value.to_string().contains("secret-token"));
+        }
+        assert!(
+            client
+                .preparation_command(&PreparationCommand::Get {
+                    id: "../managed".into()
+                })
+                .await
+                .is_err()
+        );
+    }
     #[tokio::test]
     async fn benchmark_client_routes_typed_commands_and_keeps_local_credentials() {
         use crate::dashboard_benchmarks::BenchmarkCommand;

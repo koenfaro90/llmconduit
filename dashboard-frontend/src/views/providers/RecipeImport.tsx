@@ -1,3 +1,5 @@
+import {CheckpointRequirementsEditor} from '../infrastructure/CheckpointRequirementsEditor';
+import type {CheckpointRequirement} from '../infrastructure/preparationModel';
 import { useState, type ChangeEvent } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { getConnection } from '../../api/connection';
@@ -17,12 +19,13 @@ export function LilSourceImport({ mutationsEnabled, onLoaded }: { mutationsEnabl
   </div>;
 }
 
-export function RecipeImport({ recipeId, description, sourceFormat, sourceContent, sourceUrl, namedVolumes = [], mutationsEnabled, onSaved }: {
+export function RecipeImport({ recipeId, description, sourceFormat, sourceContent, sourceUrl, namedVolumes = [], checkpoints = [], mutationsEnabled, onSaved }: {
   recipeId: string; description: string; sourceFormat: 'compose' | 'sparkrun'; sourceContent: string;
-  sourceUrl?: string; namedVolumes?: string[];
+  sourceUrl?: string; namedVolumes?: string[];checkpoints?:CheckpointRequirement[];
   mutationsEnabled: boolean; onSaved: () => void;
 }) {
   const { client } = getConnection();
+  const [requirements,setRequirements]=useState(checkpoints);
   const [options, setOptions] = useState<Record<string, string>>({});
   const [variables, setVariables] = useState('{}');
   const [environment, setEnvironment] = useState('{}');
@@ -31,6 +34,7 @@ export function RecipeImport({ recipeId, description, sourceFormat, sourceConten
   const [message, setMessage] = useState('');
   function request(): ConvertRecipeRequest {
     const parsed: RecipeImportOptions = {};
+    if(requirements.length)parsed.checkpoints=requirements;
     if (sourceUrl) parsed.source_url = sourceUrl;
     const mappings = Object.fromEntries(Object.entries(volumePaths).filter(([, path]) => path.trim()).map(([name, path]) => [name, path.trim()]));
     if (Object.keys(mappings).length) parsed.volume_paths = mappings;
@@ -83,6 +87,7 @@ export function RecipeImport({ recipeId, description, sourceFormat, sourceConten
   if (sourceFormat === 'sparkrun') fields.push(['runtime_cache_directory', 'Runtime cache directory', 'Optional existing approved cache path'], ['num_nodes', 'Distributed node count', 'Defaults to the recipe minimum'], ['node_rank', 'Distributed node rank', 'Leave blank to convert all ranks into one portable recipe'], ['head_address', 'Distributed head address', 'Head fabric IP'], ['host_address', 'Distributed host address', 'This rank’s fabric IP']);
   return <div className="space-y-2" data-testid="recipe-import"><PanelHeader label="Recipe conversion" help="Convert Compose or sparkrun source into a portable Fleet recipe. Preview checks unsupported features, environment and resource requirements before saving a deployable revision." actions={    <Button type="button" onClick={previewSource} disabled={!mutationsEnabled || busy || !sourceContent.trim()}>Preview conversion</Button>}><h3 className="font-semibold">Conversion settings</h3></PanelHeader>
     <p className="text-text-muted">Convert YAML to a Fleet recipe. Preview preserves commands, environment, bind paths and ports. Missing settings and unsupported features block saving a deployable revision.</p>
+    <CheckpointRequirementsEditor value={requirements} onChange={setRequirements}/>
     {sourceUrl && <p className="break-all text-text-muted">Loaded from <a className="text-accent" href={sourceUrl} target="_blank" rel="noreferrer">{sourceUrl}</a></p>}
     <div className="grid gap-2 md:grid-cols-2">{fields.filter(([key]) => key !== 'service' || sourceFormat === 'compose').map(([key, label, placeholder]) => <label key={key} className="space-y-1"><span>{label}</span><input aria-label={label} className={`${input} block w-full`} placeholder={placeholder} value={options[key] ?? ''} onChange={change(key)} /></label>)}</div>
     {sourceFormat === 'compose' && namedVolumes.length > 0 && <fieldset className="space-y-2 rounded border border-line p-3"><legend>Cache volume paths</legend><p className="text-text-muted">Map each named volume to an approved absolute directory on the selected hosts. Existing Docker volume contents are not copied.</p><div className="grid gap-2 md:grid-cols-2">{namedVolumes.map(name => <label key={name}>{name}<input aria-label={`Host path for ${name}`} placeholder="/home/koen/…" className={`${input} block w-full`} value={volumePaths[name] ?? ''} onChange={e => setVolumePaths(old => ({ ...old, [name]: e.target.value }))} /></label>)}</div></fieldset>}

@@ -21,6 +21,8 @@ pub struct ImportedRecipeSource {
     pub source_content: String,
     pub suggested_id: String,
     pub named_volumes: Vec<String>,
+    #[serde(default)]
+    pub checkpoints: Vec<crate::dashboard_preparations::Checkpoint>,
 }
 /// Only the configurator's fixed HTTPS origin is fetched. Never follow a redirect
 /// or accept an arbitrary download URL from remote HTML.
@@ -61,39 +63,152 @@ pub(crate) fn lil_source_url(text: &str) -> Result<url::Url, String> {
     url.set_path("/");
     Ok(url)
 }
+async fn source_text(response: reqwest::Response, limit: usize) -> Result<String, String> {
+    if !response.status().is_success() {
+        return Err("LiL source download did not succeed".into());
+    };
+    if response.content_length().is_some_and(|n| n > limit as u64) {
+        return Err("LiL source exceeds bounds".into());
+    };
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| "could not read LiL source")?;
+        if bytes.len() + chunk.len() > limit {
+            return Err("LiL source exceeds bounds".into());
+        };
+        bytes.extend_from_slice(&chunk)
+    }
+    String::from_utf8(bytes).map_err(|_| "source must be UTF-8".into())
+}
+fn decode_code(text: &str) -> Result<String, String> {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find('&') {
+        out.push_str(&rest[..at]);
+        rest = &rest[at + 1..];
+        let end = rest
+            .find(';')
+            .filter(|n| *n <= 12)
+            .ok_or("invalid source HTML escape")?;
+        let entity = &rest[..end];
+        let ch = match entity {
+            "amp" => '&',
+            "lt" => '<',
+            "gt" => '>',
+            "quot" => '"',
+            "apos" => '\'',
+            _ => {
+                let number = if let Some(hex) = entity
+                    .strip_prefix("#x")
+                    .or_else(|| entity.strip_prefix("#X"))
+                {
+                    u32::from_str_radix(hex, 16).ok()
+                } else {
+                    entity.strip_prefix('#').and_then(|s| s.parse::<u32>().ok())
+                };
+                number
+                    .and_then(char::from_u32)
+                    .ok_or("invalid source HTML escape")?
+            }
+        };
+        out.push(ch);
+        rest = &rest[end + 1..]
+    }
+    out.push_str(rest);
+    if out.len() > 32768 {
+        return Err("source exceeds 32 KiB".into());
+    };
+    Ok(out)
+}
+fn page_code(page: &str, pane: &str) -> Result<String, String> {
+    let needle = format!("id=\"{pane}\"");
+    let start = page.find(&needle).ok_or("LiL page has no source panel")?;
+    let tail = &page[start..];
+    let code = tail
+        .find("<pre><code>")
+        .filter(|n| *n < 2048)
+        .ok_or("LiL source panel is unavailable")?
+        + "<pre><code>".len();
+    let end = tail[code..]
+        .find("</code>")
+        .filter(|n| *n <= 65536)
+        .ok_or("LiL source panel exceeds bounds")?;
+    decode_code(&tail[code..code + end])
+}
+fn command_checkpoints(command: &str) -> Vec<crate::dashboard_preparations::Checkpoint> {
+    use crate::dashboard_preparations::Checkpoint;
+    let Ok(args) = shell_words::split(command) else {
+        return vec![];
+    };
+    let option = |name: &str| {
+        args.windows(2)
+            .find(|p| p[0] == name)
+            .map(|p| p[1].clone())
+            .or_else(|| {
+                args.iter()
+                    .find_map(|s| s.strip_prefix(&format!("{name}=")).map(str::to_string))
+            })
+    };
+    let mut found = Vec::new();
+    if let Some(at) = args.iter().position(|s| s == "serve")
+        && let (Some(model), Some(revision)) = (args.get(at + 1), option("--revision"))
+    {
+        let c = Checkpoint {
+            repository: model.clone(),
+            revision,
+        };
+        if c.valid() {
+            found.push(c)
+        }
+    };
+    if let Some(config) = option("--speculative-config")
+        && let Ok(v) = serde_json::from_str::<Value>(&config)
+        && let (Some(model), Some(revision)) = (v["model"].as_str(), v["revision"].as_str())
+    {
+        let c = Checkpoint {
+            repository: model.into(),
+            revision: revision.into(),
+        };
+        if c.valid() && !found.contains(&c) {
+            found.push(c)
+        }
+    };
+    found
+}
+fn imported_lil_page(url: &str, page: &str) -> Result<ImportedRecipeSource, String> {
+    let compose = page_code(page, "pane-compose")?;
+    let mut source = imported_lil_source(url, &compose)?;
+    if let Ok(command) = page_code(page, "pane-vllm") {
+        source.checkpoints = command_checkpoints(&command)
+    };
+    Ok(source)
+}
 pub(crate) async fn fetch_lil_source(text: &str) -> Result<ImportedRecipeSource, String> {
     let source_url = lil_source_url(text)?;
-    let mut download = source_url.clone();
-    download.set_path("/compose.yaml");
     let client = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 LLMConduit-RecipeImporter")
         .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|_| "source downloader unavailable")?;
+    // The configurator can forbid /compose.yaml while publishing the same exact
+    // source in its public page. Fetch one fixed origin; never execute page scripts.
+    if let Ok(response) = client.get(source_url.clone()).send().await
+        && let Ok(page) = source_text(response, 1024 * 1024).await
+        && let Ok(source) = imported_lil_page(source_url.as_str(), &page)
+    {
+        return Ok(source);
+    }
+    let mut download = source_url.clone();
+    download.set_path("/compose.yaml");
     let response = client
         .get(download)
         .send()
         .await
         .map_err(|_| "could not download LiL Compose source")?;
-    if !response.status().is_success() {
-        return Err("LiL Compose download did not succeed".into());
-    }
-    if response.content_length().is_some_and(|n| n > 32 * 1024) {
-        return Err("source exceeds 32 KiB".into());
-    }
-    let mut bytes = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| "could not read LiL Compose source")?;
-        if bytes.len() + chunk.len() > 32 * 1024 {
-            return Err("source exceeds 32 KiB".into());
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    imported_lil_source(
-        source_url.as_str(),
-        &String::from_utf8(bytes).map_err(|_| "source must be UTF-8")?,
-    )
+    let source = source_text(response, 32768).await?;
+    imported_lil_source(source_url.as_str(), &source)
 }
 fn imported_lil_source(url: &str, content: &str) -> Result<ImportedRecipeSource, String> {
     let yaml: serde_yaml::Value =
@@ -135,12 +250,15 @@ fn imported_lil_source(url: &str, content: &str) -> Result<ImportedRecipeSource,
         source_content: content.into(),
         suggested_id,
         named_volumes,
+        checkpoints: vec![],
     })
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ImportOptions {
+    #[serde(default)]
+    pub checkpoints: Vec<crate::dashboard_preparations::Checkpoint>,
     pub source_url: Option<String>,
     /// Named Compose volume -> approved absolute host bind path.
     #[serde(default)]
@@ -1344,6 +1462,9 @@ fn render_spark(source: &str, values: &Map<String, Value>) -> Result<String, Str
     Err("sparkrun placeholders did not stabilize; remove cyclic references".into())
 }
 pub fn convert(body: &ConvertRecipeRequest) -> Result<ConvertedRecipe, String> {
+    if body.options.checkpoints.len() > 8 || body.options.checkpoints.iter().any(|c| !c.valid()) {
+        return Err("checkpoint requirements must pin immutable revisions".into());
+    };
     if body.source_content.is_empty() || body.source_content.len() > 32 * 1024 {
         return Err("source content must be nonempty and at most 32 KiB".into());
     }
@@ -1443,6 +1564,10 @@ pub fn convert(body: &ConvertRecipeRequest) -> Result<ConvertedRecipe, String> {
         }
         c.spec.insert("metadata".into(), meta);
     }
+    if !body.options.checkpoints.is_empty() {
+        let meta = c.spec.entry("metadata").or_insert_with(|| json!({}));
+        meta["checkpoints"] = json!(body.options.checkpoints);
+    }
     let spec = Value::Object(c.spec);
     if serde_json::to_vec(&spec)
         .map_err(|_| "invalid converted recipe")?
@@ -1503,7 +1628,12 @@ pub fn convert_portable(body: &ConvertRecipeRequest) -> Result<ConvertedRecipe, 
         }
     }
     let mut combined = combined.unwrap();
+    let metadata = combined.model_spec.get("metadata").cloned();
     combined.model_spec = json!({"distributed":ranks});
+    if let Some(metadata) = metadata {
+        combined.model_spec["metadata"] = metadata;
+    }
+
     combined
         .warnings
         .retain(|w| !w.starts_with("This preview is one distributed rank"));
@@ -2029,5 +2159,71 @@ command: >-
         let value = serde_json::to_value(&preview).unwrap();
         let back: ConvertedRecipe = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(serde_json::to_value(back).unwrap(), value);
+    }
+}
+
+#[cfg(test)]
+mod preparation_import_tests {
+    use super::*;
+    #[test]
+    fn public_page_import_preserves_compose_and_pins_requirements() {
+        let page = r#"<div id="pane-compose"><pre><code>name: example
+services:
+  model:
+    image: example@sha256:abc
+    command: [&quot;--profile&quot;, &quot;example&quot;]
+</code></pre></div><div id="pane-vllm"><p>Read only command.</p><pre><code>python -m vllm serve owner/model --revision aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --speculative-config &#39;{&quot;model&quot;:&quot;owner/draft&quot;,&quot;revision&quot;:&quot;bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&quot;}&#39;</code></pre></div>"#;
+        let imported = imported_lil_page(
+            "https://docker.local-inference-lab.ai/?build=pinned&model=example",
+            page,
+        )
+        .unwrap();
+        assert!(
+            imported
+                .source_content
+                .contains("command: [\"--profile\", \"example\"]")
+        );
+        assert_eq!(imported.checkpoints.len(), 2);
+        assert_eq!(imported.checkpoints[0].repository, "owner/model");
+        assert_eq!(imported.checkpoints[1].repository, "owner/draft");
+        let serialized = serde_json::to_value(&imported).unwrap();
+        let back: ImportedRecipeSource = serde_json::from_value(serialized.clone()).unwrap();
+        assert_eq!(serde_json::to_value(back).unwrap(), serialized);
+    }
+    #[test]
+    fn no_guessed_revisions_or_arbitrary_page_scripts() {
+        assert!(command_checkpoints("vllm serve owner/model --revision main").is_empty());
+        assert!(
+            imported_lil_page(
+                "https://docker.local-inference-lab.ai/?build=a&model=b",
+                "<script>fetch('/private')</script>"
+            )
+            .is_err()
+        );
+        assert_eq!(decode_code("&amp;&lt;&gt;&#39;&#34;").unwrap(), "&<>'\"");
+    }
+}
+
+#[cfg(test)]
+mod live_lil_fixture_tests {
+    use super::*;
+    #[test]
+    fn deepseek_page_imports_exact_compose_and_csf_revision() {
+        let source=imported_lil_page("https://docker.local-inference-lab.ai/?build=karmic-kraken-beta-08edd314f7ee880c5cc29eb4692afc2aa7a2c51736c188335b655cdbf5ed6eea&model=ds41-flash&cache-l1-gib=512&cache=ram",include_str!("../tests/fixtures/lil-ds41-preparation.html")).unwrap();
+        assert_eq!(source.checkpoints.len(), 1);
+        assert_eq!(
+            source.checkpoints[0].repository,
+            "local-inference-lab/DeepSeek-V4.1-Flash-lossless-CSF"
+        );
+        assert_eq!(
+            source.checkpoints[0].revision,
+            "9c60bcbf1670e06f154b5d61080e50c9b3b7b4a3"
+        );
+        assert!(
+            source.source_content.contains(
+                "sha256:f5f9efe1b10ec7b853a495e66b7dbf15ff54f62741e444dea0b44e16736a10a9"
+            )
+        );
+        assert!(source.source_content.contains("--no-cache-l2-enabled"));
     }
 }
