@@ -8,6 +8,7 @@ use sha2::Digest;
 use sha2::Sha256;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
@@ -17,6 +18,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone)]
 pub struct MeshStore {
     path: PathBuf,
+    connection: Arc<Mutex<Option<Connection>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +81,7 @@ impl MeshStore {
     pub fn at_path(path: impl AsRef<Path>) -> Self {
         Self {
             path: path.as_ref().to_path_buf(),
+            connection: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -375,11 +378,22 @@ impl MeshStore {
         T: Send + 'static,
     {
         let path = self.path.clone();
+        let connection = self.connection.clone();
         task::spawn_blocking(move || {
-            let mut conn = Connection::open(path)?;
-            conn.busy_timeout(Duration::from_secs(10))?;
-            conn.pragma_update(None, "foreign_keys", "ON")?;
-            f(&mut conn)
+            // Keep one connection alive across heartbeats and authorization
+            // checks. Repeated last-close/WAL-recovery races can fail while
+            // opening a new connection, before its busy handler is installed.
+            // Serialize in the blocking pool, never on an async runtime thread.
+            let mut shared = connection
+                .lock()
+                .map_err(|_| StoreError::ConnectionPoisoned)?;
+            if shared.is_none() {
+                let conn = Connection::open(path)?;
+                conn.busy_timeout(Duration::from_secs(10))?;
+                conn.pragma_update(None, "foreign_keys", "ON")?;
+                *shared = Some(conn);
+            }
+            f(shared.as_mut().ok_or(StoreError::ConnectionPoisoned)?)
         })
         .await
         .map_err(StoreError::Join)?
@@ -388,6 +402,8 @@ impl MeshStore {
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
+    #[error("mesh database connection is unavailable")]
+    ConnectionPoisoned,
     #[error("filesystem error: {0}")]
     Io(#[from] std::io::Error),
     #[error("sqlite error: {0}")]
@@ -516,6 +532,50 @@ mod tests {
             store.list_join_keys().await.expect("new snapshot")[0].id,
             created.id
         );
+    }
+
+    #[tokio::test]
+    async fn concurrent_worker_heartbeats_and_authorization_stay_available() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let store = MeshStore::open(directory.path().join("mesh.sqlite"))
+            .await
+            .expect("open");
+        let key = store
+            .create_join_key(None, None, None)
+            .await
+            .expect("join key");
+        for index in 0..12 {
+            assert_eq!(
+                store
+                    .validate_join_key_for_endpoint(&key.token, &format!("node-{index}"), None, 1)
+                    .await
+                    .expect("enroll"),
+                JoinKeyDecision::Accepted
+            );
+        }
+        let mut tasks = tokio::task::JoinSet::new();
+        for index in 0..12 {
+            let store = store.clone();
+            tasks.spawn(async move {
+                let endpoint = format!("node-{index}");
+                for seen in 2..22 {
+                    store
+                        .touch_node_seen(&endpoint, seen)
+                        .await
+                        .expect("heartbeat");
+                    assert!(
+                        store
+                            .is_node_authorized(&endpoint)
+                            .await
+                            .expect("authorization")
+                    );
+                    assert_eq!(store.list_nodes().await.expect("inventory").len(), 12);
+                }
+            });
+        }
+        while let Some(result) = tasks.join_next().await {
+            result.expect("worker task");
+        }
     }
 
     #[tokio::test]
