@@ -35,8 +35,14 @@ ranges allow reuse/resume, including interrupted HF Hub downloads. Repeating a
 job uses a new identifier and retains its pinned recipe revision. Cancelled/failed
 jobs leave completed cache and resumable partials intact.
 
-Start automatically waits for declared checkpoint preparation to complete. Unload
-continues to work during preparation. Recipes without checkpoint requirements keep
+Start automatically waits for declared checkpoint preparation to complete. A
+successful receipt can serve later recipe
+revisions with exactly the same host, rank, image, checkpoint commits and cache
+directory. The original Fleet receipt keeps its original revision/provenance;
+GPU utilization or other execution-only edits do not create a new verification
+claim or interrupt another checkpoint download. Changed artifacts still need
+their own preparation.
+Unload continues to work during preparation. Recipes without checkpoint requirements keep
 their existing behavior; explicit preparation then pulls only the image. A completed
 preparation is separate from readiness, inference smoke tests and benchmark evidence.
 It proves presence/hashes at preparation time; it does not promise memory fit.

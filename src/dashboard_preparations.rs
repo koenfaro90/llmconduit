@@ -545,8 +545,17 @@ pub(crate) async fn ensure_prepared(
         .get("image")
         .and_then(Value::as_str)
         .ok_or("recipe image missing")?;
+    let cache_directory = recipe_cache_directory(model)?;
     for _ in 0..4 {
         let (raw, mut state) = read(store.as_ref()).await?;
+        // Execution-only edits (for example GPU utilization) do not change
+        // downloaded artifacts. Keep the original receipt and its recipe pin;
+        // never fabricate a new Fleet verification for the edited revision.
+        if state.runs.values().any(|run| {
+            completed_artifacts_match(run, deployment, image, &checkpoints, &cache_directory)
+        }) {
+            return Ok(true);
+        }
         let matching: Vec<_> = state
             .runs
             .values()
@@ -556,12 +565,6 @@ pub(crate) async fn ensure_prepared(
                     && r.rank == rank
             })
             .collect();
-        if matching
-            .iter()
-            .any(|r| r.report.as_ref().is_some_and(|v| v["status"] == "complete"))
-        {
-            return Ok(true);
-        }
         if let Some(latest) = matching.into_iter().max_by_key(|r| r.created_at_ms) {
             if terminal(latest) {
                 return Err(
@@ -585,7 +588,7 @@ pub(crate) async fn ensure_prepared(
             }
         }
         let run = PreparationRun {
-            cache_directory: recipe_cache_directory(model)?,
+            cache_directory: cache_directory.clone(),
             id: uuid::Uuid::new_v4().to_string(),
             endpoint_id: deployment.endpoint_id.clone(),
             recipe_id: deployment.recipe_id.clone(),
@@ -604,6 +607,127 @@ pub(crate) async fn ensure_prepared(
         }
     }
     Err("Preparation catalog changed; retrying".into())
+}
+
+fn completed_artifacts_match(
+    run: &PreparationRun,
+    deployment: &crate::dashboard_management::DesiredDeployment,
+    image: &str,
+    checkpoints: &[Checkpoint],
+    cache_directory: &str,
+) -> bool {
+    run.endpoint_id == deployment.endpoint_id
+        && run.rank == deployment.placement.as_ref().map_or(0, |p| p.rank as usize)
+        && run.image == image
+        && run.checkpoints == checkpoints
+        && run.cache_directory == cache_directory
+        && run
+            .report
+            .as_ref()
+            .is_some_and(|report| report["status"] == "complete" && valid_report(report, run))
+}
+
+#[cfg(test)]
+mod artifact_reuse_tests {
+    use super::*;
+
+    #[test]
+    fn reuse_keeps_original_provenance_and_checks_every_artifact_boundary() {
+        let run = PreparationRun {
+            cache_directory: "/hf".into(),
+            id: uuid::Uuid::new_v4().to_string(),
+            endpoint_id: "host-a".into(),
+            recipe_id: "original".into(),
+            revision_digest: "a".repeat(64),
+            rank: 0,
+            image: format!("image@sha256:{}", "b".repeat(64)),
+            checkpoints: vec![Checkpoint {
+                repository: "owner/model".into(),
+                revision: "c".repeat(40),
+            }],
+            created_at_ms: 1,
+            cancel_requested: false,
+            report: None,
+            error: None,
+        };
+        let mut run = PreparationRun {
+            report: Some(
+                json!({"id":run.id,"recipe_digest":run.revision_digest,"image":run.image,"cache_directory":run.cache_directory,"checkpoints":run.checkpoints,"status":"complete","total_bytes":42,"completed_bytes":42,"total_files":1,"verified_files":1,"downloaded_bytes":42,"sequence":3}),
+            ),
+            ..run
+        };
+        let mut deployment: crate::dashboard_management::DesiredDeployment = serde_json::from_value(json!({"generation":2,"endpoint_id":"host-a","recipe_id":"edited","revision_digest":"d".repeat(64),"desired_state":"ready","updated_at_ms":2})).unwrap();
+        assert!(completed_artifacts_match(
+            &run,
+            &deployment,
+            &run.image,
+            &run.checkpoints,
+            "/hf"
+        ));
+        assert_eq!(run.recipe_id, "original");
+        assert_eq!(
+            run.report.as_ref().unwrap()["recipe_digest"],
+            "a".repeat(64)
+        );
+        deployment.endpoint_id = "host-b".into();
+        assert!(!completed_artifacts_match(
+            &run,
+            &deployment,
+            &run.image,
+            &run.checkpoints,
+            "/hf"
+        ));
+        deployment.endpoint_id = "host-a".into();
+        assert!(!completed_artifacts_match(
+            &run,
+            &deployment,
+            "other-image",
+            &run.checkpoints,
+            "/hf"
+        ));
+        assert!(!completed_artifacts_match(
+            &run,
+            &deployment,
+            &run.image,
+            &run.checkpoints,
+            "/other-cache"
+        ));
+        let mut changed = run.checkpoints.clone();
+        changed[0].revision = "e".repeat(40);
+        assert!(!completed_artifacts_match(
+            &run,
+            &deployment,
+            &run.image,
+            &changed,
+            "/hf"
+        ));
+        run.rank = 1;
+        assert!(!completed_artifacts_match(
+            &run,
+            &deployment,
+            &run.image,
+            &run.checkpoints,
+            "/hf"
+        ));
+        run.rank = 0;
+        run.report.as_mut().unwrap()["recipe_digest"] = json!("d".repeat(64));
+        assert!(!completed_artifacts_match(
+            &run,
+            &deployment,
+            &run.image,
+            &run.checkpoints,
+            "/hf"
+        ));
+        run.report.as_mut().unwrap()["recipe_digest"] = json!("a".repeat(64));
+        run.report.as_mut().unwrap()["completed_bytes"] = json!(41);
+        assert!(!completed_artifacts_match(
+            &run,
+            &deployment,
+            &run.image,
+            &run.checkpoints,
+            "/hf"
+        ));
+    }
 }
 
 #[cfg(test)]
