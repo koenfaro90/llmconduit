@@ -27,6 +27,8 @@ const KEY: &str = "fleet_preparations_v1";
 pub struct Checkpoint {
     pub repository: String,
     pub revision: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub subfolder: String,
 }
 impl Checkpoint {
     pub(crate) fn valid(&self) -> bool {
@@ -39,6 +41,14 @@ impl Checkpoint {
                 .revision
                 .bytes()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            && (self.subfolder.is_empty()
+                || (self.subfolder.len() <= 256
+                    && !self.subfolder.contains("..")
+                    && regex::Regex::new(
+                        r"^[A-Za-z0-9][A-Za-z0-9_.-]*(/[A-Za-z0-9][A-Za-z0-9_.-]*)*$",
+                    )
+                    .unwrap()
+                    .is_match(&self.subfolder)))
     }
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -484,11 +494,38 @@ async fn reconcile_run(g: &Gateway, run: &PreparationRun) {
 mod tests {
     use super::*;
     #[test]
+    fn checkpoint_subfolder_round_trips_without_changing_legacy_wire() {
+        let old = json!({"repository":"owner/model","revision":"a".repeat(40)});
+        let legacy: Checkpoint = serde_json::from_value(old.clone()).unwrap();
+        assert_eq!(serde_json::to_value(legacy).unwrap(), old);
+        let selected =
+            json!({"repository":"owner/model","revision":"a".repeat(40),"subfolder":"FL2VA"});
+        let checkpoint: Checkpoint = serde_json::from_value(selected.clone()).unwrap();
+        assert!(checkpoint.valid());
+        assert_eq!(serde_json::to_value(&checkpoint).unwrap(), selected);
+        for subfolder in [
+            "/FL2VA",
+            "../FL2VA",
+            "FL2VA/../Ref2VA",
+            "FL2VA/",
+            "FL2VA//weights",
+        ] {
+            assert!(
+                !Checkpoint {
+                    subfolder: subfolder.into(),
+                    ..checkpoint.clone()
+                }
+                .valid()
+            );
+        }
+    }
+    #[test]
     fn checkpoint_refs_require_immutable_commits() {
         assert!(
             Checkpoint {
                 repository: "deepseek-ai/DeepSeek-V4.1-Flash-1017".into(),
-                revision: "a".repeat(40)
+                revision: "a".repeat(40),
+                subfolder: String::new(),
             }
             .valid()
         );
@@ -501,7 +538,8 @@ mod tests {
             assert!(
                 !Checkpoint {
                     repository: repository.into(),
-                    revision: "a".repeat(40)
+                    revision: "a".repeat(40),
+                    subfolder: String::new(),
                 }
                 .valid()
             )
@@ -509,7 +547,8 @@ mod tests {
         assert!(
             !Checkpoint {
                 repository: "owner/model".into(),
-                revision: "main".into()
+                revision: "main".into(),
+                subfolder: String::new(),
             }
             .valid()
         )
@@ -644,6 +683,7 @@ mod artifact_reuse_tests {
             checkpoints: vec![Checkpoint {
                 repository: "owner/model".into(),
                 revision: "c".repeat(40),
+                subfolder: String::new(),
             }],
             created_at_ms: 1,
             cancel_requested: false,

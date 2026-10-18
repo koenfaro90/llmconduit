@@ -157,6 +157,7 @@ fn command_checkpoints(command: &str) -> Vec<crate::dashboard_preparations::Chec
         let c = Checkpoint {
             repository: model.clone(),
             revision,
+            subfolder: String::new(),
         };
         if c.valid() {
             found.push(c)
@@ -169,6 +170,7 @@ fn command_checkpoints(command: &str) -> Vec<crate::dashboard_preparations::Chec
         let c = Checkpoint {
             repository: model.into(),
             revision: revision.into(),
+            subfolder: String::new(),
         };
         if c.valid() && !found.contains(&c) {
             found.push(c)

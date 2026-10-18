@@ -7,7 +7,10 @@ pulling, checkpoint fetching, verification and local cache writes. SQL keeps int
 provenance, progress and the last safe error across controller/browser reconnects.
 
 Recipes has typed **Checkpoint requirements** inputs for repository IDs and full
-40-character HF commits. Requirements are immutable revision data. They must match
+40-character HF commits and optional snapshot subfolders (for example `FL2VA`).
+A selected subfolder includes only files beneath that exact directory, preserving
+their full cache paths and hashes. Other partitions are not downloaded; omitted
+subfolders retain whole-snapshot behavior. Requirements are immutable revision data. They must match
 the target/draft selected by the serving command; changing this list does not
 rewrite that command. LiL URL import extracts the configurator's exact Compose and
 pinned target/draft requirements from its public resolved-command panel. This also
