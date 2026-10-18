@@ -153,3 +153,7 @@ request for more than 35 seconds while applying routine settings, reducing the
 new-request timeout to two seconds, changing profiles/credentials and deliberately
 failing resource preparation. It checks the unchanged gateway child PID, complete
 old responses and the new request's settings/credentials.
+
+Account API keys support in-place label/model/owner edits and token rotation.
+See [editability audit](dashboard-editability.md) for the update contract and
+remaining create-only Access records. Key changes publish live without restart.

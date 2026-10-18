@@ -488,7 +488,12 @@ fn protected_routes(gateway: Arc<Gateway>, auth: Arc<DashboardAuth>) -> Router<A
         )
         .route(
             "/dashboard/api/keys/{id}",
-            axum::routing::delete(crate::accounts_api::delete_key),
+            axum::routing::delete(crate::accounts_api::delete_key)
+                .put(crate::accounts_api::update_key),
+        )
+        .route(
+            "/dashboard/api/keys/{id}/rotate",
+            post(crate::accounts_api::rotate_key),
         )
         .merge(crate::provider_metrics::dashboard_routes::<Arc<Gateway>>(
             gateway.provider_metrics(),

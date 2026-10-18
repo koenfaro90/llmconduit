@@ -11,7 +11,7 @@
 #![allow(clippy::result_large_err)]
 
 use crate::accounts::{self, SessionUser};
-use crate::control_plane_store::{ApiKeyRecord, PersistenceStore, UserRecord};
+use crate::control_plane_store::{ApiKeyMetadata, ApiKeyRecord, PersistenceStore, UserRecord};
 use crate::dashboard_auth::{AuthSession, DashboardAuth, no_store};
 use crate::engine::Gateway;
 use crate::openapi::DashboardError;
@@ -435,6 +435,7 @@ pub async fn delete_user(
             "you cannot delete your own account",
         );
     }
+    let _mutation_guard = gateway.lock_account_mutations().await;
     let store = match store_or_503(&gateway) {
         Ok(store) => store,
         Err(response) => return response,
@@ -508,6 +509,22 @@ pub struct CreateKeyRequest {
     /// Admin only: create the key for another user (default: the caller).
     #[serde(default)]
     pub user_id: Option<String>,
+}
+
+/// Complete editable metadata, with optimistic concurrency. Null clears label/owner.
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateKeyRequest {
+    pub label: Option<String>,
+    pub user_id: Option<String>,
+    pub allowed_models: Vec<String>,
+    pub expected_updated_at_ms: i64,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RotateKeyRequest {
+    pub expected_updated_at_ms: i64,
 }
 
 /// `GET /dashboard/api/keys` body.
@@ -626,6 +643,7 @@ pub async fn create_key(
             return invalid_body("{label?, allowed_models?, user_id?}", &rejection);
         }
     };
+    let _mutation_guard = gateway.lock_account_mutations().await;
     let store = match store_or_503(&gateway) {
         Ok(store) => store,
         Err(response) => return response,
@@ -708,6 +726,208 @@ pub async fn create_key(
     )
 }
 
+async fn editable_key(
+    store: &dyn PersistenceStore,
+    session: &AuthSession,
+    id: &str,
+) -> Result<ApiKeyRecord, Response> {
+    let key = store
+        .list_api_keys()
+        .await
+        .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "lookup key failed"))?
+        .into_iter()
+        .find(|key| key.id == id)
+        .ok_or_else(|| error(StatusCode::NOT_FOUND, "key not found"))?;
+    if !is_admin(session)
+        && !session
+            .user
+            .as_ref()
+            .is_some_and(|u| key.user_id.as_deref() == Some(u.id.as_str()))
+    {
+        return Err(error(StatusCode::FORBIDDEN, "not your key"));
+    }
+    Ok(key)
+}
+
+/// Metadata changes preserve the token, identity and request history.
+#[utoipa::path(put, path="/dashboard/api/keys/{id}", tag="accounts", params(("id"=String,Path)),
+    request_body=UpdateKeyRequest, responses((status=200,body=ApiKeyRecord),(status=400),(status=403),(status=404),(status=409)))]
+pub async fn update_key(
+    State(gateway): State<Arc<Gateway>>,
+    Extension(auth): Extension<Arc<DashboardAuth>>,
+    session: AuthSession,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    payload: Result<Json<UpdateKeyRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    if let Err(response) = require_csrf(&auth, &headers) {
+        return response;
+    }
+    let body = match payload {
+        Ok(Json(body)) => body,
+        Err(e) => {
+            return invalid_body(
+                "{label, user_id, allowed_models, expected_updated_at_ms}",
+                &e,
+            );
+        }
+    };
+    let _mutation_guard = gateway.lock_account_mutations().await;
+    let store = match store_or_503(&gateway) {
+        Ok(store) => store,
+        Err(r) => return r,
+    };
+    let old = match editable_key(store.as_ref(), &session, &id).await {
+        Ok(key) => key,
+        Err(r) => return r,
+    };
+    if !is_admin(&session) && body.user_id != old.user_id {
+        return error(
+            StatusCode::FORBIDDEN,
+            "administrator role required to change key ownership",
+        );
+    }
+    if body.expected_updated_at_ms < 0
+        || body.expected_updated_at_ms == i64::MAX
+        || body.allowed_models.len() > MAX_ALLOWED_MODELS
+        || body
+            .label
+            .as_ref()
+            .is_some_and(|s| s.chars().count() > MAX_LABEL_LEN)
+        || body
+            .allowed_models
+            .iter()
+            .any(|s| s.trim().is_empty() || s.len() > 512 || s.chars().any(char::is_control))
+    {
+        return error(StatusCode::BAD_REQUEST, "invalid key metadata or revision");
+    }
+    if let Some(owner) = &body.user_id {
+        match store.get_user(owner).await {
+            Ok(Some(_)) => {}
+            Ok(None) => return error(StatusCode::NOT_FOUND, "user not found"),
+            Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "lookup user failed"),
+        }
+    }
+    let metadata = ApiKeyMetadata {
+        label: body
+            .label
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        user_id: body.user_id,
+        allowed_models: body
+            .allowed_models
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+    };
+    match store
+        .update_api_key(
+            &id,
+            &metadata,
+            body.expected_updated_at_ms,
+            None,
+            &actor(&session),
+        )
+        .await
+    {
+        Ok(Some(key)) => match accounts::reload_client_keys(&gateway).await {
+            Ok(_) => json(StatusCode::OK, &key),
+            Err(_) => error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "key saved but live authentication reload failed; refresh before retrying",
+            ),
+        },
+        Ok(None) => error(
+            StatusCode::CONFLICT,
+            "key or owner changed; refresh before saving",
+        ),
+        Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "update key failed"),
+    }
+}
+
+/// Rotate a token in place: old token stops authenticating; metadata and key ID stay stable.
+#[utoipa::path(post, path="/dashboard/api/keys/{id}/rotate", tag="accounts", params(("id"=String,Path)),
+    request_body=RotateKeyRequest, responses((status=200,body=CreatedKeyBody),(status=403),(status=404),(status=409)))]
+pub async fn rotate_key(
+    State(gateway): State<Arc<Gateway>>,
+    Extension(auth): Extension<Arc<DashboardAuth>>,
+    session: AuthSession,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    payload: Result<Json<RotateKeyRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    if let Err(response) = require_csrf(&auth, &headers) {
+        return response;
+    }
+    let body = match payload {
+        Ok(Json(body)) => body,
+        Err(e) => return invalid_body("{expected_updated_at_ms}", &e),
+    };
+    if body.expected_updated_at_ms < 0 || body.expected_updated_at_ms == i64::MAX {
+        return error(StatusCode::BAD_REQUEST, "invalid key revision");
+    }
+    let _mutation_guard = gateway.lock_account_mutations().await;
+    let store = match store_or_503(&gateway) {
+        Ok(store) => store,
+        Err(r) => return r,
+    };
+    let key = match editable_key(store.as_ref(), &session, &id).await {
+        Ok(key) => key,
+        Err(r) => return r,
+    };
+    let metadata = ApiKeyMetadata {
+        label: key.label,
+        user_id: key.user_id,
+        allowed_models: key.allowed_models,
+    };
+    let secret = accounts::generate_api_key();
+    match store
+        .update_api_key(
+            &id,
+            &metadata,
+            body.expected_updated_at_ms,
+            Some(&secret),
+            &actor(&session),
+        )
+        .await
+    {
+        Ok(Some(key)) => match accounts::reload_client_keys(&gateway).await {
+            Ok(registered_keys) => json(
+                StatusCode::OK,
+                &CreatedKeyBody {
+                    key,
+                    secret,
+                    registered_keys,
+                },
+            ),
+            Err(_) => error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "token rotated but activation failed; refresh and rotate again",
+            ),
+        },
+        Ok(None) => error(
+            StatusCode::CONFLICT,
+            "key or owner changed; refresh before rotating",
+        ),
+        Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "rotate key failed"),
+    }
+}
+
+#[cfg(test)]
+mod key_edit_wire_tests {
+    use super::*;
+    #[test]
+    fn editable_fields_and_null_owner_round_trip() {
+        let value = serde_json::json!({"label":null,"user_id":null,"allowed_models":["new-alias"],"expected_updated_at_ms":123});
+        let parsed: UpdateKeyRequest = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), value);
+        let value = serde_json::json!({"expected_updated_at_ms":456});
+        let parsed: RotateKeyRequest = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), value);
+    }
+}
+
 /// `DELETE /dashboard/api/keys/{id}` (CSRF): revokes a key (own, or any as admin).
 #[utoipa::path(
     delete,
@@ -737,6 +957,7 @@ pub async fn delete_key(
     if let Err(denied) = require_csrf(&auth, &headers) {
         return denied;
     }
+    let _mutation_guard = gateway.lock_account_mutations().await;
     let store = match store_or_503(&gateway) {
         Ok(store) => store,
         Err(response) => return response,

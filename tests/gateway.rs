@@ -6921,6 +6921,7 @@ async fn accounts_password_login_keys_live_reload_and_role_gating() {
         .expect("sole gateway reference")
         .with_persistence_store(store.clone());
     gateway.set_users_configured(true);
+    let registry = gateway.client_auth().clone();
     let app = d13_router(Arc::new(gateway));
 
     // With users configured (and a real token, non-loopback) the shared token no longer logs in.
@@ -7064,6 +7065,10 @@ async fn accounts_password_login_keys_live_reload_and_role_gating() {
     )
     .await;
     assert_eq!(created_user.status().as_u16(), 201);
+    let dev_id = d13_json(created_user).await["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let dev_login = app
         .clone()
         .oneshot(
@@ -7107,6 +7112,162 @@ async fn accounts_password_login_keys_live_reload_and_role_gating() {
     .await;
     assert_eq!(not_yours.status().as_u16(), 403);
 
+    // Metadata edits keep the token and identity; concurrent stale forms cannot overwrite.
+    let metadata = serde_json::json!({"label":"renamed", "user_id":dev_id, "allowed_models":["new-alias"],
+        "expected_updated_at_ms":created["key"]["updated_at_ms"]});
+    for (who, csrf_token, expected) in [
+        (&session, None, 403),
+        (&dev_session, Some(dev_csrf.as_str()), 403),
+    ] {
+        let response = accounts_request(
+            &app,
+            "PUT",
+            &format!("/dashboard/api/keys/{key_id}"),
+            who,
+            csrf_token,
+            Some(metadata.clone()),
+        )
+        .await;
+        assert_eq!(response.status().as_u16(), expected);
+    }
+    let mut unavailable_owner = metadata.clone();
+    unavailable_owner["user_id"] = serde_json::json!("missing-user");
+    let response = accounts_request(
+        &app,
+        "PUT",
+        &format!("/dashboard/api/keys/{key_id}"),
+        &session,
+        Some(&csrf),
+        Some(unavailable_owner),
+    )
+    .await;
+    assert_eq!(response.status().as_u16(), 404);
+    let edited = accounts_request(
+        &app,
+        "PUT",
+        &format!("/dashboard/api/keys/{key_id}"),
+        &session,
+        Some(&csrf),
+        Some(metadata.clone()),
+    )
+    .await;
+    assert_eq!(edited.status().as_u16(), 200);
+    let edited = d13_json(edited).await;
+    assert_eq!(edited["id"], key_id);
+    assert_eq!(edited["created_at_ms"], created["key"]["created_at_ms"]);
+    assert_eq!(edited["user_id"], dev_id);
+    assert!(edited.get("secret").is_none());
+    use llmconduit::client_auth::ClientAuthOutcome;
+    let ClientAuthOutcome::Authenticated(identity) = registry.authenticate(Some(&secret)) else {
+        panic!("token preserved")
+    };
+    assert_eq!(identity.owner_id.as_deref(), Some(dev_id.as_str()));
+    assert!(identity.allows_model("new-alias"));
+    assert!(!identity.allows_model("glm-5.1"));
+    let stale = accounts_request(
+        &app,
+        "PUT",
+        &format!("/dashboard/api/keys/{key_id}"),
+        &session,
+        Some(&csrf),
+        Some(metadata),
+    )
+    .await;
+    assert_eq!(stale.status().as_u16(), 409);
+    let forbidden_transfer = serde_json::json!({"label":"escalation", "user_id":admin.id,"allowed_models":[],"expected_updated_at_ms":edited["updated_at_ms"]});
+    assert_eq!(
+        accounts_request(
+            &app,
+            "PUT",
+            &format!("/dashboard/api/keys/{key_id}"),
+            &dev_session,
+            Some(&dev_csrf),
+            Some(forbidden_transfer)
+        )
+        .await
+        .status()
+        .as_u16(),
+        403
+    );
+    // Own-key changes and rotation are allowed; stale rotation leaves the current token valid.
+    let own = serde_json::json!({"label":null,"user_id":dev_id,"allowed_models":[],"expected_updated_at_ms":edited["updated_at_ms"]});
+    let own = accounts_request(
+        &app,
+        "PUT",
+        &format!("/dashboard/api/keys/{key_id}"),
+        &dev_session,
+        Some(&dev_csrf),
+        Some(own),
+    )
+    .await;
+    assert_eq!(own.status().as_u16(), 200);
+    let own = d13_json(own).await;
+    let rotation = serde_json::json!({"expected_updated_at_ms":own["updated_at_ms"]});
+    assert_eq!(
+        accounts_request(
+            &app,
+            "POST",
+            &format!("/dashboard/api/keys/{key_id}/rotate"),
+            &dev_session,
+            None,
+            Some(rotation.clone())
+        )
+        .await
+        .status()
+        .as_u16(),
+        403
+    );
+    let rotated = accounts_request(
+        &app,
+        "POST",
+        &format!("/dashboard/api/keys/{key_id}/rotate"),
+        &dev_session,
+        Some(&dev_csrf),
+        Some(rotation.clone()),
+    )
+    .await;
+    assert_eq!(rotated.status().as_u16(), 200);
+    assert_eq!(rotated.headers()["cache-control"], "no-store");
+    let rotated = d13_json(rotated).await;
+    let replacement = rotated["secret"].as_str().unwrap();
+    assert_ne!(replacement, secret);
+    assert_eq!(rotated["key"]["id"], key_id);
+    assert_eq!(
+        rotated["key"]["created_at_ms"],
+        created["key"]["created_at_ms"]
+    );
+    assert_eq!(
+        registry.authenticate(Some(&secret)),
+        ClientAuthOutcome::Rejected
+    );
+    assert!(matches!(
+        registry.authenticate(Some(replacement)),
+        ClientAuthOutcome::Authenticated(_)
+    ));
+    assert_eq!(
+        accounts_request(
+            &app,
+            "POST",
+            &format!("/dashboard/api/keys/{key_id}/rotate"),
+            &session,
+            Some(&csrf),
+            Some(rotation)
+        )
+        .await
+        .status()
+        .as_u16(),
+        409
+    );
+    let listed = d13_json(
+        accounts_request(&app, "GET", "/dashboard/api/keys", &dev_session, None, None).await,
+    )
+    .await;
+    assert!(!listed.to_string().contains(replacement));
+    assert!(store.verify_api_key(replacement).await.unwrap().is_some());
+    // An already admitted request retains its original identity snapshot.
+    assert!(identity.allows_model("new-alias"));
+    assert!(!identity.allows_model("some-other-model"));
+
     // The admin revokes the key: it stops working immediately and /v1 stays enforced
     // by the (now empty) SQL set only if YAML keys exist — here none, so it reopens.
     let revoked = accounts_request(
@@ -7146,6 +7307,22 @@ async fn accounts_password_login_keys_live_reload_and_role_gating() {
     )
     .await;
     assert_eq!(listed["keys"].as_array().unwrap().len(), 0);
+    let after_revoke = serde_json::json!({"label":"resurrect", "user_id":null, "allowed_models":[],"expected_updated_at_ms":rotated["key"]["updated_at_ms"]});
+    assert_eq!(
+        accounts_request(
+            &app,
+            "PUT",
+            &format!("/dashboard/api/keys/{key_id}"),
+            &session,
+            Some(&csrf),
+            Some(after_revoke)
+        )
+        .await
+        .status()
+        .as_u16(),
+        404
+    );
+    assert!(store.verify_api_key(replacement).await.unwrap().is_none());
 }
 
 #[tokio::test]

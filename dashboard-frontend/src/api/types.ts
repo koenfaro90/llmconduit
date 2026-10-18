@@ -1363,6 +1363,13 @@ export interface ApiKeyRecord {
   updated_at_ms: number;
 }
 
+export interface UpdateKeyRequest {
+  label: string | null;
+  user_id: string | null;
+  allowed_models: string[];
+  expected_updated_at_ms: number;
+}
+
 /** `POST /dashboard/api/keys` — the plaintext is returned exactly once. */
 export interface CreatedKeyResponse {
   key: ApiKeyRecord;

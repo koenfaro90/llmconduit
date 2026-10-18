@@ -24,6 +24,7 @@ import type {
   ActivityResponse,
   ActiveSessionsResponse,
   ApiKeyRecord,
+  UpdateKeyRequest,
   AuthApiKeysResponse,
   AuthAuditResponse,
   AuthGroupsResponse,
@@ -277,6 +278,18 @@ export class DashboardClient {
 
   createKey(body: { label?: string; allowed_models?: string[]; user_id?: string }): Promise<CreatedKeyResponse> {
     return this.mutate<CreatedKeyResponse>('/keys', 'POST', body);
+  }
+
+  private async keyMutation<T>(path: string, method: 'POST'|'PUT', body: unknown): Promise<T> {
+    try {return await this.mutate<T>(path,method,body);}
+    catch(error) {if(error instanceof Error && error.message.endsWith('409')) throw new Error('This key changed. Discard or cancel, then reopen it to load the current version.'); throw error;}
+  }
+
+  updateKey(id: string, body: UpdateKeyRequest): Promise<ApiKeyRecord> {
+    return this.keyMutation(`/keys/${encodeURIComponent(id)}`, 'PUT', body);
+  }
+  rotateKey(id: string, expectedUpdatedAtMs: number): Promise<CreatedKeyResponse> {
+    return this.keyMutation(`/keys/${encodeURIComponent(id)}/rotate`, 'POST', { expected_updated_at_ms: expectedUpdatedAtMs });
   }
 
   deleteKey(id: string): Promise<{ id: string; revoked: boolean }> {

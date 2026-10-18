@@ -54,4 +54,48 @@ describe('AccountView (mock accounts API)', () => {
     expect(getAllByTestId('key-row')[0]!.textContent).toContain('ci');
     expect(queryByTestId('account-users')).toBeNull();
   });
+  it('edits metadata and ownership in place, then rotates with a copy-once token', async () => {
+    authStore.getState().setUser({id:'user_admin',username:'admin',is_admin:true});
+    const view=renderWithQuery(<AccountView />);
+    await waitFor(()=>expect(view.getAllByTestId('key-row')).toHaveLength(2));
+    const row=view.getAllByTestId('key-row').find(r=>r.textContent?.includes('laptop'))!;
+    const id=row.getAttribute('title');
+    fireEvent.click(within(row).getByTestId('key-edit'));
+    const editor=view.getByTestId('key-editor');
+    fireEvent.change(within(editor).getByLabelText('Key label'),{target:{value:'Workstation'}});
+    fireEvent.change(within(editor).getByLabelText('Key owner'),{target:{value:'user_dev'}});
+    fireEvent.change(within(editor).getByLabelText('New Allowed models'),{target:{value:'custom-alias'}});
+    fireEvent.click(within(editor).getByRole('button',{name:/^Add$/}));
+    fireEvent.click(within(editor).getByRole('button',{name:'Save key changes'}));
+    await waitFor(()=>expect(view.queryByTestId('key-editor')).toBeNull());
+    const updated=view.getAllByTestId('key-row').find(r=>r.textContent?.includes('Workstation'))!;
+    expect(updated.getAttribute('title')).toBe(id);
+    expect(updated.textContent).toContain('dev');
+    expect(updated.textContent).toContain('custom-alias');
+    expect(view.queryByTestId('account-new-secret')).toBeNull();
+    fireEvent.click(within(updated).getByTestId('key-rotate'));
+    fireEvent.click(view.getByRole('button',{name:'Generate replacement token'}));
+    await waitFor(()=>expect(view.getByTestId('account-secret').textContent).toMatch(/^llmc_mock_rotated/));
+    fireEvent.click(view.getByRole('button',{name:'dismiss'}));
+    expect(view.queryByTestId('account-secret')).toBeNull();
+    expect(JSON.stringify(getConnection().queryClient.getMutationCache().getAll().map(m=>m.state.data))).not.toContain('llmc_mock_rotated');
+    expect(view.getAllByTestId('key-row')).toHaveLength(2);
+  });
+
+  it('keeps a draft on stale-write errors and discards it explicitly', async()=>{
+    authStore.getState().setUser({id:'user_admin',username:'admin',is_admin:true});
+    const view=renderWithQuery(<AccountView />);
+    await waitFor(()=>expect(view.getAllByTestId('key-row')).toHaveLength(2));
+    const keys=await getConnection().client.listKeys('all');const key=keys.keys[0]!;
+    fireEvent.click(within(view.getAllByTestId('key-row')[0]!).getByTestId('key-edit'));
+    await getConnection().client.updateKey(key.id,{label:'Other admin',user_id:key.user_id,allowed_models:key.allowed_models,expected_updated_at_ms:key.updated_at_ms});
+    fireEvent.change(within(view.getByTestId('key-editor')).getByLabelText('Key label'),{target:{value:'My draft'}});
+    fireEvent.click(view.getByRole('button',{name:'Save key changes'}));
+    await waitFor(()=>expect(view.getByRole('alert').textContent).toContain('changed'));
+    expect(within(view.getByTestId('key-editor')).getByLabelText('Key label')).toHaveValue('My draft');
+    fireEvent.click(view.getByRole('button',{name:'Discard key changes'}));
+    expect(view.queryByTestId('key-editor')).toBeNull();
+    await waitFor(()=>expect(view.getByText('Other admin')).toBeTruthy());
+  });
+
 });

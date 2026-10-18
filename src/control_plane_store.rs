@@ -467,6 +467,14 @@ pub struct ApiKeyRecord {
     pub updated_at_ms: i64,
 }
 
+/// Editable API-key metadata; credential changes use a separate optional digest update.
+#[derive(Debug, Clone)]
+pub struct ApiKeyMetadata {
+    pub label: Option<String>,
+    pub user_id: Option<String>,
+    pub allowed_models: Vec<String>,
+}
+
 /// Authentication snapshot carrying only one-way digests. This is the safe
 /// bridge to `ClientAuth::from_specs`; the database's raw `secret` column never
 /// crosses the store boundary.
@@ -763,6 +771,16 @@ pub trait PersistenceStore: PersistenceWriter {
         allowed_models: &[String],
         actor: &str,
     ) -> StoreResult<ApiKeyRecord>;
+    /// Update an existing active key atomically. A stale revision, deleted key or
+    /// deleted target owner returns None; never upsert or resurrect credentials.
+    async fn update_api_key(
+        &self,
+        id: &str,
+        metadata: &ApiKeyMetadata,
+        expected_updated_at_ms: i64,
+        plaintext: Option<&str>,
+        actor: &str,
+    ) -> StoreResult<Option<ApiKeyRecord>>;
     async fn verify_api_key(&self, plaintext: &str) -> StoreResult<Option<ApiKeyRecord>>;
     async fn delete_api_key(&self, id: &str, actor: &str) -> StoreResult<()>;
     async fn get_user(&self, id: &str) -> StoreResult<Option<UserRecord>>;
@@ -4305,6 +4323,59 @@ impl PersistenceStore for SqlStore {
         })
     }
 
+    async fn update_api_key(
+        &self,
+        id: &str,
+        metadata: &ApiKeyMetadata,
+        expected_updated_at_ms: i64,
+        plaintext: Option<&str>,
+        actor: &str,
+    ) -> StoreResult<Option<ApiKeyRecord>> {
+        if plaintext.is_some_and(str::is_empty) {
+            return Err("API key must not be empty".into());
+        }
+        let now = now_ms().max(expected_updated_at_ms.saturating_add(1));
+        let digest = plaintext.map(api_key_digest);
+        let allowed = encode_allowed_models(&metadata.allowed_models);
+        let pg = self.postgres();
+        let sql = format!(
+            "UPDATE api_keys SET label = {label}, user_id = {owner}, allowed_models_json = {models}, \
+             secret = COALESCE({digest}, secret), updated_at_ms = {now}, updated_by = {actor} \
+             WHERE id = {id} AND deleted_at_ms IS NULL AND updated_at_ms = {expected} \
+             AND (CAST({owner_check} AS TEXT) IS NULL OR EXISTS \
+               (SELECT 1 FROM users WHERE id = {owner_id} AND deleted_at_ms IS NULL)) \
+             RETURNING id, label, user_id, created_at_ms, updated_at_ms, allowed_models_json",
+            label = placeholder(pg, 1),
+            owner = placeholder(pg, 2),
+            models = placeholder(pg, 3),
+            digest = placeholder(pg, 4),
+            now = placeholder(pg, 5),
+            actor = placeholder(pg, 6),
+            id = placeholder(pg, 7),
+            expected = placeholder(pg, 8),
+            owner_check = placeholder(pg, 9),
+            owner_id = placeholder(pg, 10),
+        );
+        let rows = fetch_all_decoded!(
+            self,
+            &sql,
+            [
+                metadata.label.as_deref(),
+                metadata.user_id.as_deref(),
+                allowed,
+                digest,
+                now,
+                actor,
+                id,
+                expected_updated_at_ms,
+                metadata.user_id.as_deref(),
+                metadata.user_id.as_deref()
+            ],
+            decode_key
+        );
+        Ok(rows.into_iter().next())
+    }
+
     async fn verify_api_key(&self, plaintext: &str) -> StoreResult<Option<ApiKeyRecord>> {
         if plaintext.is_empty() {
             return Ok(None);
@@ -7111,5 +7182,49 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+    #[tokio::test]
+    async fn key_edits_compare_and_swap_and_never_resurrect_deleted_rows() {
+        let store = SqlStore::connect_sqlite("sqlite::memory:").await.unwrap();
+        let key = store
+            .put_api_key("editable", "original-token", Some("old"), None, &[], "test")
+            .await
+            .unwrap();
+        let metadata = ApiKeyMetadata {
+            label: Some("renamed".into()),
+            user_id: None,
+            allowed_models: vec!["alias".into()],
+        };
+        let (a, b) = tokio::join!(
+            store.update_api_key(&key.id, &metadata, key.updated_at_ms, None, "editor-a"),
+            store.update_api_key(&key.id, &metadata, key.updated_at_ms, None, "editor-b"),
+        );
+        let a = a.unwrap();
+        let b = b.unwrap();
+        assert_ne!(a.is_some(), b.is_some());
+        let current = a.or(b).unwrap();
+        assert_eq!(current.created_at_ms, key.created_at_ms);
+        assert!(
+            store
+                .verify_api_key("original-token")
+                .await
+                .unwrap()
+                .is_some()
+        );
+        store.delete_api_key(&key.id, "test").await.unwrap();
+        assert!(
+            store
+                .update_api_key(
+                    &key.id,
+                    &metadata,
+                    current.updated_at_ms,
+                    Some("replacement"),
+                    "test"
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(store.verify_api_key("replacement").await.unwrap().is_none());
     }
 }

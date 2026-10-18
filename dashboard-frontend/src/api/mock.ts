@@ -730,6 +730,21 @@ export const mockFetch: typeof fetch = async (input, init): Promise<Response> =>
     MOCK_KEYS.splice(index, 1);
     return json({ id, revoked: true, registered_keys: MOCK_KEYS.length });
   }
+  const rotateKeyMatch = path.match(/^\/dashboard\/api\/keys\/([^/]+)\/rotate$/);
+  if ((keyMatch && method === 'PUT') || (rotateKeyMatch && method === 'POST')) {
+    if (!headerValue(init?.headers, 'X-CSRF-Token')) return json({ error: 'missing csrf' }, 403);
+    const id = decodeURIComponent((keyMatch ?? rotateKeyMatch)![1] ?? '');
+    const index = MOCK_KEYS.findIndex(k => k.id === id);
+    if (index < 0) return json({error: 'key not found'}, 404);
+    const old = MOCK_KEYS[index]!;
+    if (mockSessionUser && !mockSessionUser.is_admin && old.user_id !== mockSessionUser.id) return json({error:'not your key'},403);
+    const body = parseBody(init?.body);
+    if (body.expected_updated_at_ms !== old.updated_at_ms) return json({error:'key or owner changed; refresh before saving'},409);
+    if (method === 'PUT' && mockSessionUser && !mockSessionUser.is_admin && body.user_id !== old.user_id) return json({error:'administrator role required'},403);
+    const key = {...old, updated_at_ms: Math.max(Date.now(),old.updated_at_ms+1), ...(method === 'PUT' ? {label:typeof body.label==='string'&&body.label.trim()?body.label.trim():null,user_id:typeof body.user_id==='string'?body.user_id:null,allowed_models:Array.isArray(body.allowed_models)?body.allowed_models as string[]:[]} : {})};
+    MOCK_KEYS[index]=key;
+    return method==='PUT' ? json(key) : json({key,secret:`llmc_mock_rotated_${id}_${key.updated_at_ms}`,registered_keys:MOCK_KEYS.length});
+  }
   // -- History series --
   if (path === '/dashboard/api/history/throughput') {
     const bucketSecs = Number(qs.get('bucket_secs') ?? 60);

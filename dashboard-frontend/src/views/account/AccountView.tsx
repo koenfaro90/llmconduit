@@ -1,5 +1,5 @@
 /**
- * AccountView — who you are, your API keys (create / revoke; the secret is shown once), and,
+ * AccountView — who you are, your API keys (create / edit / rotate / revoke; the secret is shown once), and,
  * for administrators, user management (create, reset password, role, delete) plus everyone's
  * keys. Mutations carry the double-submit CSRF token through the client.
  */
@@ -7,8 +7,9 @@ import { useState, type FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { getConnection, queryKeys } from '../../api/connection';
 import { useAuth } from '../../store/hooks';
-import type { ApiKeyRecord, UserRecord } from '../../api/types';
-import { Panel } from '../../components/ui/Panel';
+import type { ApiKeyRecord, UserRecord, UpdateKeyRequest } from '../../api/types';
+import { SettingsField } from '../settings/SettingsField';
+import { Panel, PanelHeader } from '../../components/ui/Panel';
 import { Button } from '../../components/ui/Button';
 import { DataTable } from '../../components/ui/DataTable';
 import type { DataTableColumn } from '../../components/ui/dataTableModel';
@@ -25,24 +26,38 @@ export function AccountView() {
   const queryClient = useQueryClient();
   const user = useAuth((s) => s.user);
   const authMode = useAuth((s) => s.authMode);
-  const isAdmin = user?.is_admin ?? authMode !== 'users';
   const me = useQuery({ queryKey: queryKeys.me, queryFn: () => client.me(), retry: false });
+  const isAdmin = user?.is_admin ?? me.data?.is_admin ?? false;
   const accountsEnabled = me.data?.accounts_enabled ?? true;
   const keys = useQuery({ queryKey: queryKeys.keys(isAdmin ? 'all' : 'mine'), queryFn: () => client.listKeys(isAdmin ? 'all' : user?.id), retry: false, enabled: accountsEnabled });
   const users = useQuery({ queryKey: queryKeys.users, queryFn: () => client.listUsers(), enabled: isAdmin && accountsEnabled, retry: false });
+  const [editingKey, setEditingKey] = useState<ApiKeyRecord | null>(null);
+  const [rotatingKey, setRotatingKey] = useState<ApiKeyRecord | null>(null);
+  const [copied, setCopied] = useState(false);
   const [secret, setSecret] = useState<{ label: string | null; secret: string } | null>(null);
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: ['keys'] });
     void queryClient.invalidateQueries({ queryKey: queryKeys.users });
   };
   const createKey = useMutation({
-    mutationFn: (body: { label?: string; allowed_models?: string[]; user_id?: string }) => client.createKey(body),
-    onSuccess: (created) => {
-      setSecret({ label: created.key.label, secret: created.secret });
-      invalidate();
+    mutationFn: async (body: { label?: string; allowed_models?: string[]; user_id?: string }) => {
+      const created = await client.createKey(body);
+      setCopied(false);
+      setSecret({label: created.key.label, secret: created.secret});
+      // Keep credentials out of TanStack's retained mutation response cache.
     },
+    onSuccess: invalidate,
   });
   const revokeKey = useMutation({ mutationFn: (id: string) => client.deleteKey(id), onSuccess: invalidate });
+  const updateKey = useMutation({mutationFn: (body: UpdateKeyRequest) => client.updateKey(editingKey!.id,body), onSuccess:()=>{setEditingKey(null);invalidate();},onError:invalidate});
+  const rotateKey = useMutation({
+    mutationFn: async (key: ApiKeyRecord) => {
+      const created = await client.rotateKey(key.id,key.updated_at_ms);
+      setCopied(false);
+      setSecret({label:created.key.label,secret:created.secret});
+    },
+    onSuccess:()=>{setRotatingKey(null);invalidate();},onError:invalidate,
+  });
   const createUser = useMutation({ mutationFn: (body: { username: string; password: string; is_admin: boolean }) => client.createUser(body), onSuccess: invalidate });
   const updateUser = useMutation({ mutationFn: (args: { id: string; password?: string; is_admin?: boolean }) => client.updateUser(args.id, { password: args.password, is_admin: args.is_admin }), onSuccess: invalidate });
   const deleteUser = useMutation({ mutationFn: (id: string) => client.deleteUser(id), onSuccess: invalidate });
@@ -72,12 +87,12 @@ export function AccountView() {
         <Panel className="mb-3 border-status-healthy/40 px-3 py-2" data-testid="account-new-secret">
           <div className="text-[10px] uppercase tracking-[0.14em] text-status-healthy">new key{secret.label ? ` · ${secret.label}` : ''} — copy it now, it is shown once</div>
           <code className="mt-1 block select-all break-all font-mono text-sm text-text" data-testid="account-secret">{secret.secret}</code>
-          <button type="button" className="mt-1 text-[10px] text-text-muted hover:text-text" onClick={() => setSecret(null)}>dismiss</button>
+          <div className="mt-2 flex justify-end gap-2"><Button variant="ghost" onClick={()=>{void navigator.clipboard?.writeText(secret.secret).then(()=>setCopied(true)).catch(()=>setCopied(false));}}>{copied?'Copied':'Copy token'}</Button><Button variant="ghost" onClick={() => {setSecret(null);setCopied(false);createKey.reset();rotateKey.reset();}}>dismiss</Button></div>
         </Panel>
       )}
 
       <section className="mb-4" data-testid="account-keys">
-        <h2 className="mb-1 text-[10px] uppercase tracking-[0.14em] text-text-muted">{isAdmin ? 'api keys · all users' : 'my api keys'}</h2>
+        <PanelHeader label="API keys" help="Keys authenticate model clients. Empty allowed models means any model. Administrators can transfer ownership. Editing preserves the token and history; rotation replaces the token immediately and shows it once. Running requests continue."><h2 className="text-xs font-semibold">{isAdmin ? 'API keys · all users' : 'My API keys'}</h2></PanelHeader>
         <KeyForm
           busy={createKey.isPending}
           error={createKey.error ? String(createKey.error) : null}
@@ -85,7 +100,10 @@ export function AccountView() {
           users={users.data?.users ?? []}
           onCreate={(body) => createKey.mutate(body)}
         />
-        <KeyTable keys={keys.data?.keys ?? []} showOwner={isAdmin} ownerName={userName} onRevoke={(id) => revokeKey.mutate(id)} busy={revokeKey.isPending} />
+        {editingKey && <KeyEditor key={editingKey.id} record={editingKey} users={users.data?.users??[]} admin={isAdmin} busy={updateKey.isPending} error={updateKey.error?String(updateKey.error):null} onSave={body=>updateKey.mutate(body)} onCancel={()=>{setEditingKey(null);updateKey.reset();}} />}
+        {rotatingKey && <Panel raised className="mb-3 space-y-3 p-3" role="dialog" aria-modal="false" aria-label="Rotate API key"><PanelHeader label="Token rotation" help="Generate a new random token for the same key ID. The old token stops authenticating new requests immediately. Replace it in clients; active requests continue." actions={<><Button variant="ghost" disabled={rotateKey.isPending} onClick={()=>{setRotatingKey(null);rotateKey.reset();}}>Cancel rotation</Button><Button disabled={rotateKey.isPending} onClick={()=>rotateKey.mutate(rotatingKey)}>Generate replacement token</Button></>}><h3 className="font-semibold">Rotate {rotatingKey.label??'unlabelled key'}</h3></PanelHeader><p className="text-xs text-text-muted">The old token will stop working immediately. The replacement is shown once.</p>{rotateKey.error&&<p role="alert" className="text-xs text-status-down">{String(rotateKey.error)}</p>}</Panel>}
+        {(revokeKey.error||keys.error)&&<p role="alert" className="text-xs text-status-down">{String(revokeKey.error??keys.error)}</p>}
+        <KeyTable keys={keys.data?.keys ?? []} ownerName={userName} onEdit={key=>{setEditingKey(key);updateKey.reset();setRotatingKey(null);}} onRotate={key=>{setSecret(null);setRotatingKey(key);rotateKey.reset();setEditingKey(null);}} onRevoke={id=>revokeKey.mutate(id)} busy={revokeKey.isPending||updateKey.isPending||rotateKey.isPending} />
       </section>
 
       {isAdmin && (
@@ -141,17 +159,30 @@ function KeyForm({ busy, error, admin, users, onCreate }: { busy: boolean; error
   );
 }
 
-function KeyTable({ keys, showOwner, ownerName, onRevoke, busy }: { keys: ApiKeyRecord[]; showOwner: boolean; ownerName: (id: string | null) => string; onRevoke: (id: string) => void; busy: boolean }) {
-  if (keys.length === 0) return <div className="rounded-md border border-line px-3 py-3 text-xs italic text-text-muted" data-testid="keys-empty">No keys yet.</div>;
+function KeyEditor({record,users,admin,busy,error,onSave,onCancel}:{record:ApiKeyRecord;users:UserRecord[];admin:boolean;busy:boolean;error:string|null;onSave:(body:UpdateKeyRequest)=>void;onCancel:()=>void}) {
+  const [label,setLabel]=useState(record.label??'');
+  const [owner,setOwner]=useState(record.user_id);
+  const [models,setModels]=useState(record.allowed_models);
+  return <Panel raised className="mb-3 space-y-3 p-3" data-testid="key-editor">
+    <PanelHeader label="Edit API key" help="Save changes without replacing the token or resetting activity. Only administrators may change the owning user. If another administrator changes this key, discard and reopen to load the new version." actions={<><Button variant="ghost" disabled={busy} onClick={onCancel}>Discard key changes</Button><Button disabled={busy||label.length>128||models.length>64||models.some(model=>!model.trim()||model.length>512)} onClick={()=>onSave({label:label.trim()||null,user_id:owner,allowed_models:models,expected_updated_at_ms:record.updated_at_ms})}>Save key changes</Button></>}><h3 className="text-sm font-semibold">Edit {record.label??'unlabelled key'}</h3></PanelHeader>
+    <div className="grid min-w-0 gap-4 md:grid-cols-2">
+      <SettingsField name="key label" schema={{kind:'text',label:'Key label'}} value={label} onChange={value=>setLabel(String(value??''))} disabled={busy}/>
+      {admin&&<label className="space-y-2 text-sm font-medium">Key owner<select aria-label="Key owner" className="block w-full rounded-md border border-line bg-bg px-3 py-2 text-sm" disabled={busy} value={owner??''} onChange={event=>setOwner(event.target.value||null)}><option value="">No owner</option>{users.map(u=><option key={u.id} value={u.id}>{u.username}</option>)}</select></label>}
+      <div className="md:col-span-2"><SettingsField name="allowed models" schema={{kind:'list',label:'Allowed models',help:'Client-facing models or aliases. No entries means any model. Existing custom or currently unavailable model names are preserved.',item:{kind:'text',placeholder:'Model or alias name'}}} value={models} onChange={value=>setModels(Array.isArray(value)?value.map(String):[])} disabled={busy}/></div>
+    </div>
+    {error&&<p role="alert" className="text-xs text-status-down">{error}</p>}
+  </Panel>;
+}
+
+function KeyTable({ keys, ownerName, onEdit, onRotate, onRevoke, busy }: { keys: ApiKeyRecord[]; ownerName: (id: string | null) => string; onEdit:(key:ApiKeyRecord)=>void;onRotate:(key:ApiKeyRecord)=>void;onRevoke: (id: string) => void; busy: boolean }) {
   const columns: DataTableColumn<ApiKeyRecord>[] = [
-    { id: 'label', label: 'label', width: '24%', required: true, render: (k) => k.label ?? <span className="italic text-text-muted">unlabelled</span> },
-    { id: 'owner', label: 'owner', width: '20%', render: (k) => <span className="text-text-muted">{showOwner ? ownerName(k.user_id) : ownerName(k.user_id)}</span> },
-    { id: 'models', label: 'allowed models', width: '28%', render: (k) => <span className="font-mono text-text-muted">{k.allowed_models.length ? k.allowed_models.join(', ') : 'any'}</span> },
-    { id: 'created', label: 'created', width: '18%', render: (k) => <span className="tabular-nums text-text-muted">{fmtWhen(k.created_at_ms)}</span> },
-    { id: 'actions', label: '', width: '10%', required: true, render: (k) => <Button variant="danger" className="px-2 py-0.5 text-[11px]" disabled={busy} onClick={() => onRevoke(k.id)} data-testid="key-revoke">revoke</Button> },
+    { id: 'label', label: 'Label', required: true, value:k=>k.label??'',render:k=>k.label??<span className="italic text-text-muted">Unlabelled</span> },
+    { id: 'owner', label: 'Owner', value:k=>ownerName(k.user_id),render:k=>ownerName(k.user_id) },
+    { id: 'models', label: 'Allowed models', value:k=>k.allowed_models.join(', ')||'Any',render:k=><span className="break-words">{k.allowed_models.join(', ')||'Any'}</span> },
+    { id: 'created', label: 'Created', value:k=>k.created_at_ms,render:k=>fmtWhen(k.created_at_ms) },
+    { id: 'actions', label: 'Actions',required:true,sortable:false, render:k=><div className="flex flex-wrap gap-1"><Button variant="ghost" disabled={busy} onClick={()=>onEdit(k)} data-testid="key-edit">Edit</Button><Button variant="ghost" disabled={busy} onClick={()=>onRotate(k)} data-testid="key-rotate">Rotate token</Button><Button variant="danger" disabled={busy} onClick={()=>onRevoke(k.id)} data-testid="key-revoke">revoke</Button></div> },
   ];
-  return <div className="rounded-md border border-line"><DataTable id="account-keys" rows={keys} rowKey={(k) => k.id}
-    columns={columns} rowTestId="key-row" rowAttributes={(k) => ({ title: k.id })} clientPageSize={25} minWidth={650} /></div>;
+  return <DataTable id="account-keys" interactive rows={keys} rowKey={k=>k.id} columns={columns} rowTestId="key-row" rowAttributes={k=>({title:k.id})} clientPageSize={25} minWidth={750} mobileColumns={['label','models','actions']} emptyMessage="No keys yet."/>;
 }
 
 function UserForm({ busy, error, onCreate }: { busy: boolean; error: string | null; onCreate: (body: { username: string; password: string; is_admin: boolean }) => void }) {

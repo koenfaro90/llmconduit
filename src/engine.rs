@@ -137,6 +137,8 @@ pub struct Gateway {
     /// Client-facing `/v1/*` virtual-key authentication. This is deliberately
     /// separate from env-only dashboard session authentication.
     client_auth: crate::client_auth::ClientAuth,
+    /// Serialize SQL key mutations with publication of their live auth snapshot.
+    account_mutations: Arc<tokio::sync::Mutex<()>>,
     /// Inbound header used to group durable request rows into conversations.
     /// This is request attribution only; it is not forwarded upstream.
     conversation_id_header: String,
@@ -805,6 +807,7 @@ impl Gateway {
             config,
             generation_environment: crate::runtime_configuration::current_environment(),
             client_auth: crate::client_auth::ClientAuth::open(),
+            account_mutations: Arc::new(tokio::sync::Mutex::new(())),
             conversation_id_header: crate::control_plane::DEFAULT_CONVERSATION_ID_HEADER
                 .to_string(),
             operational_alias_profiles: BTreeMap::new(),
@@ -858,6 +861,10 @@ impl Gateway {
     pub fn with_client_auth(mut self, client_auth: crate::client_auth::ClientAuth) -> Self {
         self.client_auth = client_auth;
         self
+    }
+
+    pub(crate) async fn lock_account_mutations(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.account_mutations.lock().await
     }
 
     pub fn client_auth(&self) -> &crate::client_auth::ClientAuth {
