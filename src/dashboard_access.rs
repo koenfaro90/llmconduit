@@ -24,6 +24,8 @@ pub enum ManagementPermission {
     KeysRead,
     #[serde(rename = "auth.keys.create")]
     KeysCreate,
+    #[serde(rename = "auth.keys.write")]
+    KeysWrite,
     #[serde(rename = "auth.keys.revoke")]
     KeysRevoke,
     #[serde(rename = "auth.keys.rotate")]
@@ -106,8 +108,9 @@ pub struct AccessCounts {
     pub active_sessions: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccessUser {
+    pub revision: u64,
     pub id: String,
     pub kind: String,
     pub display_name: String,
@@ -115,24 +118,35 @@ pub struct AccessUser {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccessGroup {
+    pub revision: u64,
     pub id: String,
     pub name: String,
     pub enabled: bool,
     pub member_count: usize,
+    pub members: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccessRole {
+    pub revision: u64,
     pub id: String,
     pub name: String,
     pub enabled: bool,
+    pub bindings: Vec<AccessRoleBinding>,
     pub permissions: Vec<ManagementPermission>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AccessRoleBinding {
+    pub subject_kind: String,
+    pub subject_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccessPolicy {
+    pub revision: u64,
     pub id: String,
     pub name: String,
     pub effect: String,
@@ -165,8 +179,9 @@ pub struct AccessTimeWindow {
     pub absolute_end_ms: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccessApiKey {
+    pub revision: u64,
     pub id: String,
     pub principal_id: String,
     pub name: String,
@@ -252,20 +267,20 @@ pub struct AccessPricingRow {
     pub confidence: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateUserRequest {
     pub display_name: String,
     pub kind: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateApiKeyRequest {
     pub principal_id: String,
     pub name: String,
     pub expires_at: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreatePolicyRequest {
     pub name: String,
     pub effect: String,
@@ -291,14 +306,14 @@ pub struct CreatePolicyRequest {
     pub management_permissions: Vec<ManagementPermission>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateGroupRequest {
     pub name: String,
     #[serde(default)]
     pub members: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateRoleRequest {
     pub name: String,
     #[serde(default)]
@@ -323,17 +338,58 @@ pub struct AccessPricingInput {
     pub output_per_1k: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateAccessUser {
+    pub expected_revision: u64,
+    pub enabled: bool,
+    #[serde(flatten)]
+    pub record: CreateUserRequest,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateAccessGroup {
+    pub expected_revision: u64,
+    pub enabled: bool,
+    #[serde(flatten)]
+    pub record: CreateGroupRequest,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateAccessRole {
+    pub expected_revision: u64,
+    pub enabled: bool,
+    pub bindings: Vec<AccessRoleBinding>,
+    #[serde(flatten)]
+    pub record: CreateRoleRequest,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateAccessPolicy {
+    pub expected_revision: u64,
+    pub enabled: bool,
+    #[serde(flatten)]
+    pub record: CreatePolicyRequest,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateAccessKey {
+    pub expected_revision: u64,
+    #[serde(flatten)]
+    pub record: CreateApiKeyRequest,
+}
+
 #[derive(Debug)]
 pub enum AccessOperation {
     Summary,
+    UpdateUser(String, UpdateAccessUser),
     ListUsers,
     CreateUser(CreateUserRequest),
+    UpdateGroup(String, UpdateAccessGroup),
     ListGroups,
     CreateGroup(CreateGroupRequest),
+    UpdateRole(String, UpdateAccessRole),
     ListRoles,
     CreateRole(CreateRoleRequest),
+    UpdatePolicy(String, Box<UpdateAccessPolicy>),
     ListPolicies,
     CreatePolicy(Box<CreatePolicyRequest>),
+    UpdateApiKey(String, UpdateAccessKey),
     ListApiKeys,
     CreateApiKey(CreateApiKeyRequest),
     RevokeApiKey(String),
@@ -442,6 +498,26 @@ where
             "/dashboard/api/auth/api-keys/{id}/rotate",
             post(rotate_api_key),
         )
+        .route(
+            "/dashboard/api/auth/users/{id}",
+            axum::routing::put(update_user),
+        )
+        .route(
+            "/dashboard/api/auth/groups/{id}",
+            axum::routing::put(update_group),
+        )
+        .route(
+            "/dashboard/api/auth/roles/{id}",
+            axum::routing::put(update_role),
+        )
+        .route(
+            "/dashboard/api/auth/policies/{id}",
+            axum::routing::put(update_policy),
+        )
+        .route(
+            "/dashboard/api/auth/api-keys/{id}",
+            axum::routing::put(update_key),
+        )
         .route("/dashboard/api/auth/sessions", get(sessions))
         .route(
             "/dashboard/api/auth/sessions/{id}/revoke",
@@ -534,6 +610,56 @@ async fn create_role(
         _ => Err(AccessError::contract()),
     }
 }
+
+macro_rules! update_handler {
+ ($name:ident,$permission:expr,$variant:ident,$ty:ty,$result:ident,$key:literal) => {
+  async fn $name(backend:Extension<Arc<dyn AccessBackend>>,actor:Extension<ManagementActor>,Path(id):Path<String>,Json(body):Json<$ty>)->Result<Json<Value>,AccessError>{
+   match execute((backend,actor),$permission,AccessOperation::$variant(id,body.into())).await? {
+    AccessResult::$result(value)=>Ok(Json(json!({$key:value}))),_=>Err(AccessError::contract())
+   }
+  }
+ };
+}
+update_handler!(
+    update_user,
+    ManagementPermission::PrincipalsWrite,
+    UpdateUser,
+    UpdateAccessUser,
+    Users,
+    "users"
+);
+update_handler!(
+    update_group,
+    ManagementPermission::GroupsWrite,
+    UpdateGroup,
+    UpdateAccessGroup,
+    Groups,
+    "groups"
+);
+update_handler!(
+    update_role,
+    ManagementPermission::RolesWrite,
+    UpdateRole,
+    UpdateAccessRole,
+    Roles,
+    "roles"
+);
+update_handler!(
+    update_policy,
+    ManagementPermission::PoliciesWrite,
+    UpdatePolicy,
+    UpdateAccessPolicy,
+    Policies,
+    "policies"
+);
+update_handler!(
+    update_key,
+    ManagementPermission::KeysWrite,
+    UpdateApiKey,
+    UpdateAccessKey,
+    ApiKeys,
+    "api_keys"
+);
 
 read_handler!(
     users,
@@ -777,6 +903,7 @@ mod tests {
                     AccessOperation::CreateApiKey(body) => {
                         Ok(AccessResult::CreatedApiKey(CreatedAccessApiKey {
                             api_key: AccessApiKey {
+                                revision: 1,
                                 id: "key_created".into(),
                                 principal_id: body.principal_id,
                                 name: body.name,
@@ -814,6 +941,7 @@ mod tests {
     fn created_key_debug_never_contains_secret() {
         let created = CreatedAccessApiKey {
             api_key: AccessApiKey {
+                revision: 1,
                 id: "key_1".into(),
                 principal_id: "usr_1".into(),
                 name: "test".into(),

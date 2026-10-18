@@ -45,9 +45,82 @@ impl AuthzService {
             .store
             .lock()
             .map_err(|_| internal("auth store lock poisoned".into()))?;
+        // A request may have waited behind another edit. Re-check delegated
+        // authority under the store lock before accepting an update.
+        let update_permission = match &operation {
+            AccessOperation::UpdateUser(..) => Some(WirePermission::PrincipalsWrite),
+            AccessOperation::UpdateGroup(..) => Some(WirePermission::GroupsWrite),
+            AccessOperation::UpdateRole(..) => Some(WirePermission::RolesWrite),
+            AccessOperation::UpdatePolicy(..) => Some(WirePermission::PoliciesWrite),
+            AccessOperation::UpdateApiKey(..) => Some(WirePermission::KeysWrite),
+            _ => None,
+        };
+        let refreshed;
+        let actor = if let (
+            Some(required),
+            ManagementActor::Delegated {
+                session_id,
+                principal_id,
+                key_id,
+                ..
+            },
+        ) = (update_permission, actor)
+        {
+            let authority = inner
+                .authority
+                .read()
+                .map_err(|_| internal("auth snapshot lock poisoned".into()))?;
+            let key = authority
+                .credentials
+                .iter()
+                .find(|k| {
+                    k.id == *key_id
+                        && k.principal_id == *principal_id
+                        && k.expires_at.is_none_or(|t| t > Utc::now().timestamp())
+                })
+                .ok_or_else(|| {
+                    AccessError::new(
+                        StatusCode::FORBIDDEN,
+                        "Management credential is no longer authorized",
+                    )
+                })?;
+            let identity = super::PolicyIdentity {
+                request_id: super::AuthRequestId::new(),
+                key_id: key.id.clone(),
+                key_prefix: key.prefix.clone(),
+                principal_id: key.principal_id.clone(),
+                policy_epoch: authority.epoch,
+            };
+            let permissions: Vec<_> = authority
+                .policy
+                .management_permissions(&identity, Utc::now())
+                .into_iter()
+                .filter_map(wire_permission)
+                .collect();
+            if !permissions.contains(&required) {
+                return Err(AccessError::new(
+                    StatusCode::FORBIDDEN,
+                    "Management permission is no longer granted",
+                ));
+            }
+            refreshed = ManagementActor::Delegated {
+                session_id: session_id.clone(),
+                principal_id: principal_id.clone(),
+                key_id: key_id.clone(),
+                permissions: permissions.into(),
+            };
+            &refreshed
+        } else {
+            actor
+        };
         let mutates = matches!(
             operation,
-            AccessOperation::CreateUser(_)
+            AccessOperation::UpdateUser(..)
+                | AccessOperation::UpdateGroup(..)
+                | AccessOperation::UpdateRole(..)
+                | AccessOperation::UpdatePolicy(..)
+                | AccessOperation::UpdateApiKey(..)
+                | AccessOperation::CreateUser(_)
                 | AccessOperation::CreateGroup(_)
                 | AccessOperation::CreateRole(_)
                 | AccessOperation::CreatePolicy(_)
@@ -78,7 +151,11 @@ impl AuthzService {
                         actor,
                     )
                     .map_err(internal)?;
-                Ok(AccessResult::CreatedApiKey(created_access(created, raw)))
+                Ok(AccessResult::CreatedApiKey(created_access(
+                    created,
+                    raw,
+                    store.revision().map_err(internal)?,
+                )))
             }
             AccessOperation::RotateApiKey(id) => {
                 let generated = generate_api_key(&inner.pepper);
@@ -87,7 +164,11 @@ impl AuthzService {
                 let created = store
                     .rotate_key(&id, &raw, &digest, actor)
                     .map_err(internal)?;
-                Ok(AccessResult::CreatedApiKey(created_access(created, raw)))
+                Ok(AccessResult::CreatedApiKey(created_access(
+                    created,
+                    raw,
+                    store.revision().map_err(internal)?,
+                )))
             }
             operation => store.dispatch_access(actor, operation),
         }?;
@@ -144,10 +225,15 @@ fn disabled_access_result(
     Ok(empty)
 }
 
-fn created_access(created: super::CreatedApiKey, raw_key: String) -> CreatedAccessApiKey {
+fn created_access(
+    created: super::CreatedApiKey,
+    raw_key: String,
+    revision: u64,
+) -> CreatedAccessApiKey {
     let key = created.summary;
     CreatedAccessApiKey {
         api_key: AccessApiKey {
+            revision,
             id: key.id,
             principal_id: key.principal_id,
             name: key.name,
@@ -187,6 +273,7 @@ pub(crate) fn wire_permission(permission: ManagementPermission) -> Option<WirePe
     Some(match permission {
         ManagementPermission::KeysRead => WirePermission::KeysRead,
         ManagementPermission::KeysCreate => WirePermission::KeysCreate,
+        ManagementPermission::KeysWrite => WirePermission::KeysWrite,
         ManagementPermission::KeysRevoke => WirePermission::KeysRevoke,
         ManagementPermission::KeysRotate => WirePermission::KeysRotate,
         ManagementPermission::PrincipalsRead => WirePermission::PrincipalsRead,

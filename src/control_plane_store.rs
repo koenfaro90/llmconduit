@@ -758,6 +758,13 @@ pub trait PersistenceStore: PersistenceWriter {
         is_admin: Option<bool>,
         actor: &str,
     ) -> StoreResult<()>;
+    async fn rename_user(
+        &self,
+        id: &str,
+        username: &str,
+        expected_updated_at_ms: i64,
+        actor: &str,
+    ) -> StoreResult<Option<UserRecord>>;
     async fn delete_user(&self, id: &str, actor: &str) -> StoreResult<()>;
 
     async fn list_api_keys(&self) -> StoreResult<Vec<ApiKeyRecord>>;
@@ -4170,6 +4177,32 @@ impl PersistenceStore for SqlStore {
             }
         }
         Ok(())
+    }
+
+    async fn rename_user(
+        &self,
+        id: &str,
+        username: &str,
+        expected_updated_at_ms: i64,
+        actor: &str,
+    ) -> StoreResult<Option<UserRecord>> {
+        let pg = self.postgres();
+        let now = now_ms().max(expected_updated_at_ms.saturating_add(1));
+        let sql = format!(
+            "UPDATE users SET username={},updated_at_ms={},updated_by={} WHERE id={} AND updated_at_ms={} AND deleted_at_ms IS NULL RETURNING id,username,is_admin,created_at_ms,updated_at_ms",
+            placeholder(pg, 1),
+            placeholder(pg, 2),
+            placeholder(pg, 3),
+            placeholder(pg, 4),
+            placeholder(pg, 5)
+        );
+        let rows = fetch_all_decoded!(
+            self,
+            &sql,
+            [username, now, actor, id, expected_updated_at_ms],
+            decode_user
+        );
+        Ok(rows.into_iter().next())
     }
 
     async fn delete_user(&self, id: &str, actor: &str) -> StoreResult<()> {

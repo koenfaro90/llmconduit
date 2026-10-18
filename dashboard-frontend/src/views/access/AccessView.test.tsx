@@ -28,7 +28,6 @@ describe('AccessView', () => {
     await screen.findByTestId('access-view');
 
     expect(screen.getByText(/direct access/i)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /close create access/i }));
     fireEvent.click(screen.getByRole('tab', { name: /people & groups/i }));
     expect(screen.getByText(/users and service accounts/i)).toBeInTheDocument();
     expect(screen.getByText(/groups and roles/i)).toBeInTheDocument();
@@ -50,7 +49,6 @@ describe('AccessView', () => {
     renderWithQuery(<AccessView />);
     await screen.findByTestId('access-view');
 
-    fireEvent.click(screen.getByRole('button', { name: /close create access/i }));
     fireEvent.click(screen.getByRole('tab', { name: /^model api keys$/i }));
     fireEvent.change(screen.getByLabelText('Key name'), { target: { value: 'temporary key' } });
     fireEvent.click(screen.getByRole('button', { name: 'Create key' }));
@@ -67,6 +65,7 @@ describe('AccessView', () => {
     renderWithQuery(<AccessView />);
     await screen.findByTestId('access-view');
 
+    fireEvent.click(screen.getByRole('button', { name: /create model access/i }));
     fireEvent.click(screen.getByRole('button', { name: 'Service' }));
     fireEvent.change(screen.getByLabelText('Wizard display name'), { target: { value: 'Nightly evaluator' } });
     fireEvent.change(screen.getByLabelText('Wizard key name'), { target: { value: 'nightly runner' } });
@@ -90,7 +89,6 @@ describe('AccessView', () => {
     renderWithQuery(<AccessView />);
     await screen.findByTestId('access-view');
 
-    fireEvent.click(screen.getByRole('button', { name: /close create access/i }));
     fireEvent.click(screen.getByRole('tab', { name: /people & groups/i }));
     fireEvent.change(screen.getByLabelText('Group name'), { target: { value: 'Canary operators' } });
     const members = screen.getByLabelText('Group members') as HTMLSelectElement;
@@ -145,7 +143,6 @@ describe('AccessView', () => {
     renderWithQuery(<AccessView />);
     await screen.findByTestId('access-view');
 
-    fireEvent.click(screen.getByRole('button', { name: /close create access/i }));
     fireEvent.click(screen.getByRole('tab', { name: /administration/i }));
     const subjects = screen.getByLabelText('Administration policy subjects') as HTMLSelectElement;
     subjects.options[0]!.selected = true;

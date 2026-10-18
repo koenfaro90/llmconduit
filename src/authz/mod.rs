@@ -97,7 +97,11 @@ impl AuthContext {
                         return false;
                     };
                     if !authority.credentials.iter().any(|key| {
-                        key.id == identity.key_id && key.principal_id == identity.principal_id
+                        key.id == identity.key_id
+                            && key.principal_id == identity.principal_id
+                            && key
+                                .expires_at
+                                .is_none_or(|t| t > chrono::Utc::now().timestamp())
                     }) {
                         return false;
                     }
@@ -341,7 +345,11 @@ impl AuthzService {
     pub fn traffic_identity_for_key(&self, key: &str) -> Option<crate::traffic::Identity> {
         let inner = self.inner.as_ref()?;
         let authority = inner.authority.read().ok()?;
-        let credential = authority.credentials.iter().find(|c| c.id == key)?;
+        let credential = authority.credentials.iter().find(|c| {
+            c.id == key
+                && c.expires_at
+                    .is_none_or(|t| t > chrono::Utc::now().timestamp())
+        })?;
         Some(crate::traffic::Identity {
             key: key.to_owned(),
             user: credential.principal_id.clone(),
@@ -455,7 +463,12 @@ impl AuthzService {
                 matched = Some(credential);
             }
         }
-        let credential = matched.ok_or(AuthFailure::Invalid)?;
+        let credential = matched
+            .filter(|key| {
+                key.expires_at
+                    .is_none_or(|t| t > chrono::Utc::now().timestamp())
+            })
+            .ok_or(AuthFailure::Invalid)?;
         if !credential.legacy_sha256 {
             key_prefix(raw).map_err(|_| AuthFailure::Invalid)?;
         }

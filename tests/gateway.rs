@@ -7323,6 +7323,95 @@ async fn accounts_password_login_keys_live_reload_and_role_gating() {
         404
     );
     assert!(store.verify_api_key(replacement).await.unwrap().is_none());
+    // Usernames change in place. The old signed session remains valid by user ID.
+    let before = store.get_user(&dev_id).await.unwrap().unwrap();
+    let rename =
+        serde_json::json!({"username":"developer","expected_updated_at_ms":before.updated_at_ms});
+    assert_eq!(
+        accounts_request(
+            &app,
+            "PUT",
+            &format!("/dashboard/api/users/{dev_id}/username"),
+            &dev_session,
+            Some(&dev_csrf),
+            Some(rename.clone())
+        )
+        .await
+        .status()
+        .as_u16(),
+        403
+    );
+    assert_eq!(
+        accounts_request(
+            &app,
+            "PUT",
+            &format!("/dashboard/api/users/{dev_id}/username"),
+            &session,
+            None,
+            Some(rename.clone())
+        )
+        .await
+        .status()
+        .as_u16(),
+        403
+    );
+    let renamed = accounts_request(
+        &app,
+        "PUT",
+        &format!("/dashboard/api/users/{dev_id}/username"),
+        &session,
+        Some(&csrf),
+        Some(rename.clone()),
+    )
+    .await;
+    assert_eq!(renamed.status().as_u16(), 200);
+    let renamed = d13_json(renamed).await;
+    assert_eq!(renamed["id"], dev_id);
+    assert_eq!(renamed["created_at_ms"], before.created_at_ms);
+    assert_eq!(
+        accounts_request(
+            &app,
+            "PUT",
+            &format!("/dashboard/api/users/{dev_id}/username"),
+            &session,
+            Some(&csrf),
+            Some(rename)
+        )
+        .await
+        .status()
+        .as_u16(),
+        409
+    );
+    assert_eq!(
+        d13_json(
+            accounts_request(&app, "GET", "/dashboard/api/me", &dev_session, None, None).await
+        )
+        .await["user"]["username"],
+        "developer"
+    );
+    for (name, status) in [("dev", 401), ("developer", 200)] {
+        let login = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/dashboard/login")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({"username":name,"password":"dev-password-1"})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(login.status().as_u16(), status);
+    }
+    assert!(store.get_user_auth("dev").await.unwrap().is_none());
+    assert_eq!(
+        store.get_user_auth("developer").await.unwrap().unwrap().id,
+        dev_id
+    );
 }
 
 #[tokio::test]

@@ -1468,6 +1468,7 @@ export interface DashboardBootstrap {
 export type ManagementPermission =
   | 'auth.keys.read'
   | 'auth.keys.create'
+  | 'auth.keys.write'
   | 'auth.keys.revoke'
   | 'auth.keys.rotate'
   | 'auth.principals.read'
@@ -1506,6 +1507,7 @@ export interface AuthSummary {
 }
 
 export interface AuthUser {
+  revision?: number;
   id: string;
   kind: 'user' | 'service_account';
   display_name: string;
@@ -1514,20 +1516,25 @@ export interface AuthUser {
 }
 
 export interface AuthGroup {
+  revision?: number;
   id: string;
   name: string;
   enabled: boolean;
   member_count: number;
+  members?: string[];
 }
 
 export interface AuthRole {
+  revision?: number;
   id: string;
   name: string;
   enabled: boolean;
   permissions: ManagementPermission[];
+  bindings?: Array<{subject_kind:'principal'|'group';subject_id:string}>;
 }
 
 export interface AuthPolicy {
+  revision?: number;
   id: string;
   name: string;
   effect: 'allow' | 'deny';
@@ -1554,6 +1561,7 @@ export interface AuthPolicyTimeWindow {
 }
 
 export interface AuthApiKey {
+  revision?: number;
   id: string;
   principal_id: string;
   name: string;
@@ -1635,6 +1643,12 @@ export interface CreateAuthRoleRequest {
   name: string;
   permissions: ManagementPermission[];
 }
+export type UpdateAuthUserRequest=CreateAuthUserRequest&{expected_revision:number;enabled:boolean};
+export type UpdateAuthGroupRequest=CreateAuthGroupRequest&{expected_revision:number;enabled:boolean};
+export type UpdateAuthRoleRequest=CreateAuthRoleRequest&{expected_revision:number;enabled:boolean;bindings:Array<{subject_kind:'principal'|'group';subject_id:string}>};
+export type UpdateAuthPolicyRequest=CreateAuthPolicyRequest&{expected_revision:number;enabled:boolean};
+export type UpdateAuthKeyRequest=CreateAuthApiKeyRequest&{expected_revision:number};
+
 export interface CreateAuthApiKeyRequest {
   principal_id: string;
   name: string;
@@ -1668,17 +1682,17 @@ export function isAuthSummary(v: unknown): v is AuthSummary {
 }
 
 function isAuthUser(v: unknown): v is AuthUser {
-  return isObj(v) && isStr(v.id) && isOneOf(v.kind, ['user', 'service_account'] as const)
+  return isObj(v) && (v.revision===undefined||isUint(v.revision)) && isStr(v.id) && isOneOf(v.kind, ['user', 'service_account'] as const)
     && isStr(v.display_name) && typeof v.enabled === 'boolean' && isStr(v.created_at);
 }
 function isAuthGroup(v: unknown): v is AuthGroup {
-  return isObj(v) && isStr(v.id) && isStr(v.name) && typeof v.enabled === 'boolean' && isUint(v.member_count);
+  return isObj(v) && (v.revision===undefined||isUint(v.revision)) && isStr(v.id) && isStr(v.name) && typeof v.enabled === 'boolean' && isUint(v.member_count) && (v.members===undefined||isStringArray(v.members));
 }
 function isAuthRole(v: unknown): v is AuthRole {
-  return isObj(v) && isStr(v.id) && isStr(v.name) && typeof v.enabled === 'boolean' && isStringArray(v.permissions);
+  return isObj(v) && (v.revision===undefined||isUint(v.revision)) && isStr(v.id) && isStr(v.name) && typeof v.enabled === 'boolean' && isStringArray(v.permissions) && (v.bindings===undefined || (Array.isArray(v.bindings) && v.bindings.every(binding=>isObj(binding) && isOneOf(binding.subject_kind,['principal','group'] as const) && isStr(binding.subject_id))));
 }
 function isAuthPolicy(v: unknown): v is AuthPolicy {
-  return isObj(v) && isStr(v.id) && isStr(v.name) && isOneOf(v.effect, ['allow', 'deny'] as const)
+  return isObj(v) && (v.revision===undefined||isUint(v.revision)) && isStr(v.id) && isStr(v.name) && isOneOf(v.effect, ['allow', 'deny'] as const)
     && typeof v.enabled === 'boolean' && isStringArray(v.subjects) && isStringArray(v.endpoints)
     && isStringArray(v.models) && isStringArray(v.requested_models) && isStringArray(v.served_models)
     && isStringArray(v.providers) && isStringArray(v.routes)
@@ -1691,7 +1705,7 @@ function isAuthPolicy(v: unknown): v is AuthPolicy {
     && isStringArray(v.management_permissions);
 }
 function isAuthApiKey(v: unknown): v is AuthApiKey {
-  return isObj(v) && isStr(v.id) && isStr(v.principal_id) && isStr(v.name) && isStr(v.prefix)
+  return isObj(v) && (v.revision===undefined||isUint(v.revision)) && isStr(v.id) && isStr(v.principal_id) && isStr(v.name) && isStr(v.prefix)
     && typeof v.enabled === 'boolean' && isStr(v.created_at) && isNullableStr(v.expires_at)
     && isNullableStr(v.last_used_at);
 }

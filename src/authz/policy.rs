@@ -201,6 +201,7 @@ impl PolicyMatcher {
 pub enum ManagementPermission {
     KeysRead,
     KeysCreate,
+    KeysWrite,
     KeysRevoke,
     KeysRotate,
     PrincipalsRead,
@@ -225,6 +226,7 @@ impl ManagementPermission {
         match self {
             Self::KeysRead => "auth.keys.read",
             Self::KeysCreate => "auth.keys.create",
+            Self::KeysWrite => "auth.keys.write",
             Self::KeysRevoke => "auth.keys.revoke",
             Self::KeysRotate => "auth.keys.rotate",
             Self::PrincipalsRead => "auth.principals.read",
@@ -252,9 +254,10 @@ impl ManagementPermission {
     }
 }
 
-pub const ALL_MANAGEMENT_PERMISSIONS: [ManagementPermission; 19] = [
+pub const ALL_MANAGEMENT_PERMISSIONS: [ManagementPermission; 20] = [
     ManagementPermission::KeysRead,
     ManagementPermission::KeysCreate,
+    ManagementPermission::KeysWrite,
     ManagementPermission::KeysRevoke,
     ManagementPermission::KeysRotate,
     ManagementPermission::PrincipalsRead,
@@ -773,7 +776,7 @@ mod tests {
         let unique = ALL_MANAGEMENT_PERMISSIONS
             .into_iter()
             .collect::<HashSet<_>>();
-        assert_eq!(ALL_MANAGEMENT_PERMISSIONS.len(), 19);
+        assert_eq!(ALL_MANAGEMENT_PERMISSIONS.len(), 20);
         assert_eq!(unique.len(), ALL_MANAGEMENT_PERMISSIONS.len());
         assert!(ALL_MANAGEMENT_PERMISSIONS.into_iter().all(
             |permission| ManagementPermission::parse(permission.as_str()) == Some(permission)

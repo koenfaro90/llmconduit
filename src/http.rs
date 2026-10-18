@@ -483,6 +483,10 @@ fn protected_routes(gateway: Arc<Gateway>, auth: Arc<DashboardAuth>) -> Router<A
                 .delete(crate::accounts_api::delete_user),
         )
         .route(
+            "/dashboard/api/users/{id}/username",
+            axum::routing::put(crate::accounts_api::rename_user),
+        )
+        .route(
             "/dashboard/api/keys",
             get(crate::accounts_api::list_keys).post(crate::accounts_api::create_key),
         )

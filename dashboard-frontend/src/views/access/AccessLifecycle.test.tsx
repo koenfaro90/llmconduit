@@ -11,7 +11,6 @@ describe('AccessView management lifecycle', () => {
     renderWithQuery(<AccessView />);
     await screen.findByTestId('access-view');
 
-    fireEvent.click(screen.getByRole('button', { name: /close create access/i }));
     fireEvent.click(screen.getByRole('tab', { name: /^model api keys$/i }));
     const rotate = screen.getAllByRole('button', { name: 'Rotate' })[0];
     expect(rotate).toBeDefined();
@@ -29,7 +28,6 @@ describe('AccessView management lifecycle', () => {
     renderWithQuery(<AccessView />);
     await screen.findByTestId('access-view');
 
-    fireEvent.click(screen.getByRole('button', { name: /close create access/i }));
     fireEvent.click(screen.getByRole('tab', { name: /^model api keys$/i }));
     const revoke = screen.getAllByRole('button', { name: 'Revoke' })[0];
     expect(revoke).toBeDefined();
@@ -47,7 +45,6 @@ describe('AccessView management lifecycle', () => {
     renderWithQuery(<AccessView />);
     await screen.findByTestId('access-view');
 
-    fireEvent.click(screen.getByRole('button', { name: /close create access/i }));
     fireEvent.click(screen.getByRole('tab', { name: /model policies/i }));
     fireEvent.change(screen.getByLabelText('Policy effect'), { target: { value: 'deny' } });
     fireEvent.click(screen.getByRole('checkbox', { name: /model list/i }));

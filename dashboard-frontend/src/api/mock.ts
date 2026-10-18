@@ -89,24 +89,27 @@ let MOCK_SETTINGS=initialSettings();
 let MOCK_HOST_SETTINGS:Record<string,HostSettings>={};
 const MOCK_CSRF = 'mock-csrf-token';
 
+let MOCK_ACCESS_REVISION=7;
+const withAccessRevision=<T,>(rows:T[])=>rows.map(row=>({...row,revision:MOCK_ACCESS_REVISION}));
 let AUTH_USERS: AuthUser[] = [
   { id: 'usr_ops', kind: 'user', display_name: 'Operations', enabled: true, created_at: '2026-06-01T09:00:00Z' },
   { id: 'usr_batch', kind: 'service_account', display_name: 'Batch inference', enabled: true, created_at: '2026-06-02T12:00:00Z' },
 ];
 let AUTH_GROUPS: AuthGroup[] = [
-  { id: 'grp_prod', name: 'Production', enabled: true, member_count: 2 },
+  { id: 'grp_prod', name: 'Production', enabled: true, member_count: 2, members:['usr_ops','usr_batch'] },
 ];
 let AUTH_ROLES: AuthRole[] = [
-  { id: 'role_operator', name: 'Operator', enabled: true, permissions: ['auth.keys.read', 'auth.keys.create', 'auth.usage.read', 'auth.sessions.read'] },
+  {bindings:[], id: 'role_operator', name: 'Operator', enabled: true, permissions: ['auth.keys.read', 'auth.keys.create', 'auth.usage.read', 'auth.sessions.read'] },
 ];
 let AUTH_POLICIES: AuthPolicy[] = [
-  { id: 'pol_prod', name: 'Production models', effect: 'allow', enabled: true, subjects: ['grp_prod'], endpoints: ['responses', 'chat'], models: [], requested_models: ['gpt-*'], served_models: ['gpt-4.1'], providers: ['openai'], routes: ['cloud'], time_windows: [{ weekday_mask: 31, start_minute: 480, end_minute: 1080, absolute_start_ms: null, absolute_end_ms: null }], max_concurrent_sessions: 4, max_daily_session_starts: 100, management_permissions: [] },
-  { id: 'pol_deny_local', name: 'Block local fallback', effect: 'deny', enabled: true, subjects: ['grp_prod'], endpoints: ['*'], models: [], requested_models: ['*'], served_models: ['*'], providers: ['vllm-b'], routes: ['local'], time_windows: [], max_concurrent_sessions: null, max_daily_session_starts: null, management_permissions: [] },
+  { id: 'pol_prod', name: 'Production models', effect: 'allow', enabled: true, subjects: ['group:grp_prod'], endpoints: ['responses', 'chat'], models: [], requested_models: ['gpt-*'], served_models: ['gpt-4.1'], providers: ['openai'], routes: ['cloud'], time_windows: [{ weekday_mask: 31, start_minute: 480, end_minute: 1080, absolute_start_ms: null, absolute_end_ms: null }], max_concurrent_sessions: 4, max_daily_session_starts: 100, management_permissions: [] },
+  { id: 'pol_deny_local', name: 'Block local fallback', effect: 'deny', enabled: true, subjects: ['group:grp_prod'], endpoints: ['*'], models: [], requested_models: ['*'], served_models: ['*'], providers: ['vllm-b'], routes: ['local'], time_windows: [], max_concurrent_sessions: null, max_daily_session_starts: null, management_permissions: [] },
 ];
 let AUTH_KEYS: AuthApiKey[] = [
   { id: 'key_ops', principal_id: 'usr_ops', name: 'operator laptop', prefix: 'llmc_7ad2', enabled: true, created_at: '2026-06-03T10:00:00Z', expires_at: null, last_used_at: '2026-06-21T14:19:40Z' },
   { id: 'key_batch', principal_id: 'usr_batch', name: 'batch worker', prefix: 'llmc_8bc1', enabled: true, created_at: '2026-06-04T10:00:00Z', expires_at: null, last_used_at: '2026-06-21T14:18:00Z' },
 ];
+const INITIAL_ACCESS=structuredClone({users:AUTH_USERS,groups:AUTH_GROUPS,roles:AUTH_ROLES,policies:AUTH_POLICIES,keys:AUTH_KEYS});
 let AUTH_SESSIONS: AuthSession[] = [
   { id: 'sess_admin', kind: 'dashboard', principal_id: 'usr_ops', key_id: 'key_ops', endpoint: null, requested_model: null, started_at: '2026-06-21T14:00:00Z', expires_at: '2026-06-21T22:00:00Z' },
   { id: 'sess_infer', kind: 'inference', principal_id: 'usr_batch', key_id: 'key_batch', endpoint: 'responses', requested_model: 'gpt-4.1', started_at: '2026-06-21T14:19:57Z', expires_at: null },
@@ -763,10 +766,34 @@ export const mockFetch: typeof fetch = async (input, init): Promise<Response> =>
   if (path === '/dashboard/auth/key-login' && method === 'POST') {
     return json({ ok: true });
   }
+  const accessEditMatch=path.match(/^\/dashboard\/api\/auth\/(users|groups|roles|policies|api-keys)\/([^/]+)$/);
+  if(accessEditMatch&&method==='PUT'){
+    if(!headerValue(init?.headers,'X-CSRF-Token'))return json({error:'missing csrf'},403);
+    const kind=accessEditMatch[1], id=decodeURIComponent(accessEditMatch[2]??'');const body=parseBody(init?.body);
+    if(body.expected_revision!==MOCK_ACCESS_REVISION)return json({error:'Access settings changed'},409);
+    const current=(kind==='users'?AUTH_USERS:kind==='groups'?AUTH_GROUPS:kind==='roles'?AUTH_ROLES:kind==='policies'?AUTH_POLICIES:AUTH_KEYS).find(row=>row.id===id);
+    if(!current)return json({error:'Record not found'},404);
+    const {expected_revision:_revision,...fields}=body;void _revision;MOCK_ACCESS_REVISION++;
+    if(kind==='users'){AUTH_USERS=AUTH_USERS.map(row=>row.id===id?{...row,...fields} as AuthUser:row);return json({users:withAccessRevision(AUTH_USERS)});}
+    if(kind==='groups'){AUTH_GROUPS=AUTH_GROUPS.map(row=>row.id===id?{...row,...fields,member_count:(fields.members as unknown[]).length} as AuthGroup:row);return json({groups:withAccessRevision(AUTH_GROUPS)});}
+    if(kind==='roles'){AUTH_ROLES=AUTH_ROLES.map(row=>row.id===id?{...row,...fields} as AuthRole:row);return json({roles:withAccessRevision(AUTH_ROLES)});}
+    if(kind==='policies'){AUTH_POLICIES=AUTH_POLICIES.map(row=>row.id===id?{...row,...fields} as AuthPolicy:row);return json({policies:withAccessRevision(AUTH_POLICIES)});}
+    AUTH_KEYS=AUTH_KEYS.map(row=>row.id===id?{...row,...fields} as AuthApiKey:row);return json({api_keys:withAccessRevision(AUTH_KEYS)});
+  }
+  const renameUserMatch=path.match(/^\/dashboard\/api\/users\/([^/]+)\/username$/);
+  if(renameUserMatch&&method==='PUT'){
+    if(!headerValue(init?.headers,'X-CSRF-Token'))return json({error:'missing csrf'},403);
+    const body=parseBody(init?.body);const index=MOCK_USERS.findIndex(u=>u.id===decodeURIComponent(renameUserMatch[1]??''));if(index<0)return json({error:'user not found'},404);
+    if(MOCK_USERS[index]!.updated_at_ms!==body.expected_updated_at_ms)return json({error:'User changed'},409);
+    if(MOCK_USERS.some(u=>u.username===body.username&&u.id!==MOCK_USERS[index]!.id))return json({error:'username exists'},409);
+    MOCK_USERS[index]={...MOCK_USERS[index]!,username:String(body.username),updated_at_ms:Math.max(Date.now(),MOCK_USERS[index]!.updated_at_ms+1)};
+    if(mockSessionUser?.id===MOCK_USERS[index]!.id)mockSessionUser={...mockSessionUser,username:String(body.username)};
+    return json(MOCK_USERS[index]);
+  }
   if (path === '/dashboard/api/auth/summary' && method === 'GET') {
     return json({
       enabled: true,
-      policy_epoch: 7,
+      policy_epoch: MOCK_ACCESS_REVISION,
       actor: {
         kind: 'bootstrap', principal_id: null, display_name: 'Bootstrap administrator',
         permissions: [],
@@ -782,46 +809,51 @@ export const mockFetch: typeof fetch = async (input, init): Promise<Response> =>
     if (method === 'POST') {
       const body = JSON.parse(String(init?.body ?? '{}')) as { display_name?: string; kind?: AuthUser['kind'] };
       if (!body.display_name || !body.kind) return json({ error: 'invalid user' }, 400);
+      MOCK_ACCESS_REVISION++;
       AUTH_USERS = [...AUTH_USERS, {
         id: `usr_${AUTH_USERS.length + 1}`, display_name: body.display_name,
         kind: body.kind, enabled: true, created_at: new Date().toISOString(),
       }];
     }
-    return json({ users: AUTH_USERS });
+    return json({ users: withAccessRevision(AUTH_USERS) });
   }
   if (path === '/dashboard/api/auth/groups') {
     if (method === 'POST') {
       const body = JSON.parse(String(init?.body ?? '{}')) as { name?: string; members?: string[] };
       if (!body.name || !Array.isArray(body.members)) return json({ error: 'invalid group' }, 400);
-      AUTH_GROUPS = [...AUTH_GROUPS, { id: `grp_${AUTH_GROUPS.length + 1}`, name: body.name, enabled: true, member_count: body.members.length }];
+      MOCK_ACCESS_REVISION++;
+      AUTH_GROUPS = [...AUTH_GROUPS, { id: `grp_${AUTH_GROUPS.length + 1}`, name: body.name, enabled: true, member_count: body.members.length, members:body.members }];
     }
-    return json({ groups: AUTH_GROUPS });
+    return json({ groups: withAccessRevision(AUTH_GROUPS) });
   }
   if (path === '/dashboard/api/auth/roles') {
     if (method === 'POST') {
       const body = JSON.parse(String(init?.body ?? '{}')) as { name?: string; permissions?: AuthRole['permissions'] };
       if (!body.name || !Array.isArray(body.permissions)) return json({ error: 'invalid role' }, 400);
-      AUTH_ROLES = [...AUTH_ROLES, { id: `role_${AUTH_ROLES.length + 1}`, name: body.name, enabled: true, permissions: body.permissions }];
+      MOCK_ACCESS_REVISION++;
+      AUTH_ROLES = [...AUTH_ROLES, { id: `role_${AUTH_ROLES.length + 1}`, name: body.name, enabled: true, permissions: body.permissions, bindings:[] }];
     }
-    return json({ roles: AUTH_ROLES });
+    return json({ roles: withAccessRevision(AUTH_ROLES) });
   }
   if (path === '/dashboard/api/auth/policies') {
     if (method === 'POST') {
       const body = JSON.parse(String(init?.body ?? '{}')) as Omit<AuthPolicy, 'id' | 'enabled'>;
       if (!body.name || !['allow', 'deny'].includes(body.effect)) return json({ error: 'invalid policy' }, 400);
+      MOCK_ACCESS_REVISION++;
       AUTH_POLICIES = [...AUTH_POLICIES, { ...body, id: `pol_${AUTH_POLICIES.length + 1}`, enabled: true }];
     }
-    return json({ policies: AUTH_POLICIES });
+    return json({ policies: withAccessRevision(AUTH_POLICIES) });
   }
   if (path === '/dashboard/api/auth/api-keys') {
     if (method === 'POST') {
       const body = JSON.parse(String(init?.body ?? '{}')) as { principal_id?: string; name?: string; expires_at?: string | null };
       if (!body.principal_id || !body.name) return json({ error: 'invalid key' }, 400);
       const apiKey: AuthApiKey = { id: `key_${AUTH_KEYS.length + 1}`, principal_id: body.principal_id, name: body.name, prefix: 'llmc_demo', enabled: true, created_at: new Date().toISOString(), expires_at: body.expires_at ?? null, last_used_at: null };
+      MOCK_ACCESS_REVISION++;
       AUTH_KEYS = [...AUTH_KEYS, apiKey];
       return json({ ...apiKey, raw_key: `llmc_mock_${apiKey.id}_copy_once` });
     }
-    return json({ api_keys: AUTH_KEYS });
+    return json({ api_keys: withAccessRevision(AUTH_KEYS) });
   }
   const keyAction = path.match(/^\/dashboard\/api\/auth\/api-keys\/([^/]+)\/(revoke|rotate)$/);
   if (keyAction && method === 'POST') {
@@ -830,10 +862,12 @@ export const mockFetch: typeof fetch = async (input, init): Promise<Response> =>
     const found = AUTH_KEYS.find((key) => key.id === id);
     if (!found) return json({ error: 'unknown key' }, 404);
     if (keyAction[2] === 'revoke') {
+      MOCK_ACCESS_REVISION++;
       AUTH_KEYS = AUTH_KEYS.map((key) => key.id === id ? { ...key, enabled: false } : key);
-      return json({ api_keys: AUTH_KEYS });
+      return json({ api_keys: withAccessRevision(AUTH_KEYS) });
     }
     const rotated = { ...found, id: `${found.id}_rotated`, prefix: 'llmc_rot8', created_at: new Date().toISOString(), last_used_at: null };
+      MOCK_ACCESS_REVISION++;
     AUTH_KEYS = [...AUTH_KEYS.filter((key) => key.id !== id), rotated];
     return json({ ...rotated, raw_key: `llmc_mock_${rotated.id}_copy_once` });
   }
@@ -1423,6 +1457,8 @@ export const MOCK_KEYS: ApiKeyRecord[] = [
 
 /** Reset the mutable mock account state (tests). */
 export function resetMockAccounts(): void {
+  const initial=structuredClone(INITIAL_ACCESS);AUTH_USERS=initial.users;AUTH_GROUPS=initial.groups;AUTH_ROLES=initial.roles;AUTH_POLICIES=initial.policies;AUTH_KEYS=initial.keys;MOCK_ACCESS_REVISION=7;
+
   MOCK_ALIASES = initialAliases();
   MOCK_SETTINGS=initialSettings();MOCK_HOST_SETTINGS={};
   MOCK_TRAFFIC={revision:0,config:blankConfig(),runtime:blankRuntime(),scope:'single gateway process'};

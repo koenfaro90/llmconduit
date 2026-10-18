@@ -7,6 +7,7 @@ import { useState, type FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { getConnection, queryKeys } from '../../api/connection';
 import { useAuth } from '../../store/hooks';
+import {authStore} from '../../store/authStore';
 import type { ApiKeyRecord, UserRecord, UpdateKeyRequest } from '../../api/types';
 import { SettingsField } from '../settings/SettingsField';
 import { Panel, PanelHeader } from '../../components/ui/Panel';
@@ -60,6 +61,10 @@ export function AccountView() {
   });
   const createUser = useMutation({ mutationFn: (body: { username: string; password: string; is_admin: boolean }) => client.createUser(body), onSuccess: invalidate });
   const updateUser = useMutation({ mutationFn: (args: { id: string; password?: string; is_admin?: boolean }) => client.updateUser(args.id, { password: args.password, is_admin: args.is_admin }), onSuccess: invalidate });
+  const renameUser=useMutation({mutationFn:({record,username}:{record:UserRecord;username:string})=>client.renameUser(record.id,username,record.updated_at_ms),onSuccess:updated=>{
+    if(user?.id===updated.id)authStore.getState().setUser({...user,username:updated.username});
+    void queryClient.invalidateQueries({queryKey:queryKeys.me});invalidate();
+  }});
   const deleteUser = useMutation({ mutationFn: (id: string) => client.deleteUser(id), onSuccess: invalidate });
   const userName = (id: string | null) => (id == null ? DASH : users.data?.users.find((u) => u.id === id)?.username ?? (user && user.id === id ? user.username : id.slice(0, 8)));
 
@@ -71,7 +76,7 @@ export function AccountView() {
       </div>
 
       <Panel raised className="mb-3 flex flex-wrap items-center gap-4 px-3 py-2" data-testid="account-me">
-        <span className="font-mono text-sm text-text" data-testid="account-username">{user?.username ?? (authMode === 'open' ? 'dev-open session' : 'token session')}</span>
+        <span className="font-mono text-sm text-text" data-testid="account-username">{me.data?.user?.username ?? user?.username ?? (authMode === 'open' ? 'dev-open session' : 'token session')}</span>
         <span className={cn('rounded-sm px-1 text-[9px] uppercase tracking-wide', isAdmin ? 'bg-accent/15 text-accent' : 'bg-line/40 text-text-muted')} data-testid="account-role">
           {isAdmin ? 'admin' : 'user'}
         </span>
@@ -114,6 +119,7 @@ export function AccountView() {
             users={users.data?.users ?? []}
             selfId={user?.id ?? null}
             keys={keys.data?.keys ?? []}
+            onRename={(record,username)=>renameUser.mutateAsync({record,username}).then(()=>{})}
             onResetPassword={(id, password) => updateUser.mutate({ id, password })}
             onToggleAdmin={(id, is_admin) => updateUser.mutate({ id, is_admin })}
             onDelete={(id) => deleteUser.mutate(id)}
@@ -209,7 +215,9 @@ function UserForm({ busy, error, onCreate }: { busy: boolean; error: string | nu
   );
 }
 
-function UserTable({ users, selfId, keys, onResetPassword, onToggleAdmin, onDelete }: { users: UserRecord[]; selfId: string | null; keys: ApiKeyRecord[]; onResetPassword: (id: string, password: string) => void; onToggleAdmin: (id: string, is_admin: boolean) => void; onDelete: (id: string) => void }) {
+function UserTable({ users, selfId, keys, onRename, onResetPassword, onToggleAdmin, onDelete }: { users: UserRecord[]; selfId: string | null; keys: ApiKeyRecord[];onRename:(record:UserRecord,username:string)=>Promise<void>; onResetPassword: (id: string, password: string) => void; onToggleAdmin: (id: string, is_admin: boolean) => void; onDelete: (id: string) => void }) {
+  const [renaming,setRenaming]=useState<UserRecord|null>(null);
+  const [newUsername,setNewUsername]=useState('');const [renameBusy,setRenameBusy]=useState(false);const [renameError,setRenameError]=useState('');
   const [resetFor, setResetFor] = useState<string | null>(null);
   const [newPassword, setNewPassword] = useState('');
   if (users.length === 0) return <div className="rounded-md border border-line px-3 py-3 text-xs italic text-text-muted" data-testid="users-empty">No users yet: create the first administrator above (or via the CLI).</div>;
@@ -219,6 +227,7 @@ function UserTable({ users, selfId, keys, onResetPassword, onToggleAdmin, onDele
     { id: 'keys', label: 'keys', width: '8%', align: 'right', render: (u) => keys.filter((k) => k.user_id === u.id).length },
     { id: 'created', label: 'created', width: '17%', render: (u) => <span className="tabular-nums text-text-muted">{fmtWhen(u.created_at_ms)}</span> },
     { id: 'actions', label: '', width: '45%', required: true, render: (u) => <span className="flex flex-wrap items-center gap-1">
+      <Button variant="ghost" disabled={renameBusy||u.id.startsWith('github:')} title={u.id.startsWith('github:')?'Managed by GitHub':undefined} aria-label={`Rename ${u.username}`} onClick={()=>{setRenaming(u);setNewUsername(u.username);setRenameError('');}}>Rename</Button>
       {resetFor === u.id ? <>
         <input className={INPUT} type="password" placeholder="new password" aria-label={`new password for ${u.username}`} value={newPassword} onChange={(e) => setNewPassword(e.target.value)} />
         <Button className="px-2 py-0.5 text-[11px]" disabled={newPassword.length < 8} onClick={() => { onResetPassword(u.id, newPassword); setResetFor(null); setNewPassword(''); }}>save</Button>
@@ -230,7 +239,7 @@ function UserTable({ users, selfId, keys, onResetPassword, onToggleAdmin, onDele
       </>}
     </span> },
   ];
-  return <div className="rounded-md border border-line"><DataTable id="account-users" rows={users} rowKey={(u) => u.id}
+  return <div className="space-y-3">{renaming&&<Panel raised className="space-y-3 p-3" data-testid="username-editor"><PanelHeader label="Rename account" help="Change the local sign-in username while retaining the same user ID, password, keys and activity. Existing sessions keep working. GitHub names are managed by GitHub." actions={<><Button variant="ghost" disabled={renameBusy} onClick={()=>setRenaming(null)}>Discard username change</Button><Button disabled={renameBusy||!newUsername.trim()||newUsername.length>64} onClick={()=>{setRenameBusy(true);setRenameError('');void onRename(renaming,newUsername.trim()).then(()=>setRenaming(null)).catch(error=>setRenameError(String(error))).finally(()=>setRenameBusy(false));}}>Save username</Button></>}><h3 className="text-sm font-semibold">Rename {renaming.username}</h3></PanelHeader><label className="block text-sm">Sign-in username<input aria-label="Sign-in username" className={`${INPUT} mt-2 block w-full`} value={newUsername} onChange={event=>setNewUsername(event.target.value)}/></label>{renameError&&<p role="alert" className="text-xs text-status-down">{renameError}</p>}</Panel>}<div className="rounded-md border border-line"><DataTable id="account-users" rows={users} rowKey={(u) => u.id}
     columns={columns} rowTestId="user-row" rowAttributes={(u) => ({ 'data-admin': u.is_admin ? 'true' : 'false' })}
-    clientPageSize={25} minWidth={750} /></div>;
+    clientPageSize={25} minWidth={750} /></div></div>;
 }

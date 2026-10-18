@@ -4,8 +4,8 @@ use super::policy::{
 };
 use crate::dashboard_access::{
     AccessApiKey, AccessAuditEvent, AccessCounts, AccessError, AccessGroup, AccessOperation,
-    AccessPolicy, AccessPricingRow, AccessResult, AccessRole, AccessSession, AccessSummary,
-    AccessTimeWindow, AccessUsageRow, AccessUser, ActorSummary, ManagementActor,
+    AccessPolicy, AccessPricingRow, AccessResult, AccessRole, AccessRoleBinding, AccessSession,
+    AccessSummary, AccessTimeWindow, AccessUsageRow, AccessUser, ActorSummary, ManagementActor,
     ManagementPermission as WirePermission,
 };
 use axum::http::StatusCode;
@@ -20,6 +20,9 @@ use std::sync::Arc;
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
+#[path = "access_edits.rs"]
+mod edits;
+
 pub(crate) struct AuthStore {
     connection: Connection,
 }
@@ -31,6 +34,7 @@ pub(crate) struct StoredCredential {
     pub prefix: String,
     pub digest: [u8; 32],
     pub legacy_sha256: bool,
+    pub expires_at: Option<i64>,
 }
 
 pub(crate) struct StoredAuthority {
@@ -561,7 +565,7 @@ impl AuthStore {
         let now = Utc::now().timestamp();
         let epoch = current_epoch(&self.connection)?;
         let mut stmt = self.connection.prepare(
-            "SELECT k.id,k.principal_id,k.prefix,COALESCE(l.digest,k.hmac_sha256_digest),l.key_id FROM auth_api_keys k LEFT JOIN auth_legacy_key_digests l ON l.key_id=k.id WHERE k.enabled=1 AND (k.expires_at IS NULL OR k.expires_at>?1)"
+            "SELECT k.id,k.principal_id,k.prefix,COALESCE(l.digest,k.hmac_sha256_digest),l.key_id,k.expires_at FROM auth_api_keys k JOIN auth_principals p ON p.id=k.principal_id LEFT JOIN auth_legacy_key_digests l ON l.key_id=k.id WHERE p.enabled=1 AND k.enabled=1 AND (k.expires_at IS NULL OR k.expires_at>?1)"
         ).map_err(db)?;
         let credentials = stmt
             .query_map([now], |row| {
@@ -579,6 +583,7 @@ impl AuthStore {
                     prefix: row.get(2)?,
                     digest,
                     legacy_sha256: row.get::<_, Option<String>>(4)?.is_some(),
+                    expires_at: row.get(5)?,
                 })
             })
             .map_err(db)?
@@ -588,7 +593,7 @@ impl AuthStore {
         let mut principal_groups: HashMap<String, HashSet<String>> = HashMap::new();
         let mut stmt = self
             .connection
-            .prepare("SELECT principal_id,group_id FROM auth_group_members")
+            .prepare("SELECT m.principal_id,m.group_id FROM auth_group_members m JOIN auth_groups g ON g.id=m.group_id WHERE g.enabled=1")
             .map_err(db)?;
         for row in stmt
             .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
@@ -599,7 +604,7 @@ impl AuthStore {
         }
         let mut principal_roles: HashMap<String, HashSet<String>> = HashMap::new();
         let mut stmt = self.connection.prepare(
-            "SELECT subject_id,role_id FROM auth_role_bindings WHERE subject_kind='principal' UNION SELECT gm.principal_id,rb.role_id FROM auth_role_bindings rb JOIN auth_group_members gm ON rb.subject_kind='group' AND rb.subject_id=gm.group_id"
+            "SELECT rb.subject_id,rb.role_id FROM auth_role_bindings rb JOIN auth_roles r ON r.id=rb.role_id WHERE rb.subject_kind='principal' AND r.enabled=1 UNION SELECT gm.principal_id,rb.role_id FROM auth_role_bindings rb JOIN auth_group_members gm ON rb.subject_kind='group' AND rb.subject_id=gm.group_id JOIN auth_roles r ON r.id=rb.role_id JOIN auth_groups g ON g.id=gm.group_id WHERE r.enabled=1 AND g.enabled=1"
         ).map_err(db)?;
         for row in stmt
             .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
@@ -801,7 +806,7 @@ impl AuthStore {
     ) -> Result<Option<StoredDashboardSession>, String> {
         let now = Utc::now().timestamp();
         let session = self.connection.query_row(
-            "SELECT s.session_id,s.principal_id,s.key_id,k.prefix,s.expires_at FROM auth_dashboard_sessions s JOIN auth_api_keys k ON k.id=s.key_id JOIN auth_principals p ON p.id=s.principal_id WHERE s.session_id=?1 AND s.revoked_at IS NULL AND s.expires_at>?2 AND k.enabled=1 AND p.enabled=1",
+            "SELECT s.session_id,s.principal_id,s.key_id,k.prefix,s.expires_at FROM auth_dashboard_sessions s JOIN auth_api_keys k ON k.id=s.key_id JOIN auth_principals p ON p.id=s.principal_id WHERE s.session_id=?1 AND s.revoked_at IS NULL AND s.expires_at>?2 AND k.enabled=1 AND p.enabled=1 AND (k.expires_at IS NULL OR k.expires_at>?2) AND s.principal_id=k.principal_id",
             params![session_id,now],
             |row|Ok(StoredDashboardSession{session_id:row.get(0)?,principal_id:row.get(1)?,key_id:row.get(2)?,key_prefix:row.get(3)?}),
         ).optional().map_err(db)?;
@@ -850,6 +855,10 @@ impl AuthStore {
         Ok(stored.ct_eq(&candidate).into() && stored.len() == presented_digest.len())
     }
 
+    pub(crate) fn revision(&self) -> Result<u64, String> {
+        current_epoch(&self.connection)
+    }
+
     pub fn dispatch_access(
         &mut self,
         actor: &ManagementActor,
@@ -857,25 +866,45 @@ impl AuthStore {
     ) -> Result<AccessResult, AccessError> {
         match operation {
             AccessOperation::Summary => self.access_summary(actor),
+            AccessOperation::UpdateUser(id, body) => {
+                self.update_access_user(actor, &id, body)?;
+                self.list_users().map(AccessResult::Users)
+            }
             AccessOperation::ListUsers => self.list_users().map(AccessResult::Users),
             AccessOperation::CreateUser(body) => {
                 self.create_user(actor, &body.kind, &body.display_name)?;
                 self.list_users().map(AccessResult::Users)
+            }
+            AccessOperation::UpdateGroup(id, body) => {
+                self.update_access_group(actor, &id, body)?;
+                self.list_groups().map(AccessResult::Groups)
             }
             AccessOperation::ListGroups => self.list_groups().map(AccessResult::Groups),
             AccessOperation::CreateGroup(body) => {
                 self.create_group(actor, &body.name, &body.members)?;
                 self.list_groups().map(AccessResult::Groups)
             }
+            AccessOperation::UpdateRole(id, body) => {
+                self.update_access_role(actor, &id, body)?;
+                self.list_roles().map(AccessResult::Roles)
+            }
             AccessOperation::ListRoles => self.list_roles().map(AccessResult::Roles),
             AccessOperation::CreateRole(body) => {
                 self.create_role(actor, &body.name, &body.permissions)?;
                 self.list_roles().map(AccessResult::Roles)
             }
+            AccessOperation::UpdatePolicy(id, body) => {
+                self.update_access_policy(actor, &id, body)?;
+                self.list_policies().map(AccessResult::Policies)
+            }
             AccessOperation::ListPolicies => self.list_policies().map(AccessResult::Policies),
             AccessOperation::CreatePolicy(body) => {
                 self.create_policy(actor, *body)?;
                 self.list_policies().map(AccessResult::Policies)
+            }
+            AccessOperation::UpdateApiKey(id, body) => {
+                self.update_access_key(actor, &id, body)?;
+                self.list_access_keys().map(AccessResult::ApiKeys)
             }
             AccessOperation::ListApiKeys => self.list_access_keys().map(AccessResult::ApiKeys),
             AccessOperation::RevokeApiKey(id) => {
@@ -959,9 +988,11 @@ impl AuthStore {
     }
 
     fn list_users(&self) -> Result<Vec<AccessUser>, AccessError> {
+        let revision = self.revision().map_err(access_internal)?;
         let mut stmt=self.connection.prepare("SELECT id,kind,display_name,enabled,created_at FROM auth_principals ORDER BY created_at,id").map_err(access_db)?;
         stmt.query_map([], |r| {
             Ok(AccessUser {
+                revision,
                 id: r.get(0)?,
                 kind: r.get(1)?,
                 display_name: r.get(2)?,
@@ -1004,18 +1035,27 @@ impl AuthStore {
     }
 
     fn list_groups(&self) -> Result<Vec<AccessGroup>, AccessError> {
-        let mut stmt=self.connection.prepare("SELECT g.id,g.name,g.enabled,COUNT(m.principal_id) FROM auth_groups g LEFT JOIN auth_group_members m ON m.group_id=g.id GROUP BY g.id ORDER BY g.name").map_err(access_db)?;
-        stmt.query_map([], |r| {
-            Ok(AccessGroup {
-                id: r.get(0)?,
-                name: r.get(1)?,
-                enabled: r.get::<_, i64>(2)? != 0,
-                member_count: r.get::<_, i64>(3)? as usize,
+        let revision = self.revision().map_err(access_internal)?;
+        let mut query = self
+            .connection
+            .prepare("SELECT id,name,enabled FROM auth_groups ORDER BY name")
+            .map_err(access_db)?;
+        let rows = query
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
             })
-        })
-        .map_err(access_db)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(access_db)
+            .map_err(access_db)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(access_db)?;
+        rows.into_iter().map(|(id,name,enabled)| {
+            let mut q=self.connection.prepare("SELECT principal_id FROM auth_group_members WHERE group_id=?1 ORDER BY principal_id").map_err(access_db)?;
+            let members=q.query_map([&id],|r|r.get::<_,String>(0)).map_err(access_db)?.collect::<Result<Vec<_>,_>>().map_err(access_db)?;
+            Ok(AccessGroup {revision,id,name,enabled:enabled!=0,member_count:members.len(),members})
+        }).collect()
     }
 
     fn create_group(
@@ -1056,6 +1096,7 @@ impl AuthStore {
     }
 
     fn list_roles(&self) -> Result<Vec<AccessRole>, AccessError> {
+        let revision = self.revision().map_err(access_internal)?;
         let mut stmt = self
             .connection
             .prepare("SELECT id,name,enabled FROM auth_roles ORDER BY name")
@@ -1085,10 +1126,14 @@ impl AuthStore {
                     .into_iter()
                     .filter_map(|v| wire_permission(&v))
                     .collect();
+                let bindings=query_pairs(&self.connection,"SELECT subject_kind,subject_id FROM auth_role_bindings WHERE role_id=?1 ORDER BY subject_kind,subject_id",&id).map_err(access_internal)?
+                    .into_iter().map(|(subject_kind,subject_id)|AccessRoleBinding{subject_kind,subject_id}).collect();
                 Ok(AccessRole {
+                    revision,
                     id: id.clone(),
                     name,
                     enabled,
+                    bindings,
                     permissions,
                 })
             })
@@ -1147,6 +1192,7 @@ impl AuthStore {
     }
 
     fn list_policies(&self) -> Result<Vec<AccessPolicy>, AccessError> {
+        let revision = self.revision().map_err(access_internal)?;
         let mut stmt = self
             .connection
             .prepare("SELECT id,name,effect,enabled FROM auth_policies ORDER BY created_at,id")
@@ -1189,6 +1235,7 @@ impl AuthStore {
                 };
                 let limits = self.query_limits(&id).map_err(access_internal)?;
                 Ok(AccessPolicy {
+                    revision,
                     id: id.clone(),
                     name,
                     effect,
@@ -1230,6 +1277,14 @@ impl AuthStore {
         actor: &ManagementActor,
         body: crate::dashboard_access::CreatePolicyRequest,
     ) -> Result<(), AccessError> {
+        self.write_policy(actor, body, None)
+    }
+    pub(super) fn write_policy(
+        &mut self,
+        actor: &ManagementActor,
+        body: crate::dashboard_access::CreatePolicyRequest,
+        edit: Option<(&str, bool, u64)>,
+    ) -> Result<(), AccessError> {
         if !matches!(body.effect.as_str(), "allow" | "deny") {
             return Err(AccessError::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -1248,6 +1303,7 @@ impl AuthStore {
             permissions: actor_permissions,
             ..
         } = actor
+            && edit.is_none()
         {
             let owns_every_subject = body.subjects.iter().all(|subject| {
                 subject == &format!("principal:{principal_id}")
@@ -1284,20 +1340,90 @@ impl AuthStore {
                 ));
             }
         }
-        let requested_models = if body.requested_models.is_empty() {
+        // The read model mirrors requested_models into legacy `models`. During
+        // an edit that mirror must not turn an explicitly empty served scope
+        // into a restriction. Legacy-only callers still populate both scopes.
+        let use_legacy =
+            edit.is_none() || (body.requested_models.is_empty() && body.served_models.is_empty());
+        let requested_models = if body.requested_models.is_empty() && use_legacy {
             body.models.clone()
         } else {
             body.requested_models.clone()
         };
-        let served_models = if body.served_models.is_empty() {
+        let served_models = if body.served_models.is_empty() && use_legacy {
             body.models.clone()
         } else {
             body.served_models.clone()
         };
-        let id = format!("pol_{}", Uuid::new_v4().simple());
+        let id = edit
+            .map(|(id, _, _)| id.to_string())
+            .unwrap_or_else(|| format!("pol_{}", Uuid::new_v4().simple()));
         let now = Utc::now().timestamp();
-        let tx = self.connection.transaction().map_err(access_db)?;
-        tx.execute("INSERT INTO auth_policies(id,name,effect,enabled,created_at,updated_at) VALUES(?1,?2,?3,1,?4,?4)",params![id,required(&body.name,"name").map_err(access_internal)?,body.effect,now]).map_err(access_db)?;
+        // Validate matchers before writing: a bad rule must not poison the live snapshot.
+        let endpoints = body
+            .endpoints
+            .iter()
+            .filter(|v| v.as_str() != "*")
+            .map(|v| {
+                Endpoint::parse(v).ok_or_else(|| {
+                    AccessError::new(StatusCode::UNPROCESSABLE_ENTITY, "Unknown API capability")
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        PolicyMatcher::new(
+            endpoints,
+            requested_models.clone(),
+            served_models.clone(),
+            body.providers.clone(),
+            body.routes.clone(),
+        )
+        .map_err(|_| {
+            AccessError::new(StatusCode::UNPROCESSABLE_ENTITY, "Invalid policy matcher")
+        })?;
+        if body.max_concurrent_sessions == Some(0) || body.max_daily_session_starts == Some(0) {
+            return Err(AccessError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "Policy limits must be positive",
+            ));
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(access_db)?;
+        if let Some((_, _, expected)) = edit
+            && current_epoch(&tx).map_err(access_internal)? != expected
+        {
+            return Err(AccessError::new(
+                StatusCode::CONFLICT,
+                "Access settings changed; discard and reopen this editor",
+            ));
+        }
+
+        if let Some((_, enabled, _)) = edit {
+            tx.execute(
+                "UPDATE auth_policies SET name=?2,effect=?3,enabled=?4,updated_at=?5 WHERE id=?1",
+                params![
+                    id,
+                    required(&body.name, "name").map_err(access_internal)?,
+                    body.effect,
+                    enabled,
+                    now
+                ],
+            )
+            .map_err(access_db)?;
+            for sql in [
+                "DELETE FROM auth_policy_subjects WHERE policy_id=?1",
+                "DELETE FROM auth_policy_scopes WHERE policy_id=?1",
+                "DELETE FROM auth_time_windows WHERE policy_id=?1",
+                "DELETE FROM auth_limits WHERE policy_id=?1",
+                "DELETE FROM auth_management_permissions WHERE policy_id=?1",
+            ] {
+                tx.execute(sql, [&id]).map_err(access_db)?;
+            }
+        } else {
+            tx.execute("INSERT INTO auth_policies(id,name,effect,enabled,created_at,updated_at) VALUES(?1,?2,?3,1,?4,?4)",params![id,required(&body.name,"name").map_err(access_internal)?,body.effect,now]).map_err(access_db)?;
+        }
+
         for subject in body.subjects {
             let (kind, value) = subject.split_once(':').ok_or_else(|| {
                 AccessError::new(StatusCode::UNPROCESSABLE_ENTITY, "subject must be kind:id")
@@ -1307,6 +1433,9 @@ impl AuthStore {
                     StatusCode::UNPROCESSABLE_ENTITY,
                     "invalid subject kind",
                 ));
+            }
+            if edit.is_some() {
+                edits::exists(&tx, kind, value)?;
             }
             tx.execute("INSERT INTO auth_policy_subjects(policy_id,subject_kind,subject_id) VALUES(?1,?2,?3)",params![id,kind,value]).map_err(access_db)?;
         }
@@ -1350,7 +1479,11 @@ impl AuthStore {
         audit(
             &tx,
             &actor_name(actor),
-            "policy.created",
+            if edit.is_some() {
+                "policy.updated"
+            } else {
+                "policy.created"
+            },
             &id,
             "ok",
             BTreeMap::new(),
@@ -1373,11 +1506,12 @@ impl AuthStore {
     }
 
     fn list_access_keys(&self) -> Result<Vec<AccessApiKey>, AccessError> {
+        let revision = self.revision().map_err(access_internal)?;
         Ok(self
             .list_keys()
             .map_err(access_internal)?
             .into_iter()
-            .map(access_key)
+            .map(|k| access_key(k, revision))
             .collect())
     }
 
@@ -1590,8 +1724,9 @@ fn map_key(r: &rusqlite::Row<'_>) -> rusqlite::Result<ApiKeySummary> {
         last_used_at: r.get(7)?,
     })
 }
-fn access_key(k: ApiKeySummary) -> AccessApiKey {
+fn access_key(k: ApiKeySummary, revision: u64) -> AccessApiKey {
     AccessApiKey {
+        revision,
         id: k.id,
         principal_id: k.principal_id,
         name: k.name,
@@ -1709,6 +1844,7 @@ fn wire_permission_name(permission: WirePermission) -> &'static str {
     match permission {
         WirePermission::KeysRead => "auth.keys.read",
         WirePermission::KeysCreate => "auth.keys.create",
+        WirePermission::KeysWrite => "auth.keys.write",
         WirePermission::KeysRevoke => "auth.keys.revoke",
         WirePermission::KeysRotate => "auth.keys.rotate",
         WirePermission::PrincipalsRead => "auth.principals.read",
@@ -1768,6 +1904,7 @@ impl WirePermissionSet for WirePermission {
         vec![
             WirePermission::KeysRead,
             WirePermission::KeysCreate,
+            WirePermission::KeysWrite,
             WirePermission::KeysRevoke,
             WirePermission::KeysRotate,
             WirePermission::PrincipalsRead,

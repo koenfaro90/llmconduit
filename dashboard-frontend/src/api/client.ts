@@ -25,6 +25,7 @@ import type {
   ActiveSessionsResponse,
   ApiKeyRecord,
   UpdateKeyRequest,
+  UpdateAuthUserRequest, UpdateAuthGroupRequest, UpdateAuthRoleRequest, UpdateAuthPolicyRequest, UpdateAuthKeyRequest,
   AuthApiKeysResponse,
   AuthAuditResponse,
   AuthGroupsResponse,
@@ -186,7 +187,7 @@ export class DashboardClient {
         if (typeof detail?.error === 'string') throw new Error(detail.error);
       }
       let detail = '';
-      if (path === '/aliases') {
+      if (path === '/aliases' || path.startsWith('/auth/') || /^\/users\/[^/]+\/username$/.test(path)) {
         try {
           const body = await res.json() as { error?: string | { message?: string } };
           const message = typeof body.error === 'string' ? body.error : body.error?.message;
@@ -266,6 +267,8 @@ export class DashboardClient {
   updateUser(id: string, body: { password?: string; is_admin?: boolean }): Promise<{ id: string; updated: boolean }> {
     return this.mutate(`/users/${encodeURIComponent(id)}`, 'PATCH', body);
   }
+
+  renameUser(id:string,username:string,expectedUpdatedAtMs:number):Promise<UserRecord>{return this.mutate(`/users/${encodeURIComponent(id)}/username`,'PUT',{username,expected_updated_at_ms:expectedUpdatedAtMs});}
 
   deleteUser(id: string): Promise<{ id: string; deleted: boolean; keys_revoked: number }> {
     return this.mutate(`/users/${encodeURIComponent(id)}`, 'DELETE');
@@ -723,6 +726,16 @@ export class DashboardClient {
   createAuthPolicy(body: CreateAuthPolicyRequest): Promise<AuthPoliciesResponse> {
     return this.authMutation('/auth/policies', body, isAuthPoliciesResponse);
   }
+  updateAuthUser(id:string,body:UpdateAuthUserRequest):Promise<AuthUsersResponse>{return this.authEdit(`/auth/users/${encodeURIComponent(id)}`,body,isAuthUsersResponse);}
+  updateAuthGroup(id:string,body:UpdateAuthGroupRequest):Promise<AuthGroupsResponse>{return this.authEdit(`/auth/groups/${encodeURIComponent(id)}`,body,isAuthGroupsResponse);}
+  updateAuthRole(id:string,body:UpdateAuthRoleRequest):Promise<AuthRolesResponse>{return this.authEdit(`/auth/roles/${encodeURIComponent(id)}`,body,isAuthRolesResponse);}
+  updateAuthPolicy(id:string,body:UpdateAuthPolicyRequest):Promise<AuthPoliciesResponse>{return this.authEdit(`/auth/policies/${encodeURIComponent(id)}`,body,isAuthPoliciesResponse);}
+  updateAuthKey(id:string,body:UpdateAuthKeyRequest):Promise<AuthApiKeysResponse>{return this.authEdit(`/auth/api-keys/${encodeURIComponent(id)}`,body,isAuthApiKeysResponse);}
+  private async authEdit<T>(path:string,body:unknown,guard:(v:unknown)=>v is T):Promise<T>{
+    try{const value=await this.mutate<unknown>(path,'PUT',body);if(!guard(value))throw Error('Invalid Access response');return value;}
+    catch(error){if(error instanceof Error&&error.message.endsWith('409'))throw Error('Access settings changed. Discard and reopen this editor.');throw error;}
+  }
+
   revokeAuthApiKey(id: string): Promise<AuthApiKeysResponse> {
     return this.authMutation(`/auth/api-keys/${encodeURIComponent(id)}/revoke`, undefined, isAuthApiKeysResponse);
   }

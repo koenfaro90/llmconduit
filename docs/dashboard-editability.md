@@ -1,19 +1,19 @@
 # Dashboard editability audit
 
 Checked 2026-10-18 against the source routes, SQL methods and rendered actions.
-The Account API-key editor is deployed with the revision recorded in the control
-repository's `LLMCONDUIT.md`. Routine key changes apply live without restarting
-the gateway or stopping active inference.
+Account and Access editors are deployed with the revision recorded in the control
+repository's `LLMCONDUIT.md`. Changes apply live for new requests; active inference
+and session leases keep their current authorization snapshot. Access remains opt-in.
 
-| Surface | Editable now | Remaining gaps |
+| Surface | Editable now | Boundaries |
 |---|---|---|
 | Account → API keys | Label, allowed client-facing models/aliases, owner (administrators); rotate and revoke tokens | Tokens cannot be recovered: rotation returns a new token once. Key IDs and creation times stay stable. |
-| Account → users | Create/delete, reset password, change administrator role | Existing login usernames cannot be renamed. |
-| Access → API keys | Create, rotate, revoke | Existing name, owning principal and expiry lack update routes/actions. This is the separate opt-in policy-backed system. |
-| Access → users/service accounts | Create | Display name, kind and enabled state lack update actions/routes. |
-| Access → groups | Create with initial members | Renaming and membership changes lack update actions/routes. |
-| Access → roles | Create with initial permissions | Renaming, permission changes and disabling lack update actions/routes. |
-| Access → policies | Create allow/deny and management policies | Existing rules, subjects, limits and schedules lack update actions/routes. “Save policy” creates a policy. |
+| Account → users | Create/delete, reset password, administrator role and login username | Administrator-only username changes preserve account ID, passwords, keys and existing sessions. GitHub names belong to the identity provider. |
+| Access → API keys | Create, edit name/owner/expiry, rotate, revoke | Metadata edits retain the token, key ID and history. Revoked keys stay revoked. |
+| Access → users/service accounts | Create, edit display name/kind/enabled state | The bootstrap identity must remain enabled. |
+| Access → groups | Create, rename, enable/disable and replace membership | Disabled groups stop contributing access on new requests. |
+| Access → roles | Create, rename, enable/disable, permissions and assignments to identities/groups | Disabled roles stop contributing access on new requests. |
+| Access → policies | Create or edit allow/deny decisions, subjects, endpoint/model/provider/route scope, management permissions, limits and multiple UTC schedule windows | Existing rows have an explicit Edit action; creation remains separate. |
 | Infrastructure → aliases | Names and ordered target profiles | IDs are stable identities. |
 | Settings pages, providers and profiles | Typed field and collection editors, live stage/preflight/apply | Listener, database, storage and mesh transport changes still require a supervised restart. |
 | Hosts | Policy budgets, allowlists and sampling | Detected hardware identity/totals are observations, not editable settings. |
@@ -48,6 +48,46 @@ updates preserve the existing token and return no secret or digest. Mutations an
 live registry publication are serialized; existing requests retain their auth
 snapshot. Concurrent SQL edits use compare-and-swap on the current timestamp.
 
-The remaining Access update gaps above are not implemented by the Account editor;
-those features require explicit mutation contracts, delegated permission checks
-and atomic policy snapshot publication in the Access backend.
+## Account username updates
+
+`PUT /dashboard/api/users/{id}/username` accepts `username` and the frozen
+`expected_updated_at_ms`. Administrator authentication and CSRF are required.
+Duplicate names and stale versions return 409. The account ID, creation time,
+password and key ownership remain unchanged. Existing signed-in sessions continue
+working, and `/dashboard/api/me` resolves the current username by account ID.
+Password sign-in uses the new name immediately. Deleted accounts cannot be renamed.
+
+## Access record updates
+
+The separate policy-backed console provides `PUT /dashboard/api/auth/{collection}/{id}`
+for `users`, `groups`, `roles`, `policies` and `api-keys`. Each accepts the complete
+creation fields plus `expected_revision`; users/groups/roles/policies also accept
+`enabled`, and roles accept `bindings` (`subject_kind`: principal/group, `subject_id`).
+GET rows include a frozen global policy `revision`, groups include full `members`,
+and roles include full `bindings`. Any intervening Access mutation makes an older
+draft stale (409). Refresh/discard before retrying; the editor retains failed drafts.
+
+Writes transact the record, its relationships, epoch and audit event together, then
+publish the new immutable authorization snapshot. Unknown relationships, invalid
+matchers/windows and zero limits are rejected without modifying stored state.
+Names are bounded; duplicate group/role names return 409. Existing IDs and key
+secrets remain stable. No raw credential or digest is returned by metadata edits.
+
+User/group/role/policy edits require their corresponding `auth.*.write` permission;
+key metadata adds the explicit `auth.keys.write` permission, independent of create,
+rotate or revoke. The backend rechecks delegated authority from current stored grants
+while holding its mutation lock. Bootstrap administrators can change grants,
+membership, enabled state, ownership and expiry. Delegated editors can rename
+records; role permission changes must stay within their own current grant and
+cannot change assignments. The UI disables controls unavailable to the actor.
+
+Enabled state is honored for identities, groups and roles. Disabling an identity
+revokes its delegated dashboard sessions. Changing a key owner revokes dashboard
+sessions authenticated with that key; current inference leases continue. Key expiry
+is checked against the clock during authentication, so expiry needs no later edit
+or reload. UTC policy windows use weekday/time controls and optional absolute UTC
+bounds; key expiry uses the administrator's local time, clearly labeled.
+
+This does not activate Access authorization. When Access is Off, its empty read
+model remains visible and mutations are unavailable; Account API keys continue
+working under the existing authentication mode.

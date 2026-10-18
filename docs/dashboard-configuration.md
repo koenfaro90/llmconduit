@@ -20,6 +20,13 @@ then managed settings own those fields. Files remain bootstrap and recovery inpu
 | Admin → Observability | Engine metrics, native-vision probes, session detection, capture/logging and request/media retention |
 | Admin → Service & storage | Listener, mesh configuration, SQL/JSONL/disabled history, database connection and persistence queue |
 
+Account users have an administrator-only username editor that preserves account
+identity and existing sessions. Access has per-row editors for identities, groups,
+roles, policies and key metadata, including membership, role assignments and UTC
+schedule windows. Editors preserve IDs/history and reject stale drafts; grant
+changes are restricted to bootstrap administrators. Access remains opt-in. See
+[dashboard editability](dashboard-editability.md) for contracts and permissions.
+
 Existing Recipes, Deployment, Benchmarks, Traffic, Access, Accounts and mesh
 administration continue using their existing APIs. Editors reuse shared panels,
 tables and status icons, with mobile layouts. Settings use labeled controls, supported

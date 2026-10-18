@@ -127,9 +127,18 @@ pub async fn me(
     Extension(auth): Extension<Arc<DashboardAuth>>,
     session: AuthSession,
 ) -> Response {
+    let current_user = match (&session.user, gateway.persistence_store()) {
+        (Some(user), Some(store)) => store
+            .get_user(&user.id)
+            .await
+            .ok()
+            .flatten()
+            .map(|u| SessionUser::from(&u)),
+        _ => session.user.clone(),
+    };
     let body = MeBody {
         is_admin: is_admin(&session),
-        user: session.user,
+        user: current_user,
         auth_mode: auth_mode(&gateway, &auth).await,
         accounts_enabled: gateway.persistence_store().is_some(),
     };
@@ -185,6 +194,76 @@ pub struct UpdateUserRequest {
     /// New administrator flag. An admin cannot set `false` on themselves.
     #[serde(default)]
     pub is_admin: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RenameUserRequest {
+    pub username: String,
+    pub expected_updated_at_ms: i64,
+}
+
+#[utoipa::path(put,path="/dashboard/api/users/{id}/username",tag="accounts",params(("id"=String,Path)),request_body=RenameUserRequest,responses((status=200,body=UserRecord),(status=403),(status=404),(status=409)))]
+pub async fn rename_user(
+    State(gateway): State<Arc<Gateway>>,
+    Extension(auth): Extension<Arc<DashboardAuth>>,
+    session: AuthSession,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    payload: Result<Json<RenameUserRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    if let Err(r) = require_admin(&session).and_then(|()| require_csrf(&auth, &headers)) {
+        return r;
+    }
+    let body = match payload {
+        Ok(Json(b)) => b,
+        Err(e) => return invalid_body("{username,expected_updated_at_ms}", &e),
+    };
+    if body.expected_updated_at_ms < 0 || body.expected_updated_at_ms == i64::MAX {
+        return error(StatusCode::BAD_REQUEST, "Invalid user revision");
+    }
+    if id.starts_with("github:") {
+        return error(
+            StatusCode::CONFLICT,
+            "GitHub usernames are managed by the identity provider",
+        );
+    }
+    let username = match accounts::validate_username(&body.username) {
+        Ok(v) => v,
+        Err(e) => return error(StatusCode::BAD_REQUEST, &e),
+    };
+    let _guard = gateway.lock_account_mutations().await;
+    let store = match store_or_503(&gateway) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    match store.get_user(&id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return error(StatusCode::NOT_FOUND, "user not found"),
+        Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "lookup user failed"),
+    }
+    match store.get_user_auth(username).await {
+        Ok(Some(u)) if u.id != id => return error(StatusCode::CONFLICT, "username already exists"),
+        Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "lookup username failed"),
+        _ => {}
+    }
+    match store
+        .rename_user(&id, username, body.expected_updated_at_ms, &actor(&session))
+        .await
+    {
+        Ok(Some(user)) => json(StatusCode::OK, &user),
+        Ok(None) => error(
+            StatusCode::CONFLICT,
+            "User changed; discard and reopen the editor",
+        ),
+        Err(e)
+            if e.to_ascii_lowercase().contains("unique")
+                || e.to_ascii_lowercase().contains("duplicate") =>
+        {
+            error(StatusCode::CONFLICT, "username already exists")
+        }
+        Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "rename user failed"),
+    }
 }
 
 /// `GET /dashboard/api/users` body.
@@ -919,6 +998,10 @@ mod key_edit_wire_tests {
     use super::*;
     #[test]
     fn editable_fields_and_null_owner_round_trip() {
+        let rename = serde_json::json!({"username":"new-login","expected_updated_at_ms":789});
+        let request: RenameUserRequest = serde_json::from_value(rename.clone()).unwrap();
+        assert_eq!(serde_json::to_value(request).unwrap(), rename);
+
         let value = serde_json::json!({"label":null,"user_id":null,"allowed_models":["new-alias"],"expected_updated_at_ms":123});
         let parsed: UpdateKeyRequest = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(serde_json::to_value(parsed).unwrap(), value);

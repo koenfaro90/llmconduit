@@ -31,6 +31,7 @@ const endpointLabels = new Map(inferenceEndpointOptions.map((option) => [option.
 export const managementPermissionLabels: Record<ManagementPermission, string> = {
   'auth.keys.read': 'View keys',
   'auth.keys.create': 'Create keys',
+  'auth.keys.write': 'Edit key metadata',
   'auth.keys.revoke': 'Revoke keys',
   'auth.keys.rotate': 'Rotate keys',
   'auth.principals.read': 'View identities',

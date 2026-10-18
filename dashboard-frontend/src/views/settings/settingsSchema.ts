@@ -1,5 +1,6 @@
 import {secretName,title,type Json} from './settingsModel';
 export interface FieldSchema {
+ inputType?:'time'|'datetime-local';
  kind:'text'|'number'|'boolean'|'object'|'map'|'list'|'custom';label?:string;help?:string;options?:readonly string[];labels?:Record<string,string>;
  fields?:Record<string,FieldSchema>;item?:FieldSchema;min?:number;max?:number;step?:number;unit?:string;placeholder?:string;default?:Json;required?:boolean;nullable?:boolean;secret?:boolean;multiline?:boolean;readonly?:boolean;reference?:'backends'|'templates';fixedKeys?:boolean;additionalFields?:boolean;stringKey?:string;exclusive?:boolean;entryMap?:string;
 }

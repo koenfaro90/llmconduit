@@ -1,9 +1,9 @@
-import { useMemo, useState } from 'react';
+import { createContext, useContext, useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { getConnection } from '../../api/connection';
 import type {
-  AuthApiKey,
+  AuthApiKey, AuthGroup, AuthRole,
   AuthPolicy,
   AuthSession,
   AuthUsageRow,
@@ -13,7 +13,7 @@ import type {
   ManagementPermission,
 } from '../../api/types';
 import { Button } from '../../components/ui/Button';
-import { Panel } from '../../components/ui/Panel';
+import { Panel, PanelHeader } from '../../components/ui/Panel';
 import { DataTable } from '../../components/ui/DataTable';
 import type { DataTableColumn } from '../../components/ui/dataTableModel';
 import { cn } from '../../lib/cn';
@@ -32,9 +32,16 @@ import {
   validatePolicy,
 } from './policyEditorModel';
 
+import {AccessRecordEditor,type AccessEditTarget} from './AccessRecordEditor';
+const AccessEdits=createContext<{open:(target:AccessEditTarget)=>void;bootstrap:boolean;permissions:ManagementPermission[]}>({open:()=>{},bootstrap:false,permissions:[]});
+function EditAccess({target}:{target:AccessEditTarget}){
+ const ctx=useContext(AccessEdits);const needed:Record<AccessEditTarget['kind'],ManagementPermission>={user:'auth.principals.write',group:'auth.groups.write',role:'auth.roles.write',policy:'auth.policies.write',key:'auth.keys.write'};
+ return <Button variant="ghost" disabled={target.record.revision===undefined||(!ctx.bootstrap&&!ctx.permissions.includes(needed[target.kind]))} aria-label={`Edit ${target.kind==='user'?target.record.display_name:target.record.name}`} onClick={()=>ctx.open(target)}>Edit</Button>;
+}
+
 const accessQueryKey = ['auth', 'access'] as const;
 const managementPermissions: ManagementPermission[] = [
-  'auth.keys.read', 'auth.keys.create', 'auth.keys.revoke', 'auth.keys.rotate',
+  'auth.keys.read', 'auth.keys.create', 'auth.keys.write', 'auth.keys.revoke', 'auth.keys.rotate',
   'auth.principals.read', 'auth.principals.write', 'auth.groups.read', 'auth.groups.write',
   'auth.roles.read', 'auth.roles.write', 'auth.policies.read', 'auth.policies.write',
   'auth.usage.read', 'auth.audit.read', 'auth.pricing.read', 'auth.pricing.sync',
@@ -78,8 +85,9 @@ async function loadAccess() {
 export function AccessView() {
   const { client, queryClient } = getConnection();
   const query = useQuery({ queryKey: accessQueryKey, queryFn: loadAccess });
+  const [editTarget,setEditTarget]=useState<AccessEditTarget|null>(null);
   const [tab, setTab] = useState<AccessTab>('overview');
-  const [drawerOpen, setDrawerOpen] = useState(true);
+  const [drawerOpen, setDrawerOpen] = useState(false);
   const [wizardStep, setWizardStep] = useState<WizardStep>('identity');
   const [userName, setUserName] = useState('');
   const [groupName, setGroupName] = useState('');
@@ -256,6 +264,7 @@ export function AccessView() {
   });
 
   return (
+    <AccessEdits.Provider value={{open:target=>{setDrawerOpen(false);setEditTarget(target);},bootstrap:data.summary.actor.kind==='bootstrap',permissions:data.summary.actor.permissions}}>
     <div className={cn('min-h-0 flex-1 overflow-auto p-5 transition-[margin]', drawerOpen && 'xl:mr-[28rem]')} data-testid="access-view">
       <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
         <div>
@@ -283,6 +292,7 @@ export function AccessView() {
         ))}
       </div>
 
+      {editTarget&&<AccessRecordEditor key={`${editTarget.kind}:${editTarget.record.id}`} target={editTarget} bootstrap={data.summary.actor.kind==='bootstrap'} choices={{users,groups:data.groups.groups,roles:data.roles.roles,keys:data.apiKeys.api_keys}} onSaved={async()=>{await queryClient.invalidateQueries({queryKey:accessQueryKey});setEditTarget(null);}} onDiscard={()=>{setEditTarget(null);void query.refetch();}}/>}
       {tab === 'overview' && <AccessOverview overview={overview} onNavigate={setTab} />}
       {tab === 'keys' && (
         <ApiKeysSection
@@ -457,6 +467,7 @@ export function AccessView() {
 
       {revealedKey && <CopyOnceDialog created={revealedKey} onClose={() => setRevealedKey(null)} />}
     </div>
+    </AccessEdits.Provider>
   );
 }
 
@@ -531,11 +542,11 @@ function ApiKeysSection({ users, apiKeys, principal, keyName, busy, setKeyPrinci
         <input aria-label="Key name" value={keyName} onChange={(event) => setKeyName(event.target.value)} placeholder="Key name" className="rounded border border-line bg-bg px-2 py-1.5 text-sm" />
         <Button disabled={busy || !principal || !keyName.trim()} type="submit">Create key</Button>
       </form>
-      <DataTable id="access-keys" rows={apiKeys} rowKey={(key) => key.id} clientPageSize={25} columns={[
-        { id: 'key', label: 'Key', width: '45%', required: true, render: (key) => <><div>{key.name}</div><div className="font-mono text-[10px] text-text-muted">{key.prefix}... · {key.id}</div></> },
-        { id: 'used', label: 'Last used', width: '20%', render: (key) => timestamp(key.last_used_at) },
-        { id: 'status', label: 'Status', width: '15%', render: (key) => <Status enabled={key.enabled} /> },
-        { id: 'actions', label: '', width: '20%', required: true, render: (key) => <div className="flex justify-end gap-1"><Button variant="ghost" disabled={busy || !key.enabled} onClick={() => onRotate(key)}>Rotate</Button><Button variant="danger" disabled={busy || !key.enabled} onClick={() => onRevoke(key)}>Revoke</Button></div> },
+      <DataTable interactive id="access-keys" rows={apiKeys} rowKey={(key) => key.id} clientPageSize={25} columns={[
+        { id: 'key', label: 'Key', width: '35%', required: true,value:key=>key.name, render: (key) => <><div>{key.name}</div><div className="font-mono text-[10px] text-text-muted">{key.prefix}... · {key.id}</div></> },
+        { id: 'used', label: 'Last used', width: '20%',value:key=>key.last_used_at, render: (key) => timestamp(key.last_used_at) },
+        { id: 'status', label: 'Status', width: '15%',value:key=>key.enabled?'Active':'Disabled', render: (key) => <Status enabled={key.enabled} /> },
+        { id: 'actions', label: '', width: '20%', required: true, render: (key) => <div className="flex flex-wrap justify-end gap-1"><EditAccess target={{kind:'key',record:key}}/><Button variant="ghost" disabled={busy || !key.enabled} onClick={() => onRotate(key)}>Rotate</Button><Button variant="danger" disabled={busy || !key.enabled} onClick={() => onRevoke(key)}>Revoke</Button></div> },
       ]} />
     </Section>
   );
@@ -543,8 +554,8 @@ function ApiKeysSection({ users, apiKeys, principal, keyName, busy, setKeyPrinci
 
 function PeopleSection(props: {
   users: AuthUser[];
-  groups: Array<{ id: string; name: string; member_count: number }>;
-  roles: Array<{ id: string; name: string; enabled: boolean; permissions: ManagementPermission[] }>;
+  groups: AuthGroup[];
+  roles: AuthRole[];
   userName: string;
   groupName: string;
   groupMembers: string[];
@@ -567,10 +578,11 @@ function PeopleSection(props: {
           <input aria-label="User display name" value={props.userName} onChange={(event) => props.setUserName(event.target.value)} placeholder="Display name" className="min-w-0 flex-1 rounded border border-line bg-bg px-2 py-1.5 text-sm outline-none focus:border-accent" />
           <Button disabled={props.busy || !props.userName.trim()} type="submit">Create user</Button>
         </form>
-        <DataTable id="access-people" rows={props.users} rowKey={(user) => user.id} clientPageSize={25} columns={[
-          { id: 'name', label: 'Name', width: '50%', required: true, render: (user) => <><div>{user.display_name}</div><div className="font-mono text-[10px] text-text-muted">{user.id}</div></> },
-          { id: 'kind', label: 'Kind', width: '25%', render: (user) => user.kind },
-          { id: 'status', label: 'Status', width: '25%', render: (user) => <Status enabled={user.enabled} /> },
+        <DataTable interactive id="access-people" rows={props.users} rowKey={(user) => user.id} clientPageSize={25} columns={[
+          { id: 'name', label: 'Name', width: '50%', required: true, value:user=>user.display_name,render: (user) => <><div>{user.display_name}</div><div className="font-mono text-[10px] text-text-muted">{user.id}</div></> },
+          { id: 'kind', label: 'Kind', width: '25%',value:user=>user.kind, render: (user) => user.kind },
+          { id: 'status', label: 'Status', width: '15%', value:user=>user.enabled?'Active':'Disabled',render: (user) => <Status enabled={user.enabled} /> },
+          {id:'actions',label:'Actions',required:true,render:user=><EditAccess target={{kind:'user',record:user}}/>},
         ]} />
       </Section>
       <Section title="Groups and roles" count={props.groups.length + props.roles.length}>
@@ -590,9 +602,17 @@ function PeopleSection(props: {
             <Button disabled={props.busy || !props.roleName.trim() || props.rolePermissions.length === 0} type="submit">Create role</Button>
           </form>
         </div>
-        <div className="grid gap-2 p-3 sm:grid-cols-2">
-          {props.groups.map((group) => <div key={group.id} className="rounded border border-line bg-bg p-2 text-xs"><div className="font-medium">{group.name}</div><div className="mt-1 font-mono text-[10px] text-text-muted">{group.id} · {group.member_count} members</div></div>)}
-          {props.roles.map((role) => <div key={role.id} className="rounded border border-line bg-bg p-2 text-xs"><div className="flex justify-between"><span className="font-medium">{role.name}</span><Status enabled={role.enabled} /></div><div className="mt-2 flex flex-wrap gap-1">{role.permissions.map((permission) => <span key={permission} className="rounded bg-line/50 px-1 font-mono text-[9px]">{permission}</span>)}</div></div>)}
+        <div className="space-y-4 p-3">
+          <DataTable interactive id="access-groups" rows={props.groups} rowKey={g=>g.id} clientPageSize={25} mobileColumns={['name','actions']} columns={[
+            {id:'name',label:'Group',value:g=>g.name,render:g=>g.name},{id:'members',label:'Members',value:g=>g.member_count,render:g=>g.member_count},
+            {id:'status',label:'Status',value:g=>g.enabled?'Active':'Disabled',render:g=><Status enabled={g.enabled}/>},
+            {id:'actions',label:'Actions',required:true,render:g=><EditAccess target={{kind:'group',record:g}}/>},
+          ]}/>
+          <DataTable interactive id="access-roles" rows={props.roles} rowKey={r=>r.id} clientPageSize={25} mobileColumns={['name','actions']} columns={[
+            {id:'name',label:'Role',value:r=>r.name,render:r=>r.name},{id:'permissions',label:'Permissions',value:r=>r.permissions.join(' '),render:r=>r.permissions.map(p=>managementPermissionLabels[p]).join(', ')},
+            {id:'status',label:'Status',value:r=>r.enabled?'Active':'Disabled',render:r=><Status enabled={r.enabled}/>},
+            {id:'actions',label:'Actions',required:true,render:r=><EditAccess target={{kind:'role',record:r}}/>},
+          ]}/>
         </div>
       </Section>
     </div>
@@ -705,7 +725,12 @@ function PolicyPreviewCard({ policy, kind }: { policy: CreateAuthPolicyRequest; 
 }
 
 function PolicyList({ policies, emptyText }: { policies: AuthPolicy[]; emptyText: string }) {
-  return <div className="border-t border-line p-3 text-xs">{policies.length === 0 ? <p className="text-text-muted">{emptyText}</p> : policies.map((policy) => <div key={policy.id} className="mb-2 flex flex-wrap items-center gap-2 rounded border border-line bg-bg p-2"><span className={cn('rounded px-1.5 py-0.5 text-[9px] font-bold uppercase', policy.effect === 'deny' ? 'bg-status-down/20 text-status-down' : 'bg-status-healthy/15 text-status-healthy')}>{policy.effect}</span><span className="font-medium">{policy.name}</span><span className="text-text-muted">{formatAccessList(policy.subjects)}</span><span className="ml-auto text-right text-[10px] text-text-muted">{policy.management_permissions.length > 0 ? `${policy.management_permissions.length} management permissions` : `${summarizeEndpoints(policy.endpoints)} · ${summarizeMatcher(policy.providers, 'all providers')} · ${summarizeMatcher(policy.requested_models, 'all models')}`}</span><Status enabled={policy.enabled} /></div>)}</div>;
+ return <div className="p-3"><DataTable interactive id={policies.some(p=>p.management_permissions.length)?'access-admin-policies':'access-model-policies'} rows={policies} rowKey={p=>p.id} clientPageSize={25} mobileColumns={['name','actions']} emptyMessage={emptyText} columns={[
+  {id:'name',label:'Policy',value:p=>p.name,render:p=>p.name},{id:'effect',label:'Decision',value:p=>p.effect,render:p=>p.effect},
+  {id:'subjects',label:'Subjects',value:p=>p.subjects.join(', '),render:p=>formatAccessList(p.subjects)},
+  {id:'status',label:'Status',value:p=>p.enabled?'Active':'Disabled',render:p=><Status enabled={p.enabled}/>},
+  {id:'actions',label:'Actions',required:true,render:p=><EditAccess target={{kind:'policy',record:p}}/>},
+ ]}/></div>;
 }
 
 function AdministrationSection(props: { users: AuthUser[]; policies: AuthPolicy[]; subjectOptions: Array<{ id: string; label: string }>; policyName: string; subjects: string[]; permissions: ManagementPermission[]; preview: CreateAuthPolicyRequest; validation: string[]; keyPrincipal: string; keyName: string; busy: boolean; setPolicyName: (value: string) => void; setSubjects: (value: string[]) => void; setPermissions: (value: ManagementPermission[]) => void; setKeyPrincipal: (value: string) => void; setKeyName: (value: string) => void; onCreatePolicy: () => void; onCreateKey: () => void }) {
@@ -883,15 +908,7 @@ function ReviewLine({ label, value }: { label: string; value: string }) {
 }
 
 function Section({ title, count, children }: { title: string; count?: number; children: ReactNode }) {
-  return (
-    <Panel className="min-w-0 overflow-hidden">
-      <div className="flex items-center justify-between border-b border-line px-3 py-2">
-        <h2 className="text-xs font-semibold uppercase tracking-[0.14em]">{title}</h2>
-        {count !== undefined && <span className="font-mono text-xs text-text-muted">{count}</span>}
-      </div>
-      {children}
-    </Panel>
-  );
+ return <Panel className="min-w-0 overflow-hidden"><div className="border-b border-line px-3 py-2"><PanelHeader label={title} help={`Manage ${title.toLowerCase()} here. Use a row's Edit action to change the existing record; changes are validated and applied live. Historical activity is retained.`} actions={count===undefined?undefined:<span className="font-mono text-xs text-text-muted">{count}</span>}><h2 className="text-xs font-semibold uppercase tracking-[0.14em]">{title}</h2></PanelHeader></div>{children}</Panel>;
 }
 
 function Status({ enabled }: { enabled: boolean }) {

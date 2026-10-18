@@ -98,4 +98,9 @@ describe('AccountView (mock accounts API)', () => {
     await waitFor(()=>expect(view.getByText('Other admin')).toBeTruthy());
   });
 
+  it('renames an account while retaining its keys and identity',async()=>{
+    authStore.getState().setUser({id:'user_admin',username:'admin',is_admin:true});const view=renderWithQuery(<AccountView/>);
+    await waitFor(()=>expect(view.getByRole('button',{name:'Rename dev'})).toBeTruthy());fireEvent.click(view.getByRole('button',{name:'Rename dev'}));const editor=view.getByTestId('username-editor');fireEvent.change(within(editor).getByLabelText('Sign-in username'),{target:{value:'developer'}});fireEvent.click(within(editor).getByRole('button',{name:'Save username'}));await waitFor(()=>expect(view.queryByTestId('username-editor')).toBeNull());const users=await getConnection().client.listUsers();expect(users.users.find(u=>u.id==='user_dev')?.username).toBe('developer');expect((await getConnection().client.listKeys('all')).keys.find(k=>k.id==='key_dev_ci')?.user_id).toBe('user_dev');
+  });
+
 });
