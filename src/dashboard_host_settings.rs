@@ -32,6 +32,7 @@ async fn forward(gateway: &Gateway, id: &str, settings: Value) -> Response {
         .manage_fleet(
             endpoint,
             ManagedCommand {
+                inspect_artifacts: false,
                 settings: Some(settings),
                 engine_metrics: None,
                 preparation: None,

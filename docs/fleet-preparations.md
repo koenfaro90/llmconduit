@@ -1,5 +1,19 @@
 # Prepare images and checkpoints through Fleet
 
+Hosts → select a host → **Images and model cache → Inspect host** requests fresh,
+read-only artifact inventory over the authenticated mesh. The shared tables sort
+and filter image IDs/tags/digests/architecture/size and cached checkpoint
+repositories/revisions/subfolders. Refresh is explicit; this does not add another
+periodic Docker or filesystem scan. The admin endpoint is
+`GET /dashboard/api/hosts/{endpoint_id}/artifacts`; the worker forwards only the
+typed `inspect_artifacts` command to Fleet's `GET /v1/inspection`. Both the host's
+Fleet and mesh worker need the inspection update. Older/offline hosts show an
+explicit unavailable error. No SSH fallback is used.
+
+Cache inspection lists bounded local metadata only. Presence does not prove
+completeness or integrity, and displayed top-level logical size excludes nested
+folders. Use the preparation workflow below for full pinned-file verification.
+
 Deployment → **Prepare images and checkpoints** creates durable jobs for a pinned
 recipe revision on selected hosts. Hosts are sorted; occupied hosts can prepare
 without stopping their current model or reserving its GPUs. Fleet owns image

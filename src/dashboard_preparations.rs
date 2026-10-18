@@ -413,6 +413,7 @@ async fn reconcile_run(g: &Gateway, run: &PreparationRun) {
         .manage_fleet(
             endpoint,
             ManagedCommand {
+                inspect_artifacts: false,
                 preparation: Some(command),
                 settings: None,
                 engine_metrics: None,
@@ -776,6 +777,7 @@ mod wire_tests {
     #[test]
     fn preparation_command_round_trips_and_rejects_extra_execution_fields() {
         let command = ManagedCommand {
+            inspect_artifacts: false,
             settings: None,
             engine_metrics: None,
             benchmark: None,

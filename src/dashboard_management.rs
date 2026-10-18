@@ -68,6 +68,8 @@ pub struct DesiredDeployment {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedCommand {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub inspect_artifacts: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preparation: Option<crate::dashboard_preparations::PreparationCommand>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -928,6 +930,7 @@ async fn reconcile_deployment(
         .manage_fleet(
             endpoint,
             ManagedCommand {
+                inspect_artifacts: false,
                 settings: None,
                 engine_metrics: None,
                 preparation: None,
@@ -1165,6 +1168,7 @@ mod tests {
     #[test]
     fn management_wire_fields_round_trip() {
         let read = ManagedCommand {
+            inspect_artifacts: false,
             settings: Some(serde_json::json!({})),
             engine_metrics: None,
             preparation: None,
@@ -1180,6 +1184,7 @@ mod tests {
             host_settings_body(&serde_json::json!({"revision":0,"configuration":{}})).is_some()
         );
         let settings = ManagedCommand {
+            inspect_artifacts: false,
             settings: Some(
                 serde_json::json!({"revision":7,"configuration":{"policy":{},"metrics":{"cpu":"100ms"}}}),
             ),
@@ -1195,6 +1200,7 @@ mod tests {
             settings
         );
         let command = ManagedCommand {
+            inspect_artifacts: false,
             settings: None,
             engine_metrics: None,
             preparation: None,

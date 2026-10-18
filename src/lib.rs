@@ -12,6 +12,7 @@ pub mod control_plane_store;
 pub mod dashboard_access;
 pub mod dashboard_aliases;
 pub mod dashboard_api;
+pub mod dashboard_artifacts;
 pub mod dashboard_auth;
 pub mod dashboard_benchmarks;
 pub mod dashboard_deployment_groups;

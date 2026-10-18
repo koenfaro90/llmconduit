@@ -860,6 +860,7 @@ export const mockFetch: typeof fetch = async (input, init): Promise<Response> =>
   if (path === '/dashboard/api/traffic/layout') return json({mobile_compact:false});
   if (path === '/dashboard/api/management/recipe-evidence' && method === 'GET') return json([]);
   if (/^\/dashboard\/api\/hosts\/[^/]+\/history$/.test(path) && method === 'GET') return json({samples:[],bucket_ms:15000,since_ms:Date.now()-3600_000,until_ms:Date.now(),sampling:'latest observation per interval'});
+  if (/^\/dashboard\/api\/hosts\/[^/]+\/artifacts$/.test(path) && method === 'GET') return json({sampled_at:new Date().toISOString(),presence_only:true,cache_configured:true,truncated:false,errors:[],images:[{id:`sha256:${'a'.repeat(64)}`,tags:['example/omni:verified'],digests:[`example/omni@sha256:${'b'.repeat(64)}`],architecture:'arm64',os:'linux',size_bytes:8*1024**3}],snapshots:[{repository:'MiniMaxAI/MiniMax-H3',revision:'c'.repeat(40),top_level_entries:3,top_level_logical_bytes:1024,subfolders:['FL2VA'],truncated:false,unreadable_entries:0}]});
   if (path === '/dashboard/api/preparations' && method === 'GET') return json([]);
   if (path === '/dashboard/api/benchmarks' && method === 'GET') return json([]);
   if (path === '/dashboard/api/management' && method === 'GET') return json({ recipes: {}, deployments: {} });

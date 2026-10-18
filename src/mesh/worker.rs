@@ -485,6 +485,7 @@ pub(super) async fn handle_stream(
             };
             if let Some(fleet) = &runtime.fleet {
                 let result = match (
+                    command.inspect_artifacts,
                     command.preparation,
                     command.engine_metrics,
                     command.settings,
@@ -492,24 +493,25 @@ pub(super) async fn handle_stream(
                     command.deployment_id,
                     command.desired,
                 ) {
-                    (Some(command), None, None, None, None, None) => {
+                    (true, None, None, None, None, None, None) => fleet.inspect_artifacts().await,
+                    (false, Some(command), None, None, None, None, None) => {
                         fleet.preparation_command(&command).await
                     }
-                    (None, None, Some(settings), None, None, None) => {
+                    (false, None, None, Some(settings), None, None, None) => {
                         fleet
                             .host_settings(crate::dashboard_management::host_settings_body(
                                 &settings,
                             ))
                             .await
                     }
-                    (None, None, None, Some(benchmark), None, None) => {
+                    (false, None, None, None, Some(benchmark), None, None) => {
                         fleet.benchmark_command(&benchmark).await
                     }
-                    (None, None, None, None, Some(id), Some(desired)) => {
+                    (false, None, None, None, None, Some(id), Some(desired)) => {
                         fleet.apply_managed(&id, &desired).await
                     }
-                    (None, None, None, None, None, None) => fleet.managed_report().await,
-                    (None, Some(query), None, None, None, None) => {
+                    (false, None, None, None, None, None, None) => fleet.managed_report().await,
+                    (false, None, Some(query), None, None, None, None) => {
                         fleet.engine_metrics(&query).await
                     }
                     _ => Err(crate::dashboard_fleet::FleetProxyError::new(

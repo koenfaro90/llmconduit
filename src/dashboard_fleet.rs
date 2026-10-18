@@ -265,6 +265,10 @@ impl FleetClient {
         Ok(value)
     }
 
+    pub async fn inspect_artifacts(&self) -> Result<serde_json::Value, FleetProxyError> {
+        self.request(reqwest::Method::GET, "/v1/inspection").await
+    }
+
     pub async fn apply_managed(
         &self,
         id: &str,
@@ -793,6 +797,26 @@ mod tests {
             .mount(&server)
             .await;
         assert!(test_client(&server.uri()).host_snapshot().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn fleet_artifact_inspection_uses_authenticated_read_only_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/inspection"))
+            .and(header("authorization", "Bearer secret-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"presence_only":true,"images":[],"snapshots":[]}),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let report = test_client(&server.uri())
+            .inspect_artifacts()
+            .await
+            .unwrap();
+        assert_eq!(report["presence_only"], true);
+        assert!(!report.to_string().contains("secret-token"));
     }
 
     #[test]

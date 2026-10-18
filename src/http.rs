@@ -294,6 +294,10 @@ fn protected_routes(gateway: Arc<Gateway>, auth: Arc<DashboardAuth>) -> Router<A
             get(crate::dashboard_host_settings::get).put(crate::dashboard_host_settings::save),
         )
         .route(
+            "/dashboard/api/hosts/{id}/artifacts",
+            get(crate::dashboard_artifacts::get),
+        )
+        .route(
             "/dashboard/api/settings/apply",
             post(crate::dashboard_settings::apply),
         )

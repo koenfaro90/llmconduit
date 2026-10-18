@@ -1,4 +1,5 @@
 import {validCheckpoint,isPreparationRun,type PreparationRun,type CreatePreparation} from '../views/infrastructure/preparationModel';
+import {isArtifactInventory,type ArtifactInventory} from '../views/infrastructure/artifactsModel';
 import {isSettingsView,isHostSettings,type SettingsView,type HostSettings,type Json} from '../views/settings/settingsModel';
 import { isAliasesResponse, type AliasesResponse, type AliasMapping } from "../views/infrastructure/aliasModel";
 import { isBenchmarkRun, type BenchmarkRun, type BenchmarkOptions } from '../views/infrastructure/benchmarkModel';
@@ -237,6 +238,7 @@ export class DashboardClient {
   stageSettings(scope:string,body:{revision:number;values:Record<string,Json>;environment:Record<string,string|null>}):Promise<SettingsView>{return this.mutate(`/settings/${encodeURIComponent(scope)}`,'POST',body).then(value=>{if(!isSettingsView(value))throw new Error('Invalid settings response');return value;});}
   applySettings(revision:number):Promise<unknown>{return this.mutate('/settings/apply','POST',{revision});}
   hostSettings(id:string):Promise<HostSettings>{return this.request(`/hosts/${encodeURIComponent(id)}/settings`,undefined,isHostSettings);}
+  hostArtifacts(id:string):Promise<ArtifactInventory>{return this.request(`/hosts/${encodeURIComponent(id)}/artifacts`,undefined,isArtifactInventory);}
   saveHostSettings(id:string,value:HostSettings):Promise<HostSettings>{return this.mutate(`/hosts/${encodeURIComponent(id)}/settings`,'PUT',{revision:value.revision,configuration:value.configuration}).then(value=>{if(!isHostSettings(value))throw new Error('Invalid host settings response');return value;});}
   aliases(): Promise<AliasesResponse> { return this.request('/aliases', undefined, isAliasesResponse); }
   saveAliases(revision: number, aliases: AliasMapping[]): Promise<AliasesResponse> {

@@ -160,6 +160,7 @@ pub fn start(gateway: Arc<Gateway>) {
                             registry.manage_fleet(
                                 endpoint,
                                 ManagedCommand {
+                                    inspect_artifacts: false,
                                     settings: None,
                                     preparation: None,
                                     benchmark: None,
@@ -363,6 +364,7 @@ mod tests {
     #[test]
     fn metrics_command_round_trips_and_old_commands_omit_the_extension() {
         let command = ManagedCommand {
+            inspect_artifacts: false,
             settings: None,
             preparation: None,
             benchmark: None,

@@ -480,6 +480,7 @@ async fn reconcile_run(gateway: &Gateway, run: &BenchmarkRun) {
         .manage_fleet(
             endpoint,
             ManagedCommand {
+                inspect_artifacts: false,
                 settings: None,
                 engine_metrics: None,
                 preparation: None,
