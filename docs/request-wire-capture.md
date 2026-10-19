@@ -100,3 +100,17 @@ Termination/stop reason appears first inside Details, followed by chain informat
 Successful completion reasons do not populate the Error tab. Timeline and Chain
 have no separate tabs. Live monitor segments remain an explicitly bounded fallback
 when stored response assembly is unavailable.
+
+
+Capture finalization is owned by an independent task and shared by all finish
+callers. Cancelling a response reader after its terminal SSE event must not cancel
+fsync, chunk publication or the final manifest update. The first finalization
+outcome wins; a later dropped-reader cleanup cannot overwrite it.
+
+Readable-output completeness is separate from archive-finalization metadata.
+Validated terminal markers (`[DONE]`, Responses terminal events or Anthropic
+`message_stop`) can prove complete model output despite an older unfinished
+capture flag. Malformed stream data and missing terminal evidence still show as
+partial when the archive is unfinished. Do not infer completeness from HTTP2xx or
+SQL request status alone. A targeted historical metadata repair requires independent
+clean-response byte-count/hash agreement and preserves the original body bytes.

@@ -61,7 +61,9 @@ uses same-origin `Origin`/`Host` validation for dashboard WebSockets. Kill requi
 Request Details starts with termination/stop reason and chain metadata; neither
 Chain nor Timeline has a separate tab. Output assembles stored response JSON/SSE
 into readable text, reasoning and tool calls, retaining raw response exports.
-Successful termination is not an error.
+Successful termination is not an error. Capture finalization must outlive reader
+cancellation; output protocol completion is separate from archive status. Do not
+mark a terminal SSE response partial solely because capture metadata is stale.
 Request inspectors use full-width HTTP body tabs, with Copy and Download, rather
 than transformation/diff panes. Valid JSON displays with whitespace-only pretty
 printing; Copy/Download retain original bytes. Request TTFT uses first generated text/reasoning/tool arguments; the separate

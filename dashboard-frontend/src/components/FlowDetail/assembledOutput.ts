@@ -3,7 +3,7 @@ import {bodyPresentation} from './wireModel';
 
 type Obj=Record<string,unknown>;
 export interface OutputItem {id:string;kind:'output'|'reasoning'|'tool';text:string;name?:string}
-export interface AssembledOutput {items:OutputItem[];stopReason:string|null;partial:boolean;unparsedEvents:number}
+export interface AssembledOutput {items:OutputItem[];stopReason:string|null;terminal:boolean;partial:boolean;unparsedEvents:number}
 const object=(v:unknown):Obj=>v&&typeof v==='object'&&!Array.isArray(v)?v as Obj:{};
 const string=(v:unknown):string=>typeof v==='string'?v:'';
 const list=(v:unknown):unknown[]=>Array.isArray(v)?v:[];
@@ -22,7 +22,7 @@ function reasoning(v:Obj):string {
 /** Derived display only. Original response bytes and exports are never rewritten. */
 export function assembleOutput(body:string):AssembledOutput {
  body=body.replace(/^\uFEFF/,'');
- let items=new Map<string,OutputItem>();let stopReason:string|null=null,partial=false,unparsedEvents=0;
+ let items=new Map<string,OutputItem>();let stopReason:string|null=null,partial=false,unparsedEvents=0,terminal=false;
  const indexes=new Map<number,string>();
  const put=(id:string,kind:OutputItem['kind'],value:string,append:boolean,name?:string)=>{
   const key=id+':'+kind;const prior=items.get(key);items.set(key,{id,kind,text:append?(prior?.text??'')+value:value,name:name||prior?.name});
@@ -51,7 +51,8 @@ export function assembleOutput(body:string):AssembledOutput {
   if(type==='response.function_call_arguments.delta')put(id,'tool',string(event.delta),true);
   if(type==='response.output_text.done')put(id,'output',string(event.text),false);
   if(type==='response.function_call_arguments.done')put(id,'tool',string(event.arguments),false);
-  if(type==='response.completed'||type==='response.incomplete'||type==='response.failed')stopReason=string(object(response.incomplete_details).reason)||type;
+  if(type==='response.completed'||type==='response.incomplete'||type==='response.failed'){terminal=true;stopReason=string(object(response.incomplete_details).reason)||type;}
+  if(type==='message_stop')terminal=true;
   // Chat Completions: choices and tool indexes are independent streams.
   for(const raw of list(event.choices)){
    const choice=object(raw);const message=object(choice.message??choice.delta);const append=choice.message==null;const key=`choice-${Number(choice.index??0)}`;
@@ -81,19 +82,19 @@ export function assembleOutput(body:string):AssembledOutput {
    items=new Map();list(event.content).forEach(snapshot);stopReason=string(event.stop_reason)||stopReason;
   }
  };
- try {consume(JSON.parse(body));}
+ try {const value=JSON.parse(body);consume(value);const v=object(value);terminal=terminal||Array.isArray(v.choices)&&v.choices.length>0&&v.choices.every(c=>object(c).finish_reason!=null)||Array.isArray(v.output)&&['completed','incomplete','failed'].includes(string(v.status))||v.role==='assistant'&&v.stop_reason!=null;}
  catch {
   let sawEvent=false,done=false;
   for(const block of body.replace(/\r\n/g,'\n').split(/\n\n/)){
    const lines=block.split('\n').filter(line=>line.startsWith('data:'));
    if(!lines.length)continue;sawEvent=true;
-   const data=lines.map(line=>line.slice(5).replace(/^ /,'')).join('\n');if(data==='[DONE]'){done=true;continue;}
+   const data=lines.map(line=>line.slice(5).replace(/^ /,'')).join('\n');if(data==='[DONE]'){done=true;terminal=true;continue;}
    const eventName=block.split('\n').find(line=>line.startsWith('event:'))?.slice(6).trim()??'';
    try{consume(JSON.parse(data),eventName);}catch{unparsedEvents++;}
   }
-  partial=unparsedEvents>0||!sawEvent||(!stopReason&&!done);
+  partial=unparsedEvents>0||!sawEvent||(!stopReason&&!done&&!terminal);
  }
- return {items:[...items.values()].filter(item=>item.text||item.kind==='tool'),stopReason,partial,unparsedEvents};
+ return {items:[...items.values()].filter(item=>item.text||item.kind==='tool'),stopReason,terminal,partial,unparsedEvents};
 }
 
 export function outputSegments(items:OutputItem[]):DebugSegment[] {

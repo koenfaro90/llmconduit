@@ -6,7 +6,7 @@
 use axum::body::Body;
 use axum::body::Bytes;
 use axum::http::{HeaderMap, Response};
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use http_body_util::BodyExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -70,10 +70,14 @@ struct Writer {
     bytes: u64,
     hash: Sha256,
 }
+type Finalization =
+    futures::future::Shared<futures::future::BoxFuture<'static, Result<(), Arc<std::io::Error>>>>;
+
 pub struct WireBody {
     turn: Arc<WireTurn>,
     key: String,
     writer: AsyncMutex<Option<Writer>>,
+    finalization: Mutex<Option<Finalization>>,
 }
 impl std::fmt::Debug for WireBody {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -163,6 +167,7 @@ impl WireTurn {
         Ok(Arc::new(WireBody {
             turn: Arc::clone(self),
             key: key.into(),
+            finalization: Mutex::new(None),
             writer: AsyncMutex::new(Some(Writer {
                 file,
                 bytes: 0,
@@ -218,7 +223,39 @@ impl WireBody {
         writer.bytes += bytes.len() as u64;
         Ok(())
     }
-    pub async fn finish(&self, complete: bool, error: Option<String>) -> std::io::Result<()> {
+    /// Register the first outcome before yielding, then own finalization in an
+    /// independent task. A client can stop polling immediately after [DONE];
+    /// cancelling that reader must not discard the writer mid-fsync/deduplication.
+    pub async fn finish(
+        self: &Arc<Self>,
+        complete: bool,
+        error: Option<String>,
+    ) -> std::io::Result<()> {
+        let completion = {
+            let mut slot = self
+                .finalization
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            slot.get_or_insert_with(|| {
+                let body = Arc::clone(self);
+                let job = tokio::spawn(async move {
+                    body.finish_inner(complete, error).await.map_err(Arc::new)
+                });
+                async move {
+                    job.await
+                        .unwrap_or_else(|error| Err(Arc::new(std::io::Error::other(error))))
+                }
+                .boxed()
+                .shared()
+            })
+            .clone()
+        };
+        completion
+            .await
+            .map_err(|error| std::io::Error::new(error.kind(), error.to_string()))
+    }
+
+    async fn finish_inner(&self, complete: bool, error: Option<String>) -> std::io::Result<()> {
         let Some(mut writer) = self.writer.lock().await.take() else {
             return Ok(());
         };
@@ -789,6 +826,64 @@ mod tests {
         );
         assert_eq!(stored(temp.path(), "api_retries", "client_out").await, raw);
     }
+    #[tokio::test]
+    async fn finalization_survives_reader_cancellation_during_manifest_publish() {
+        let temp = tempfile::tempdir().unwrap();
+        let turn = WireTurn::start(
+            temp.path(),
+            "api_finish_cancel",
+            "POST",
+            "/v1/chat/completions",
+            &HeaderMap::new(),
+            b"{}",
+        )
+        .await
+        .unwrap();
+        let body = turn
+            .response("client_out", 200, &HeaderMap::new())
+            .await
+            .unwrap();
+        let raw = b"data: [DONE]\n\n";
+        body.write(raw).await.unwrap();
+        // Hold publication after the file/chunks are committed, exactly where
+        // cancelling the old reader-owned finish lost the terminal manifest.
+        let publish = turn.publish.lock().await;
+        let reader = {
+            let body = Arc::clone(&body);
+            tokio::spawn(async move { body.finish(true, None).await })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if turn.manifest.lock().await.parts["client_out"].complete {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        reader.abort();
+        assert!(reader.await.unwrap_err().is_cancelled());
+        drop(publish);
+        body.finish(false, Some("reader dropped".into()))
+            .await
+            .unwrap();
+        let saved: WireManifest = serde_json::from_slice(
+            &tokio::fs::read(temp.path().join("api_finish_cancel/manifest.json"))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let part = &saved.parts["client_out"];
+        assert!(part.complete);
+        assert!(part.error.is_none());
+        assert_eq!(part.bytes, raw.len() as u64);
+        assert_eq!(
+            stored(temp.path(), "api_finish_cancel", "client_out").await,
+            raw
+        );
+    }
+
     #[tokio::test]
     async fn unpolled_client_response_is_closed_as_incomplete() {
         let temp = tempfile::tempdir().unwrap();

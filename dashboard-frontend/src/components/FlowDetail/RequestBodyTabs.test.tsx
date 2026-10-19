@@ -38,6 +38,14 @@ describe('complete HTTP body tabs',()=>{
   fireEvent.click(screen.getByRole('button',{name:'Copy assembled output'}));await waitFor(()=>expect(copy).toHaveBeenCalledWith('Hello\n\nReasoning\nThink'));
   fireEvent.click(screen.getByRole('tab',{name:'Inbound response'}));await waitFor(()=>expect(screen.getByRole('button',{name:'Copy body'})).toBeEnabled());fireEvent.click(screen.getByRole('button',{name:'Copy body'}));await waitFor(()=>expect(copy).toHaveBeenLastCalledWith(response));
  });
+ it.each([true,false])('uses verified protocol completion with stale capture metadata (DONE=%s)',async(done)=>{
+  const response='data: '+JSON.stringify({choices:[{index:0,delta:{content:'Complete answer'},finish_reason:'stop'}]})+'\n\n'+(done?'data: [DONE]\n\n':'');
+  const stale={...manifest,parts:{...manifest.parts,client_out:{...manifest.parts.client_out!,complete:false,bytes:0,sha256:null}}};
+  const {client}=getConnection();vi.spyOn(client,'wireManifest').mockResolvedValue(stale);vi.spyOn(client,'historyBodyBytes').mockResolvedValue(new TextEncoder().encode(response));
+  renderWithQuery(<RequestBodyTabs request={request}/>);fireEvent.click(screen.getByRole('tab',{name:'Output'}));await screen.findByTestId('assembled-output');
+  expect(screen.queryByText(/Partial response:/)!==null).toBe(!done);
+  expect(stale.parts.client_out!.complete).toBe(false);
+ });
  it('keeps every upstream call selectable instead of overwriting failed attempts',async()=>{
   const {client}=getConnection();vi.spyOn(client,'wireManifest').mockResolvedValue({...manifest,parts:{...manifest.parts,upstream_000002_out:part('upstream_000002_out'),upstream_000002_in:part('upstream_000002_in')}});const read=vi.spyOn(client,'historyBodyBytes').mockResolvedValue(new TextEncoder().encode('data: [DONE]\r\n\r\n'));
   renderWithQuery(<RequestBodyTabs request={request}/>);fireEvent.click(screen.getByRole('tab',{name:'Upstream response'}));await screen.findByLabelText('Upstream call');fireEvent.change(screen.getByLabelText('Upstream call'),{target:{value:'upstream_000001'}});await waitFor(()=>expect(read).toHaveBeenCalledWith(request.id,'upstream_000001_in'));

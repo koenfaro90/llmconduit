@@ -34,3 +34,9 @@ it('reads the SSE event field when the payload has no type property',()=>{
  const result=assembleOutput('event: response.output_text.delta\ndata: '+JSON.stringify({item_id:'m',delta:'Hello'})+'\n\nevent: response.completed\ndata: '+JSON.stringify({response:{status:'completed',output:[{id:'m',type:'message',content:[{type:'output_text',text:'Hello'}]}]}})+'\n\n');
  expect(result.items.map(i=>i.text)).toEqual(['Hello']);expect(result.stopReason).toBe('response.completed');expect(result.partial).toBe(false);
 });
+
+it('distinguishes terminal protocol markers from a single completed choice',()=>{
+ const choice='data: '+JSON.stringify({choices:[{index:0,delta:{content:'Answer'},finish_reason:'stop'}]})+'\n\n';
+ expect(assembleOutput(choice).terminal).toBe(false);expect(assembleOutput(choice+'data: [DONE]\n\n').terminal).toBe(true);
+ expect(assembleOutput('event: message_stop\ndata: {"type":"message_stop"}\n\n').terminal).toBe(true);
+});
