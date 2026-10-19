@@ -16,14 +16,14 @@ const history: HistoryRequest = {
 const live: FlowSummary = {
   api_call_id: 'api_1', method: 'POST', uri: '/v1/responses', status: 'open',
   started_ms: 1000, cost_confidence: 'unavailable', model_served: 'provider-model',
-  first_content_delta_ms: 1250,
+  first_content_delta_ms: 1250, first_upstream_byte_ms:1100,
   usage: { prompt: 80, completion: 12, total: 92 },
 };
 
 describe('durable request display', () => {
   it('shows an open request and progressively reported streaming values', () => {
     expect(requestDisplay(history, live, 2400)).toMatchObject({
-      status: 'decoding', endMs: null, ttftMs: 250, durationMs: 1400,
+      status: 'decoding', endMs: null, ttftMs: 100, durationMs: 1400,
       inputTokens: 80, outputTokens: 12, model: 'friendly-alias → provider-model',
       newInputTokens: null, newInputPercent: null,
       session: 'codex-session',
@@ -32,11 +32,11 @@ describe('durable request display', () => {
 
   it('uses the first streamed output while the phase-only flow mutation awaits a status frame', () => {
     expect(requestDisplay(history, { ...live, first_content_delta_ms: null }, 2400, { firstOutputAtMs: 1420, streamingPhase: 'decoding' }))
-      .toMatchObject({ status: 'decoding', ttftMs: 420 });
+      .toMatchObject({ status: 'decoding', ttftMs: 100 });
   });
 
   it('follows dispatch and output events through another upstream round', () => {
-    const beforeDispatch = { ...live, first_content_delta_ms: null, routing_decision_ms: null };
+    const beforeDispatch = { ...live, first_content_delta_ms: null, first_upstream_byte_ms:null, routing_decision_ms: null };
     expect(requestDisplay(history, beforeDispatch, 2400).status).toBe('queued');
     expect(requestDisplay(history, beforeDispatch, 2400, { streamingPhase: 'prefilling' }).status).toBe('prefilling');
     expect(requestDisplay(history, live, 2400, { firstOutputAtMs: 1250, streamingPhase: 'prefilling' }).status).toBe('prefilling');
@@ -82,16 +82,16 @@ describe('durable request display', () => {
 
   it('uses the live clock for live TTFT and derives End from a terminal elapsed time', () => {
     expect(requestDisplay(history, {
-      ...live, started_ms: 800, ingress_ms: 700, first_content_delta_ms: 1200,
+      ...live, started_ms: 800, ingress_ms: 700, first_content_delta_ms: 1200,first_upstream_byte_ms:1000,
       status: 'completed', elapsed_ms: 900, finished_ms: null,
-    }, 9000)).toMatchObject({ ttftMs: 500, endMs: 1600, durationMs: 900 });
+    }, 9000)).toMatchObject({ ttftMs: 300, endMs: 1600, durationMs: 900 });
   });
 
   it('uses measured terminal values when the SQL writer catches up', () => {
     const done = { ...history, status: 'completed', completed_at_ms: 3000, first_token_at_ms: 1300,
-      input_tokens: 91, output_tokens: 15, resolved_model: 'final-model' };
+      input_tokens: 91, output_tokens: 15, resolved_model: 'final-model',timings_json:JSON.stringify({first_upstream_byte_ms:1150}) };
     expect(requestDisplay(done, live, 9000)).toMatchObject({
-      status: 'completed', endMs: 3000, ttftMs: 300, durationMs: 2000,
+      status: 'completed', endMs: 3000, ttftMs: 150, durationMs: 2000,
       inputTokens: 91, outputTokens: 15,
     });
   });
@@ -131,21 +131,36 @@ it('preserves stored reasoning, phase timing and attempt details in historical r
 it('retains reasoning/tool-only TTFT and per-round average decode after reload', () => {
   const row = {...history, status:'completed', completed_at_ms:4000, first_token_at_ms:1200,
     output_tokens:1000, reasoning_tokens:900,
-    timings_json:JSON.stringify({first_generation_delta_ms:1200, generation_duration_us:2_000_000,
+    timings_json:JSON.stringify({first_upstream_byte_ms:1100,first_generation_delta_ms:1200, generation_duration_us:2_000_000,
       generation_tokens:998, generation_timing_complete:true})};
-  expect(requestDisplay(row,null,9000)).toMatchObject({ttftMs:200, decodingTokensPerSec:499,decodeQuality:'derived'});
+  expect(requestDisplay(row,null,9000)).toMatchObject({ttftMs:100, decodingTokensPerSec:499,decodeQuality:'derived'});
   expect(historyFlowDetail(row).first_content_delta_ms).toBeNull();
   expect(historyFlowDetail(row)).toMatchObject({first_generation_delta_ms:1200,generation_duration_us:2_000_000,generation_tokens:998,generation_timing_complete:true});
 });
-it('does not invent historical tool-only timings from response headers',()=>{
+it('uses historical response headers for TTFT independently of generation timing',()=>{
   const row={...history,status:'completed',completed_at_ms:4000,output_tokens:300,
     timings_json:JSON.stringify({first_upstream_byte_ms:1100,stream_end_ms:3990})};
-  expect(requestDisplay(row,null,9000)).toMatchObject({ttftMs:null,decodingTokensPerSec:null});
+  expect(requestDisplay(row,null,9000)).toMatchObject({ttftMs:100,decodingTokensPerSec:null});
 });
 it('labels the wider historical content window and rejects buffered/incomplete generation timings',()=>{
   const row={...history,status:'completed',completed_at_ms:4000,first_token_at_ms:1200,output_tokens:101,
     timings_json:JSON.stringify({stream_end_ms:3200})};
-  expect(requestDisplay(row,null,9000)).toMatchObject({ttftMs:200,decodingTokensPerSec:50});
+  expect(requestDisplay(row,null,9000)).toMatchObject({ttftMs:null,decodingTokensPerSec:50});
   expect(requestDisplay(row,null,9000).decodeNote).toContain('Historical approximation');
   expect(requestDisplay({...row,timings_json:JSON.stringify({generation_timing_complete:false,stream_end_ms:3200})},null,9000).decodingTokensPerSec).toBeNull();
+});
+
+it('never waits for reasoning, content or monitor output to determine first-byte TTFT',()=>{
+ const row={...history,status:'completed',completed_at_ms:5000,first_token_at_ms:4000,
+   timings_json:JSON.stringify({ingress_ms:1000,first_upstream_byte_ms:1100,first_generation_delta_ms:2000,first_content_delta_ms:4000})};
+ expect(requestDisplay(row,null,9000)).toMatchObject({ttftMs:100});
+ expect(requestDisplay({...row,timings_json:null},null,9000,{firstOutputAtMs:2000})).toMatchObject({ttftMs:null});
+});
+
+it('uses the serving response byte after fallback, or the first received error response when all attempts fail',()=>{
+ const failed={provider:'a',model:'x',start_ms:1000,end_ms:1200,status:'failed' as const,first_upstream_byte_ms:1200};
+ const served={provider:'b',model:'x',start_ms:1200,end_ms:1400,status:'served' as const,first_upstream_byte_ms:1400};
+ const row={...history,status:'completed',completed_at_ms:3000,attempts_json:JSON.stringify([failed,served])};
+ expect(requestDisplay(row,null,9000).ttftMs).toBe(400);
+ expect(requestDisplay({...row,status:'failed',attempts_json:JSON.stringify([failed])},null,9000).ttftMs).toBe(200);
 });

@@ -20,8 +20,8 @@ it('shows inbound settings, keeps false/absence distinct, and filters/sorts the 
 
 it('shows, sorts and filters completed TTFT/decode values using the displayed measurements',()=>{
  const a={...MOCK_HISTORY_REQUESTS[0]!,id:'timing-a',display_number:1,status:'completed',created_at_ms:1000,completed_at_ms:4000,first_token_at_ms:1200,
-   timings_json:JSON.stringify({first_generation_delta_ms:1200,generation_duration_us:2_000_000,generation_tokens:400,generation_timing_complete:true})};
- const b={...a,id:'timing-b',display_number:2,first_token_at_ms:1500,timings_json:JSON.stringify({first_generation_delta_ms:1500,generation_duration_us:2_000_000,generation_tokens:200,generation_timing_complete:true})};
+   timings_json:JSON.stringify({first_upstream_byte_ms:1100,first_generation_delta_ms:1200,generation_duration_us:2_000_000,generation_tokens:400,generation_timing_complete:true})};
+ const b={...a,id:'timing-b',display_number:2,first_token_at_ms:1500,timings_json:JSON.stringify({first_upstream_byte_ms:1400,first_generation_delta_ms:1500,generation_duration_us:2_000_000,generation_tokens:200,generation_timing_complete:true})};
  renderWithQuery(<RequestTable rows={[a,b]} columns={['number','ttft','decodeSpeed']}/>);
  expect(screen.getAllByTestId('request-decode-speed')[0]).toHaveAttribute('data-quality','derived');
  fireEvent.click(screen.getByRole('button',{name:'Sort Decode speed'}));

@@ -1,6 +1,7 @@
 import type { ApiKeyRecord, AuthApiKey, AuthUser, DebugWsMessage, FlowDetail, FlowStatus, FlowSummary, HistoryRequest, Usage, UserRecord } from '../../api/types';
 import {isAttempt} from '../../api/types';
 import { fmtModelPair } from '../FlowTable/format';
+import {firstUpstreamByteMs} from '../FlowDetail/latencyBreakdown';
 
 export interface IdentityOptions {
   users: Array<{ id: string; name: string }>;
@@ -106,7 +107,8 @@ export function requestDisplay(row: HistoryRequest, live: FlowSummary | null, no
   const endMs = terminal ? row.completed_at_ms ?? live?.finished_ms ??
     (live?.elapsed_ms == null || liveStartMs == null ? null : liveStartMs + live.elapsed_ms) : null;
   const ttftStart = persistedTerminal ? stored.ingress_ms ?? row.created_at_ms : liveStartMs ?? row.created_at_ms;
-  const ttftMs = firstOutputAtMs == null ? null : Math.max(0, firstOutputAtMs - ttftStart);
+  const firstByte = firstUpstreamByteMs(stored) ?? firstUpstreamByteMs(live);
+  const ttftMs = firstByte == null ? null : Math.max(0, firstByte - ttftStart);
   const durationMs = terminal
     ? row.completed_at_ms != null ? Math.max(0, row.completed_at_ms - row.created_at_ms) : live?.elapsed_ms ?? (endMs == null ? null : Math.max(0, endMs - row.created_at_ms))
     : Math.max(0, nowMs - row.created_at_ms);
@@ -143,10 +145,9 @@ export function requestDisplay(row: HistoryRequest, live: FlowSummary | null, no
       ? 'Average gateway-observed decode: reported completion tokens minus one per round, divided by summed first-to-last generated-output windows. Includes reasoning; excludes prefill and server-tool waits. Network buffering can affect this rate; it is not engine timing.'
       : legacyRate != null ? 'Historical approximation: reported output tokens minus one, divided by first content delivery to stream end. May include buffering and tool waits.'
         : liveRate != null ? 'Live rate from consecutive upstream-reported completion-token counts.'
-          : 'Unavailable: no complete streamed generation window and reported token count. HTTP headers are not a first token.',
-    ttftNote: generationFirst != null ? 'Request ingress to first generated upstream text, reasoning, refusal or tool arguments (gateway-observed).'
-      : firstOutputAtMs != null ? 'First observed output latency; historical records use first content delivery.'
-        : 'Unavailable: first generated output was not captured for this request.',
+          : 'Unavailable: no complete streamed generation window and reported token count.',
+    ttftNote: firstByte != null ? 'Request ingress to first upstream response byte (response headers); excludes waiting for reasoning, content or tool arguments.'
+      : 'Unavailable: no upstream first-byte timestamp was captured.',
     endMs,
     ttftMs,
     durationMs,

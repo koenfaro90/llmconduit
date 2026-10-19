@@ -62,13 +62,12 @@ search retained history.
 
 ## Request timing columns
 
-TTFT uses the first nonempty upstream text, reasoning, refusal or tool-argument
-payload relative to request ingress. Role announcements, empty deltas, signatures,
-response headers and usage-only chunks do not count. This gateway-observed clock
-is separate from `first_content_delta_ms`, which still measures content delivery
-to the client. Both clocks survive in `timings_json`; `first_token_at_ms` projects
-the generated-output clock for new requests. No timing is reconstructed from raw
-body archives, which do not contain per-chunk arrival times.
+TTFT uses request ingress to the first upstream response byte, including response
+headers, as defined by the operator. It reads persisted `first_upstream_byte_ms`
+and attempt timings, so historical requests with a byte timestamp also work.
+Reasoning, content and tool generation clocks remain separate and do not determine
+TTFT. If the byte timestamp is missing, TTFT stays unavailable. No timing is
+reconstructed from raw body archives, which lack per-chunk arrival times.
 
 After completion, Decode speed retains an average from upstream-reported completion
 tokens (including reasoning, without double counting) minus one first token per
@@ -81,8 +80,8 @@ Live speed still requires successive reported token-counter updates; final-only
 usage cannot provide an instantaneous live speed.
 
 Historical content-only records can show a clearly identified approximation using
-first content delivery through stream end. Historical tool-only requests without
-a first-token timestamp remain unavailable. HTTP TTFB is never substituted for TTFT.
+first content delivery through stream end. Historical tool-only requests can show TTFT from their existing response-byte
+timestamp independently of missing generation clocks.
 New timings are flattened onto REST list/detail and WebSocket flow updates, stored
 independently of bounded live-flow retention, and reused for numeric sorting and
 filtering in the shared request table.

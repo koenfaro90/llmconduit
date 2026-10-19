@@ -21,7 +21,7 @@ const HEADERS: Record<RequestColumn, { label: string; width: string; title?: str
   harness: { label: 'Harness', width: 'w-[100px]' },
   session: { label: 'Session', width: 'w-[130px]' },
   status: { label: 'Status', width: 'w-[100px]' },
-  ttft: { label: 'TTFT', width: 'w-[70px]', numeric: true },
+  ttft: { label: 'TTFT', width: 'w-[70px]', numeric: true, title: 'Request ingress to first upstream response byte (response headers)' },
   duration: { label: 'Total duration', width: 'w-[105px]', numeric: true },
   tokensIn: { label: 'Tokens IN', width: 'w-[80px]', numeric: true, title: 'Upstream-reported usage; may arrive only at completion' },
   cached: { label: 'Cached IN', width: 'w-[90px]', numeric: true, title: 'Reported cached input tokens; — when not reported' },
@@ -55,7 +55,6 @@ function requestTableColumnDefs(columns: readonly RequestColumn[] = ALL_REQUEST_
 function requestSortValue(row:HistoryRequest,column:RequestColumn):string|number|null {
  const fields:Partial<Record<RequestColumn,keyof HistoryRequest>>={number:'display_number',start:'created_at_ms',end:'completed_at_ms',id:'id',user:'user_id',key:'virtual_key_id',harness:'harness',session:'session_id',status:'status',tokensIn:'input_tokens',cached:'cached_tokens',tokensOut:'output_tokens',model:'client_model',provider:'backend',protocol:'client_protocol',kind:'session_kind',lineage:'divergence_kind'};
  if(column==='duration')return row.completed_at_ms==null?null:row.completed_at_ms-row.created_at_ms;
- if(column==='ttft')return row.first_token_at_ms==null?null:row.first_token_at_ms-row.created_at_ms;
  if(column==='newIn')return row.input_tokens==null||row.cached_tokens==null?null:row.input_tokens-row.cached_tokens;
  const field=fields[column];const value=field?row[field]:null;return typeof value==='string'||typeof value==='number'?value:null;
 }
