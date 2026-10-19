@@ -59,7 +59,11 @@ uses same-origin `Origin`/`Host` validation for dashboard WebSockets. Kill requi
 + a CSRF token.
 
 Request inspectors use full-width HTTP body tabs, with Copy and Download, rather
-than transformation/diff panes. `wire_capture_dir` enables exact HTTP entity-body
+than transformation/diff panes. Valid JSON displays with whitespace-only pretty
+printing; Copy/Download retain original bytes. Request tables expose client-supplied
+reasoning/thinking/clear_thinking/token limits from a small persisted inbound
+projection, with historical page backfill independent of raw capture.
+`wire_capture_dir` enables exact HTTP entity-body
 archives (`src/wire_capture.rs`): no truncation/redaction/reformatting, private
 files, lossless byte-chunk deduplication and administrator-only reads. This is the
 explicitly requested raw-capture exception to diagnostic redaction rules below;

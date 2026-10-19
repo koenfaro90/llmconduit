@@ -56,6 +56,7 @@ pub mod recipe_import;
 pub(crate) mod redaction;
 pub mod replay;
 pub mod request_log;
+pub mod request_settings;
 pub mod runtime_configuration;
 pub mod search;
 pub mod session_hub;

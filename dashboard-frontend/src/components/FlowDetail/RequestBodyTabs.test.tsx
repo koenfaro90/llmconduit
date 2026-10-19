@@ -1,7 +1,7 @@
 import {beforeEach,afterEach,describe,it,expect,vi} from 'vitest';
 import {act,cleanup,fireEvent,screen,waitFor} from '@testing-library/react';
 import {RequestBodyTabs} from './RequestBodyTabs';
-import {decodeExact,exchanges,partFor,type WireManifest,type WirePart} from './wireModel';
+import {bodyPresentation,decodeExact,exchanges,partFor,type WireManifest,type WirePart} from './wireModel';
 import {renderWithQuery,resetWorld} from '../testHarness';
 import {getConnection} from '../../api/connection';
 import {MOCK_HISTORY_REQUESTS} from '../../api/mock';
@@ -13,6 +13,15 @@ const part=(file:string):WirePart=>({file:file+'.body',chunks:[],headers:[],meth
 const manifest:WireManifest={schema:'llmconduit-exact-http/v1',api_call_id:request.id,parts:Object.fromEntries(['client_in','upstream_000001_out','upstream_000001_in','client_out'].map(k=>[k,part(k)]))};
 beforeEach(()=>{resetWorld({mock:true});Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:copy}});copy.mockClear();});afterEach(()=>{cleanup();vi.restoreAllMocks();});
 describe('complete HTTP body tabs',()=>{
+ it('formats JSON only for display, preserving number/string lexemes and raw clipboard',async()=>{
+  const json=' {"n":900719925474099312345,"escaped":"\\u0061","a":[],"a":{}}\r\n';
+  const shown=bodyPresentation(json);expect(shown.language).toBe('json');expect(shown.value).toContain('\n  "n": 900719925474099312345,');expect(shown.value).toContain('"escaped": "\\u0061"');expect(shown.value.match(/"a":/g)).toHaveLength(2);expect(()=>JSON.parse(shown.value)).not.toThrow();
+  const {client}=getConnection();vi.spyOn(client,'wireManifest').mockResolvedValue(manifest);vi.spyOn(client,'historyBodyBytes').mockResolvedValue(new TextEncoder().encode(json));
+  renderWithQuery(<RequestBodyTabs request={request}/>);await waitFor(()=>expect(screen.getByLabelText('Inbound request')).toHaveValue(shown.value));
+  fireEvent.click(screen.getByRole('button',{name:'Copy body'}));await waitFor(()=>expect(copy).toHaveBeenLastCalledWith(json));
+  fireEvent.click(screen.getByRole('button',{name:'Show raw'}));expect(screen.getByLabelText('Inbound request')).toHaveValue(json.replace(/\r\n/g,'\n'));
+  expect(bodyPresentation('data: {"token":"x"}\n\n').language).toBe('plaintext');
+ });
  it('copies every original character including BOM, escapes, CRLF and content beyond the old limit',async()=>{
   const {client}=getConnection();vi.spyOn(client,'wireManifest').mockResolvedValue(manifest);const read=vi.spyOn(client,'historyBodyBytes').mockResolvedValue(new TextEncoder().encode(raw));
   renderWithQuery(<RequestBodyTabs request={request}/>);

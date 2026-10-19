@@ -790,7 +790,14 @@ export interface SessionsResponse {
 }
 
 /** A durable request row as the history API returns it (subset the UI reads). */
+export interface InboundSettings {
+  reasoning_effort: unknown;
+  thinking: unknown;
+  clear_thinking: unknown;
+  max_tokens: unknown;
+}
 export interface HistoryRequest {
+  inbound_settings?: InboundSettings | null;
   id: string;
   display_number?: number | null;
   session_display_number?: number | null;

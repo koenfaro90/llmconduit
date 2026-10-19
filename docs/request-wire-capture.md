@@ -7,8 +7,11 @@ own persistent volumes. It applies to new instrumented inference requests live.
 The request inspector uses separate Headers, Inbound request, Upstream request,
 Upstream response and Inbound response tabs. Copy uses the original UTF-8 bytes,
 including whitespace, escapes, BOM and SSE framing; Download also preserves
-binary and compressed bodies. There is no body-size ceiling, preview clipping,
-JSON pretty-printing, redaction or media substitution in this archive or viewer.
+binary and compressed bodies. Valid JSON displays with indentation and syntax
+highlighting by default, with a Show raw toggle. Display formatting changes only
+whitespace between JSON tokens, preserving large numeric literals, duplicate keys
+and string escapes. Copy and Download always export the original body. There is
+no body-size ceiling, preview clipping, redaction or media substitution in this archive.
 Existing request-admission and inference-protocol limits remain separate from
 capture; a cancelled transport is recorded as incomplete, never as a full response.
 
@@ -40,3 +43,16 @@ cannot recover bytes previously redacted or clipped: the UI explicitly identifie
 legacy reconstructed captures and offers their stored request/response contents.
 Raw archives have no automatic retention/pruning; SQL history clearing does not
 remove this separate archive. Recorded bodies include any credentials they carried.
+
+Request tables include Reasoning effort, Thinking, clear_thinking and max_tokens.
+These are client-supplied inbound settings, not upstream/profile defaults. Explicit
+false/zero remain visible; absence is shown as `—`. The projection recognizes
+`reasoning_effort` / `reasoning.effort`; top-level `thinking` / `clear_thinking`
+and their `chat_template_kwargs` equivalents (including `enable_thinking`);
+token limits use `max_completion_tokens`, then `max_tokens`, then
+`max_output_tokens`. Thinking objects remain visible as JSON. Migration0019 stores
+the small projection independently of exact capture. Historical rows backfill from
+retained inbound skeleton events in one indexed batch for the requested page,
+without reconstructing message blobs or sending bodies to the table. Column
+sorting/filtering operates on the loaded page; the view's server filters still
+search retained history.

@@ -7,7 +7,7 @@ import { useAuth, useDashboard } from '../../store/hooks';
 import { fmtElapsed, fmtTokens, fmtTokensPerSec } from '../FlowTable/format';
 import { DataTable } from '../ui/DataTable';
 import type { DataTableColumn, DataTablePagination } from '../ui/dataTableModel';
-import { decodingRate, identityOptions, requestDisplay, requestIdentity, requestSignals, type RequestDisplay, type RequestSignals, type UsageSample } from './requestsModel';
+import { decodingRate, inboundSetting, identityOptions, requestDisplay, requestIdentity, requestSignals, type RequestDisplay, type RequestSignals, type UsageSample } from './requestsModel';
 import { divergenceLabel } from './lineageModel';
 import { ALL_REQUEST_COLUMNS, DEFAULT_HIDDEN_REQUEST_COLUMNS, type RequestColumn } from './requestColumns';
 
@@ -28,6 +28,10 @@ const HEADERS: Record<RequestColumn, { label: string; width: string; title?: str
   newIn: { label: 'New IN', width: 'w-[105px]', numeric: true, title: 'Uncached input tokens = reported input minus reported cached input; — means cache usage was not reported.' },
   tokensOut: { label: 'Tokens OUT', width: 'w-[80px]', numeric: true, title: 'Upstream-reported usage; may arrive only at completion' },
   decodeSpeed: { label: 'Decode speed', width: 'w-[105px]', numeric: true, title: 'Rate from consecutive reported output-token counts while decoding.' },
+  reasoningEffort: { label: 'Reasoning effort', width: 'w-[140px]', title: 'Inbound reasoning_effort or reasoning.effort; no profile defaults.' },
+  thinking: { label: 'Thinking', width: 'w-[190px]', title: 'Inbound thinking, or chat_template_kwargs.thinking / enable_thinking.' },
+  clearThinking: { label: 'clear_thinking', width: 'w-[135px]', title: 'Inbound clear_thinking, including chat_template_kwargs.' },
+  maxTokens: { label: 'max_tokens', width: 'w-[120px]', numeric: true, title: 'Inbound max_completion_tokens, max_tokens, or max_output_tokens, in that order.' },
   model: { label: 'Model · alias → served', width: '' },
   provider: { label: 'Provider', width: 'w-[120px]' },
   protocol: { label: 'Protocol', width: 'w-[110px]' },
@@ -38,6 +42,7 @@ const HEADERS: Record<RequestColumn, { label: string; width: string; title?: str
 function requestTableColumnDefs(columns: readonly RequestColumn[] = ALL_REQUEST_COLUMNS): DataTableColumn<HistoryRequest>[] {
   return columns.map((column) => ({
     id: column,
+    value: row => inboundSetting(row,column) ?? requestSortValue(row,column),
     label: HEADERS[column].label,
     width: `${Number(HEADERS[column].width.match(/\d+/)?.[0]) || 180}px`,
     align: HEADERS[column].numeric ? 'right' : 'left',
@@ -45,6 +50,14 @@ function requestTableColumnDefs(columns: readonly RequestColumn[] = ALL_REQUEST_
     required: column === 'number',
     defaultHidden: DEFAULT_HIDDEN_REQUEST_COLUMNS.includes(column),
   }));
+}
+
+function requestSortValue(row:HistoryRequest,column:RequestColumn):string|number|null {
+ const fields:Partial<Record<RequestColumn,keyof HistoryRequest>>={number:'display_number',start:'created_at_ms',end:'completed_at_ms',id:'id',user:'user_id',key:'virtual_key_id',harness:'harness',session:'session_id',status:'status',tokensIn:'input_tokens',cached:'cached_tokens',tokensOut:'output_tokens',model:'client_model',provider:'backend',protocol:'client_protocol',kind:'session_kind',lineage:'divergence_kind'};
+ if(column==='duration')return row.completed_at_ms==null?null:row.completed_at_ms-row.created_at_ms;
+ if(column==='ttft')return row.first_token_at_ms==null?null:row.first_token_at_ms-row.created_at_ms;
+ if(column==='newIn')return row.input_tokens==null||row.cached_tokens==null?null:row.input_tokens-row.cached_tokens;
+ const field=fields[column];const value=field?row[field]:null;return typeof value==='string'||typeof value==='number'?value:null;
 }
 
 function dateTime(ms: number | null): string {
@@ -112,7 +125,7 @@ export function RequestTable({ rows, selectedId = null, onSelect, columns = ALL_
     [authUsers.data, authKeys.data, legacyUsers.data, legacyKeys.data]);
 
   const tableColumns = requestTableColumnDefs(columns);
-  return <DataTable id={tableId} columnStateKey={`${tableId}-numeric`} rows={rows} rowKey={(row) => row.id} columns={tableColumns}
+  return <DataTable interactive id={tableId} columnStateKey={`${tableId}-numeric`} rows={rows} rowKey={(row) => row.id} columns={tableColumns}
     rowTestId={rowTestId} tableTestId="request-table" pagination={pagination} emptyMessage={emptyMessage}
     className="h-full" renderRow={(row, visible) => {
       const live = liveFlows?.get(row.id) ?? null;
@@ -153,6 +166,10 @@ function RequestCell({ column, row, display, identity }: {
   identity: { user: string; key: string };
 }) {
   switch (column) {
+    case 'reasoningEffort': case 'thinking': case 'clearThinking': case 'maxTokens': {
+      const value=inboundSetting(row,column);
+      return <td className={`truncate px-2 py-2 text-text-muted ${column==='maxTokens'?'text-right tabular-nums':''}`} title={value==null?'Not supplied in the inbound request':String(value)}>{value??'—'}</td>;
+    }
     case 'start': return <td className="px-2 py-2 tabular-nums text-text-muted" title={row.id}>{dateTime(row.created_at_ms)}</td>;
     case 'end': return <td className="px-2 py-2 tabular-nums text-text-muted">{dateTime(display.endMs)}</td>;
     case 'number': return <td className="px-2 py-2 font-mono text-text" title={row.id}>{row.display_number == null ? '—' : `R-${row.display_number}`}</td>;

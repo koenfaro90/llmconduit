@@ -216,3 +216,10 @@ export function historyFlowDetail(row: HistoryRequest, inboundBody?: unknown, up
     cost_confidence: 'unavailable',
   };
 }
+
+/** Explicit false/zero are values; absence does not imply a profile default. */
+export function inboundSetting(row:HistoryRequest,column:string):string|number|null {
+ const key={reasoningEffort:'reasoning_effort',thinking:'thinking',clearThinking:'clear_thinking',maxTokens:'max_tokens'}[column] as keyof NonNullable<HistoryRequest['inbound_settings']>|undefined;
+ const value=key?row.inbound_settings?.[key]:null;
+ return value==null?null:typeof value==='string'||typeof value==='number'?value:JSON.stringify(value);
+}

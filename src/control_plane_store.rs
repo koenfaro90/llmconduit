@@ -225,6 +225,7 @@ pub struct UsageBucket {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct RequestSummary {
+    pub inbound_settings: Option<crate::request_settings::InboundSettings>,
     pub id: String,
     pub display_number: Option<i64>,
     pub session_display_number: Option<i64>,
@@ -1501,7 +1502,8 @@ const REQUEST_COLUMNS: &str = "SELECT id, response_id, conversation_id, virtual_
     client_source, harness, harness_version, harness_session_id, harness_sub_session_id, \
     harness_parent_session_id, session_kind, session_id, chain_parent_request_id, item_count, \
     shared_prefix_items, divergence_kind, divergence_index, cache_bust, user_id, display_number, \
-    (SELECT display_number FROM sessions WHERE sessions.id = requests.session_id) FROM requests";
+    (SELECT display_number FROM sessions WHERE sessions.id = requests.session_id), \
+    inbound_settings_json FROM requests";
 
 fn decode_request<R>(row: &R) -> StoreResult<RequestSummary>
 where
@@ -1555,6 +1557,11 @@ where
         user_id: row.try_get(36).map_err(store_error)?,
         display_number: row.try_get(37).map_err(store_error)?,
         session_display_number: row.try_get(38).map_err(store_error)?,
+        inbound_settings: row
+            .try_get::<Option<String>, _>(39)
+            .map_err(store_error)?
+            .map(|text| serde_json::from_str(&text).map_err(store_error))
+            .transpose()?,
     })
 }
 
@@ -1914,6 +1921,57 @@ macro_rules! fetch_all_decoded {
 }
 
 impl SqlStore {
+    /// Backfill only requested legacy rows in one indexed batch. Subsequent reads
+    /// use the small projection; no browser fetches whole bodies for table cells.
+    async fn hydrate_inbound_settings(&self, rows: &mut [RequestSummary]) -> StoreResult<()> {
+        let ids: Vec<_> = rows
+            .iter()
+            .filter(|row| row.inbound_settings.is_none())
+            .map(|row| row.id.as_str())
+            .collect();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let sql = format!(
+            "SELECT request_id, seq, ts_ms, hop, kind, payload, bytes FROM request_events WHERE hop = 'client_in' AND request_id IN ({}) ORDER BY seq",
+            placeholders(self.postgres(), ids.len())
+        );
+        macro_rules! load {
+            ($pool:expr) => {{
+                let mut query = sqlx::query(&sql);
+                for id in &ids {
+                    query = query.bind(id);
+                }
+                query
+                    .fetch_all($pool)
+                    .await
+                    .map_err(store_error)?
+                    .iter()
+                    .map(decode_event)
+                    .collect::<StoreResult<Vec<_>>>()?
+            }};
+        }
+        let events = match &self.pool {
+            SqlPool::Sqlite(pool) => load!(pool),
+            SqlPool::Postgres(pool) => load!(pool),
+        };
+        let update = format!(
+            "UPDATE requests SET inbound_settings_json = {} WHERE id = {} AND inbound_settings_json IS NULL",
+            placeholder(self.postgres(), 1),
+            placeholder(self.postgres(), 2)
+        );
+        for event in events {
+            let settings =
+                crate::request_settings::InboundSettings::from_event(event.payload.as_deref());
+            let serialized = serde_json::to_string(&settings).map_err(store_error)?;
+            execute!(self, &update, serialized, &event.request_id);
+            if let Some(row) = rows.iter_mut().find(|row| row.id == event.request_id) {
+                row.inbound_settings = Some(settings);
+            }
+        }
+        Ok(())
+    }
+
     /// Recover a legacy SQL operational configuration without mutating it.
     ///
     /// A nonblank name-map/JSON document in `settings.operational` wins and is
@@ -2258,6 +2316,17 @@ impl PersistenceWriter for SqlStore {
             items,
             blobs,
         } = body;
+        let inbound_settings = (event.hop == "client_in").then(|| {
+            serde_json::to_string(&crate::request_settings::InboundSettings::from_event(
+                event.payload.as_deref(),
+            ))
+            .expect("inbound settings serialize")
+        });
+        let update_settings = format!(
+            "UPDATE requests SET inbound_settings_json = {} WHERE id = {}",
+            placeholder(pg, 1),
+            placeholder(pg, 2)
+        );
 
         macro_rules! store_in_transaction {
             ($pool:expr) => {{
@@ -2297,6 +2366,14 @@ impl PersistenceWriter for SqlStore {
                     .execute(&mut *transaction)
                     .await
                     .map_err(store_error)?;
+                if let Some(settings) = &inbound_settings {
+                    sqlx::query(&update_settings)
+                        .bind(settings)
+                        .bind(&event.request_id)
+                        .execute(&mut *transaction)
+                        .await
+                        .map_err(store_error)?;
+                }
                 transaction.commit().await.map_err(store_error)?;
             }};
         }
@@ -2477,7 +2554,7 @@ impl PersistenceStore for SqlStore {
             "{REQUEST_COLUMNS} WHERE id = {}",
             placeholder(self.postgres(), 1)
         );
-        match &self.pool {
+        let mut row = match &self.pool {
             SqlPool::Sqlite(pool) => sqlx::query(&sql)
                 .bind(id)
                 .fetch_optional(pool)
@@ -2492,7 +2569,12 @@ impl PersistenceStore for SqlStore {
                 .map_err(store_error)?
                 .map(|row| decode_request(&row))
                 .transpose(),
+        }?;
+        if let Some(row) = &mut row {
+            self.hydrate_inbound_settings(std::slice::from_mut(row))
+                .await?;
         }
+        Ok(row)
     }
 
     async fn request_events(&self, request_id: &str) -> StoreResult<Vec<EventRow>> {
@@ -2743,7 +2825,7 @@ impl PersistenceStore for SqlStore {
                     .replace('_', "\\_");
                 format!("%{escaped}%")
             });
-        Ok(fetch_all_decoded!(
+        let mut rows = fetch_all_decoded!(
             self,
             &sql,
             [
@@ -2768,7 +2850,9 @@ impl PersistenceStore for SqlStore {
                 filter.facets_json.as_deref().unwrap_or("{}")
             ],
             decode_request
-        ))
+        );
+        self.hydrate_inbound_settings(&mut rows).await?;
+        Ok(rows)
     }
 
     async fn request_facets(&self) -> StoreResult<RequestFacets> {
@@ -4858,6 +4942,70 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn inbound_settings_projection_survives_finish_and_backfills_old_rows() {
+        let store = SqlStore::connect_sqlite("sqlite::memory:").await.unwrap();
+        let body = serde_json::json!({"reasoning_effort":"high","thinking":false,"chat_template_kwargs":{"clear_thinking":true},"max_completion_tokens":8192,"messages":[]});
+        for (id, legacy) in [("new-settings", false), ("legacy-settings", true)] {
+            store.begin_request(request(id)).await.unwrap();
+            let event = EventRow {
+                request_id: id.into(),
+                seq: 1,
+                ts_ms: 100,
+                hop: "client_in".into(),
+                kind: "request".into(),
+                payload: Some(serde_json::json!({"content":body.to_string()}).to_string()),
+                bytes: None,
+            };
+            if legacy {
+                store.append_event(event).await.unwrap();
+            } else {
+                store
+                    .store_body(BodyWrite {
+                        event,
+                        items: vec![],
+                        blobs: vec![],
+                    })
+                    .await
+                    .unwrap();
+            }
+            store.finish_request(id, finish()).await.unwrap();
+        }
+        let rows = store.list_requests(50).await.unwrap();
+        assert_eq!(rows.len(), 2);
+        for row in rows {
+            let settings = row.inbound_settings.unwrap();
+            assert_eq!(settings.reasoning_effort, Some(serde_json::json!("high")));
+            assert_eq!(settings.thinking, Some(serde_json::json!(false)));
+            assert_eq!(settings.clear_thinking, Some(serde_json::json!(true)));
+            assert_eq!(settings.max_tokens, Some(serde_json::json!(8192)));
+            assert_eq!(
+                store
+                    .get_request(&row.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .inbound_settings,
+                Some(settings)
+            );
+        }
+        // Once projected, ordinary list reads no longer need the old body.
+        if let SqlPool::Sqlite(pool) = &store.pool {
+            sqlx::query("DELETE FROM request_events")
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        assert!(
+            store
+                .list_requests(50)
+                .await
+                .unwrap()
+                .iter()
+                .all(|row| row.inbound_settings.is_some())
+        );
+    }
+
     fn finish() -> RequestFinish {
         RequestFinish {
             response_id: Some("resp-1".to_string()),
@@ -4978,7 +5126,7 @@ mod tests {
         assert_eq!(
             migration_versions,
             vec![
-                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19
             ]
         );
         let request_indexes: Vec<String> = match &store.pool {

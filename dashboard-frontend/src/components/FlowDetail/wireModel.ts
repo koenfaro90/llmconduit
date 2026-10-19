@@ -18,3 +18,19 @@ export function legacyHeaders(detail:StoredRequestDetail|undefined):Array<{id:st
  const raw=detail?.events.find(e=>e.hop==='client_in')?.payload;if(!raw)return [];
  try{const headers=(JSON.parse(raw) as {headers?:Record<string,unknown>}).headers??{};return Object.entries(headers).filter((row):row is [string,string]=>typeof row[1]==='string').map(([name,value])=>({id:name,part:'client_in (legacy)',name,value}));}catch{return [];}
 }
+
+/** Display whitespace only: retain large numbers, duplicate keys and escapes. */
+export function bodyPresentation(text:string):{value:string;language:'json'|'plaintext'} {
+ try { JSON.parse(text); } catch { return {value:text,language:'plaintext'}; }
+ const tokens=text.match(/"(?:\\.|[^"\\])*"|[{}\[\],:]|[^\s{}\[\],:]+/g)??[];
+ let depth=0,value='';
+ for(let i=0;i<tokens.length;i++) {
+  const token=tokens[i]!,previous=tokens[i-1],next=tokens[i+1];
+  if(token==='{'||token==='[') {value+=token;depth++;if(next!=='}'&&next!==']')value+='\n'+'  '.repeat(depth);}
+  else if(token==='}'||token===']') {depth--;if(previous!=='{'&&previous!=='[')value+='\n'+'  '.repeat(depth);value+=token;}
+  else if(token===',')value+=',\n'+'  '.repeat(depth);
+  else if(token===':')value+=': ';
+  else value+=token;
+ }
+ return {value,language:'json'};
+}
