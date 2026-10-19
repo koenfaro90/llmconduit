@@ -1422,6 +1422,16 @@ mod tests {
         let saved: PhaseTimings =
             serde_json::from_str(finish.timings_json.as_ref().unwrap()).unwrap();
         assert_eq!(saved.generation, generation);
+        token.record_generation_start(5200);
+        assert_eq!(
+            token.generation_snapshot().generation_timing_complete,
+            Some(false)
+        );
+        token.record_generation_round(Some(1000), Some(50));
+        assert_eq!(
+            token.generation_snapshot().generation_timing_complete,
+            Some(true)
+        );
         token.record_generation_round(Some(0), Some(250));
         assert_eq!(
             token.generation_snapshot().generation_timing_complete,

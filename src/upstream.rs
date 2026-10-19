@@ -4513,6 +4513,7 @@ struct ServingInfo {
     /// evict-safe token as usage so terminal metrics never need to re-read the store.
     first_content_delta_ms: Option<u128>,
     generation: crate::dashboard_flow::GenerationTimings,
+    generation_in_progress: bool,
     /// Clean stream end after the terminal response event was emitted.
     stream_end_ms: Option<u128>,
     /// Gap 03 round-1 review (F1): a PER-ATTEMPT scratch slot holding the epoch-ms the
@@ -4653,18 +4654,27 @@ impl ServingToken {
     }
 
     pub fn generation_snapshot(&self) -> crate::dashboard_flow::GenerationTimings {
-        self.lock().generation
+        let info = self.lock();
+        let mut generation = info.generation;
+        // A later round may fail/cancel before its usage arrives. Never publish
+        // an earlier round's average as a complete timing for that request.
+        if info.generation_in_progress {
+            generation.generation_timing_complete = Some(false);
+        }
+        generation
     }
 
     pub fn record_generation_start(&self, ms: u128) {
-        self.lock()
-            .generation
+        let mut info = self.lock();
+        info.generation_in_progress = true;
+        info.generation
             .first_generation_delta_ms
             .get_or_insert(u64::try_from(ms).unwrap_or(u64::MAX));
     }
 
     pub fn record_generation_round(&self, duration_us: Option<u128>, tokens: Option<i64>) {
         let mut info = self.lock();
+        info.generation_in_progress = false;
         let g = &mut info.generation;
         let valid = duration_us.is_some_and(|v| v > 0) && tokens.is_some_and(|v| v > 1);
         g.generation_timing_complete = Some(g.generation_timing_complete.unwrap_or(true) && valid);

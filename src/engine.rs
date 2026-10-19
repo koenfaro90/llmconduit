@@ -3511,9 +3511,16 @@ impl Gateway {
                     }
                 }
             }
-            if let Some(first) = generation_first {
+            if measure_generation
+                && (generation_first.is_some()
+                    || turn_usage
+                        .as_ref()
+                        .is_some_and(|usage| usage.completion_tokens > 0))
+            {
                 serving_token.record_generation_round(
-                    generation_last.map(|last| last.duration_since(first).as_micros()),
+                    generation_first
+                        .zip(generation_last)
+                        .map(|(first, last)| last.duration_since(first).as_micros()),
                     turn_usage.as_ref().map(|usage| usage.completion_tokens),
                 );
                 if let Some(id) = &api_call_id {
