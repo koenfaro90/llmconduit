@@ -373,6 +373,7 @@ pub fn run_configure_flow(path: PathBuf) -> Result<PersistedConfig, String> {
         // F1: not interactively prompted (an advanced, opt-in knob, like
         // `debug_log_max_age_hours` below) -- just carried through unchanged.
         turn_capture_dir: existing.turn_capture_dir.clone(),
+        wire_capture_dir: existing.wire_capture_dir.clone(),
         upstream_chat_kwargs,
         upstreams: existing.upstreams.clone(),
         fallback_upstreams: existing.fallback_upstreams.clone(),

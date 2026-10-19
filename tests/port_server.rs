@@ -365,6 +365,7 @@ fn config_for(server_uri: &str) -> Config {
         system_prompt_prefix: None,
         upstream_request_log_path: None,
         turn_capture_dir: None,
+        wire_capture_dir: None,
         upstream_chat_kwargs: serde_json::Map::new(),
         upstreams: Vec::new(),
         fallback_upstreams: Vec::new(),

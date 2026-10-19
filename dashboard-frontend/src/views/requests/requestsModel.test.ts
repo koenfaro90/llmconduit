@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { DebugWsMessage, FlowSummary, HistoryRequest } from '../../api/types';
-import { decodingRate, identityOptions, requestDisplay, requestIdentity, requestSignals } from '../../components/RequestTable/requestsModel';
+import { decodingRate, historyFlowSummary, historyFlowDetail, identityOptions, requestDisplay, requestIdentity, requestSignals } from '../../components/RequestTable/requestsModel';
 
 const history: HistoryRequest = {
   id: 'api_1', response_id: null, user_id: 'usr_1', virtual_key_id: 'key_1',
@@ -118,4 +118,11 @@ describe('durable request display', () => {
     expect(requestIdentity({ ...history, user_id: 'missing', virtual_key_id: 'missing' }, options))
       .toEqual({ user: '—', key: '—' });
   });
+});
+
+it('preserves stored reasoning, phase timing and attempt details in historical request inspectors',()=>{
+ const attempt={provider:'backend',model:'served',start_ms:1010,end_ms:1090,status:'served',first_upstream_byte_ms:1020};
+ const row={...history,status:'completed',input_tokens:66537,output_tokens:154,cached_tokens:64000,reasoning_tokens:65,timings_json:JSON.stringify({normalization_done_ms:1002,routing_decision_ms:1003,first_upstream_byte_ms:1020,stream_end_ms:1100,finalize_ms:1101}),attempts_json:JSON.stringify([attempt])};
+ expect(historyFlowSummary(row)).toMatchObject({usage:{prompt:66537,completion:154,cached:64000,reasoning:65},attempts:[attempt],normalization_done_ms:1002,routing_decision_ms:1003,first_upstream_byte_ms:1020,stream_end_ms:1100,finalize_ms:1101});
+ expect(historyFlowDetail(row)).toMatchObject({usage:{reasoning:65},attempts:[attempt],first_upstream_byte_ms:1020});
 });

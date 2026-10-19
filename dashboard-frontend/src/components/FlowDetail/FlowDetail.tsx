@@ -1,21 +1,4 @@
-/**
- * FlowDetail — the 3-pane transformation inspector (D10 flagship).
- *
- * Layout:
- *   ┌ header: id, models, status chip, kill button ─────────────────────────────┐
- *   ├ 3 scroll-synced JSON panes ───────────────────────────────────────────────┤
- *   │   A inbound body   →   B normalized Responses   →   C upstream chat body    │
- *   │   (diff A→B left)      (diff A→B right)              (diff B→C right)        │
- *   ├ tabs: Headers / Timeline / Error ─────────────────────────────────────────┤
- *   └ deltas sub-panel (segment_append: output/reasoning/tool cards) ────────────┘
- *
- * The structural diff (./diff) tints each JSON PATH: B is tinted vs A (added/changed), C is
- * tinted vs B, and A surfaces what B removed. The panes scroll together (useScrollSync — the
- * containers, not react-virtual). Bodies absent from `/flows/:id` (evicted under the D5
- * body-free snapshot tradeoff, or while time-travel `seek` shows a historical cut) render the
- * pane's "body evicted" placeholder. Kill POSTs with CSRF, optimistically flips the row, and
- * shows a distinct state on 403.
- */
+/** Request inspector: exact HTTP body tabs and measured lifecycle details. */
 import { useMemo, useState } from 'react';
 import type { CostConfidence, FlowDetail as FlowDetailDto, FlowSummary, HistoryRequest, Usage } from '../../api/types';
 import { useDashboard } from '../../store/hooks';
@@ -33,33 +16,23 @@ import { AttemptTrace } from './AttemptTrace';
 import { capturedErrorBody } from '../FlowTable/failureTaxonomy';
 import { pickAttempts } from '../../api/attempts';
 import { useCatalog } from '../FlowTable/useCatalog';
-import { JsonPane } from '../viz/JsonPane';
-import { combineMiddleDiff, diffLayers } from './diff';
 import { joinMonitor } from './monitorJoin';
 import { mergeDeltas, normalizeRestDeltas, type SeqSegment } from './deltas';
 import { DeltasPanel } from './DeltasPanel';
 import { Timeline } from './Timeline';
-import { useScrollSync } from './useScrollSync';
 import { useFlowDetail, type KillState } from './useFlowDetail';
-import { useChainDiff } from './useChainDiff';
+import {RequestBodyTabs} from './RequestBodyTabs';
 import { divergenceLabel } from '../RequestTable/lineageModel';
 import { cn } from '../../lib/cn';
 
-type Tab = 'headers' | 'timeline' | 'error' | 'chain';
-
 export function FlowDetail({ apiCallId, onClose, historyRequest }: { apiCallId: string; onClose: () => void; historyRequest?: HistoryRequest }) {
-  const { detail, frozenDetail, liveFlow, status, seeking, historical, seekMonitorSeq, seekAtMs, mutationsEnabled, kill, killState } =
+  const { frozenDetail, liveFlow, status, seeking, historical, inCut, seekMonitorSeq, seekAtMs, mutationsEnabled, kill, killState } =
     useFlowDetail(apiCallId, historyRequest);
   const monitor = useDashboard((s) => s.monitor);
   const monitorSeqs = useDashboard((s) => s.monitorSeqs);
   const priceTable = useDashboard((s) => s.priceTable);
   // Gap 09: per-model context-window capacities (gap-06 nullable `context_limit`), for the gauge.
   const contextLimits = useCatalog();
-  const [tab, setTab] = useState<Tab>('headers');
-  // Shared search across all three layers (A inbound · B normalized · C upstream) — find a field
-  // once and see how it transformed. Each JsonPane filters to matches + their ancestors.
-  const [query, setQuery] = useState('');
-
   // The flow's response_id (engine id) joins the monitor ring to this flow. While seeking we read
   // it from the FROZEN row (not the live REST detail, which is withheld from non-body surfaces).
   const responseId = liveFlow?.response_id ?? frozenDetail?.response_id ?? null;
@@ -84,19 +57,7 @@ export function FlowDetail({ apiCallId, onClose, historyRequest }: { apiCallId: 
     [frozenDetail?.deltas, liveSegs],
   );
 
-  // Structural diffs between the captured layers (path → kind).
-  const diffAB = useMemo(() => diffLayers(detail?.inbound_body, detail?.normalized), [detail?.inbound_body, detail?.normalized]);
-  const diffBC = useMemo(() => diffLayers(detail?.normalized, detail?.upstream_body), [detail?.normalized, detail?.upstream_body]);
-  // Pane B sits between both comparisons: it shows what A→B added/changed AND what B→C removes,
-  // so it renders the COMBINED middle diff with side `both` (finding 4).
-  const diffBMiddle = useMemo(() => combineMiddleDiff(diffAB, diffBC), [diffAB, diffBC]);
-
-  const sync = useScrollSync(3);
   const isActive = status === 'open';
-  // Sessions: the chain comparison (this flow's FULL inbound body vs its predecessor's, from the
-  // durable content store). Fetched only while the Chain tab is open.
-  const chain = useChainDiff(apiCallId, liveFlow?.chain_parent_request_id, tab === 'chain');
-  const chainSync = useScrollSync(2);
 
   // Cost + its confidence tag are derived TOGETHER as a PAIR from the SAME source (gap 07 review
   // round 3): the displayed dollar value and the `estimated`/`unavailable` provenance tag MUST never
@@ -227,7 +188,7 @@ export function FlowDetail({ apiCallId, onClose, historyRequest }: { apiCallId: 
   );
 
   return (
-    <section className="flex min-h-0 w-[46%] min-w-[420px] flex-col border-l border-line bg-panel" data-testid="flow-detail" aria-label="flow detail">
+    <section className="fixed inset-0 z-30 flex min-h-0 min-w-0 flex-col border-l border-line bg-panel lg:static lg:w-[55%] lg:min-w-[420px]" data-testid="flow-detail" aria-label="flow detail">
       <DetailHeader
         apiCallId={apiCallId}
         displayNumber={historyRequest?.display_number ?? liveFlow?.display_number ?? frozenDetail?.display_number}
@@ -249,99 +210,14 @@ export function FlowDetail({ apiCallId, onClose, historyRequest }: { apiCallId: 
         onClose={onClose}
       />
 
-      {historical && <div className="border-b border-line px-3 py-1 text-[10px] text-text-muted">Durable history · live capture and normalized body may no longer be available</div>}
-      <SearchBar value={query} onChange={setQuery} />
-
-      {/* Chain tab: the two-pane chain diff REPLACES the transformation panes (same footprint). */}
-      {tab === 'chain' ? (
-        <div className="grid min-h-0 flex-1 grid-cols-2 divide-x divide-line" data-testid="chain-pane-row">
-          <JsonPane
-            label="P · predecessor"
-            value={chain.previous}
-            diff={chain.diff}
-            side="left"
-            query={query}
-            emptyLabel={chain.predecessorId ? (chain.loading ? 'loading…' : 'predecessor body not stored') : 'no predecessor (chain start)'}
-            scrollRef={chainSync.refFor(0)}
-            onScroll={chainSync.bind(0)}
-          />
-          <JsonPane
-            label="T · this request"
-            value={chain.current}
-            diff={chain.diff}
-            side="right"
-            query={query}
-            emptyLabel={chain.loading ? 'loading…' : 'body not stored (durable history off)'}
-            scrollRef={chainSync.refFor(1)}
-            onScroll={chainSync.bind(1)}
-          />
-        </div>
-      ) : (
-      <div className="grid min-h-0 flex-1 grid-cols-3 divide-x divide-line" data-testid="pane-row">
-        <JsonPane
-          label="A · inbound"
-          value={detail?.inbound_body}
-          diff={diffAB}
-          side="left"
-          query={query}
-          emptyLabel={emptyBodyLabel(seeking, historical)}
-          scrollRef={sync.refFor(0)}
-          onScroll={sync.bind(0)}
-        />
-        <JsonPane
-          label="B · normalized"
-          value={detail?.normalized}
-          diff={diffBMiddle}
-          side="both"
-          query={query}
-          emptyLabel={emptyBodyLabel(seeking, historical)}
-          scrollRef={sync.refFor(1)}
-          onScroll={sync.bind(1)}
-        />
-        <JsonPane
-          label="C · upstream"
-          value={detail?.upstream_body}
-          diff={diffBC}
-          side="right"
-          query={query}
-          emptyLabel={emptyBodyLabel(seeking, historical)}
-          scrollRef={sync.refFor(2)}
-          onScroll={sync.bind(2)}
-        />
-      </div>
-      )}
-
-      {/* tabs */}
-      <div className="flex shrink-0 items-center gap-1 border-y border-line bg-panel-raised px-2 py-1" role="tablist">
-        <TabButton id="headers" active={tab} onClick={setTab}>Headers</TabButton>
-        <TabButton id="timeline" active={tab} onClick={setTab}>Timeline</TabButton>
-        <TabButton id="error" active={tab} onClick={setTab}>Error</TabButton>
-        <TabButton id="chain" active={tab} onClick={setTab}>Chain</TabButton>
-      </div>
-      <div className="max-h-44 min-h-[3rem] shrink-0 overflow-auto" role="tabpanel" data-testid={`tabpanel-${tab}`}>
-        {/* Headers + Error read the FROZEN detail (null while seeking) so no live/post-cut metadata
-            leaks; Timeline reads the cut-bounded monitor join (finding 1). */}
-        {tab === 'headers' && <HeadersTab headers={frozenDetail?.inbound_headers} />}
-        {tab === 'timeline' && <Timeline events={join.events} />}
-        {tab === 'error' && <ErrorTab detail={frozenDetail} liveFlow={liveFlow} joinError={join.error} seeking={seeking} historical={historical} />}
-        {tab === 'chain' && <ChainTab flow={liveFlow} predecessorId={chain.predecessorId} error={chain.error} />}
-      </div>
-
-      {/* deltas sub-panel */}
-      <div className="flex max-h-52 shrink-0 flex-col overflow-auto border-t border-line">
-        <div className="sticky top-0 z-10 border-b border-line bg-panel-raised px-3 py-1 text-[10px] uppercase tracking-wide text-text-muted">
-          deltas
-        </div>
-        <DeltasPanel segments={segments} />
-      </div>
+      <RequestBodyTabs key={apiCallId} request={historyRequest??{id:apiCallId,status:status==='open'?'running':status??'running'}} allowBodies={!seeking||inCut} snapshot={seeking} fallbackHeaders={frozenDetail?.inbound_headers} extras={[
+        {id:'timeline',label:'Timeline',content:<Timeline events={join.events}/>},
+        {id:'error',label:'Error',content:<ErrorTab detail={frozenDetail} liveFlow={liveFlow} joinError={join.error} seeking={seeking} historical={historical}/>},
+        {id:'output',label:'Output',content:<DeltasPanel segments={segments}/>},
+        {id:'chain',label:'Chain',content:<ChainTab flow={liveFlow} predecessorId={liveFlow?.chain_parent_request_id??null} error={null}/>},
+      ]}/>
     </section>
   );
-}
-
-/** When seeking a historical cut, a missing body is explicitly evicted (D5 tradeoff). */
-function emptyBodyLabel(seeking: boolean, historical = false): string {
-  if (historical) return 'body not stored in durable history';
-  return seeking ? 'body evicted (snapshot)' : 'body evicted';
 }
 
 /** A roll-up cost is "present" (drives the displayed value) only when it is a finite number —
@@ -349,45 +225,6 @@ function emptyBodyLabel(seeking: boolean, historical = false): string {
  * tag is chosen from the SAME source `flowCost` will actually read the cost from. */
 function isFiniteNumber(v: number | null | undefined): v is number {
   return typeof v === 'number' && Number.isFinite(v);
-}
-
-/** Shared search across the three layers — one query, every pane filters + highlights. */
-function SearchBar({ value, onChange }: { value: string; onChange: (v: string) => void }) {
-  return (
-    <div
-      className="flex shrink-0 items-center gap-2 border-b border-line bg-panel-raised px-3 py-1.5"
-      data-testid="json-search-bar"
-    >
-      <div className="flex flex-1 items-center gap-2 rounded-md border border-line bg-panel px-2 py-1 transition-colors focus-within:border-accent/60">
-        <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 shrink-0 text-text-muted" fill="none" aria-hidden="true">
-          <circle cx="7" cy="7" r="4.5" stroke="currentColor" strokeWidth="1.5" />
-          <path d="M10.5 10.5 14 14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-        </svg>
-        <input
-          type="text"
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          placeholder="search all layers…"
-          spellCheck={false}
-          className="min-w-0 flex-1 bg-transparent font-mono text-xs text-text placeholder:text-text-muted focus:outline-none"
-          data-testid="json-search-input"
-        />
-        {value && (
-          <button
-            type="button"
-            onClick={() => onChange('')}
-            aria-label="clear search"
-            className="shrink-0 text-text-muted transition-colors hover:text-text"
-          >
-            ✕
-          </button>
-        )}
-      </div>
-      <span className="hidden shrink-0 font-mono text-[10px] uppercase tracking-[0.14em] text-text-muted sm:inline">
-        A · B · C
-      </span>
-    </div>
-  );
 }
 
 function DetailHeader({
@@ -447,6 +284,7 @@ function DetailHeader({
     ? elapsedMs(flow, seeking ? seekAtMs ?? flow.started_ms : Date.now())
     : (seeking ? null : detail?.elapsed_ms ?? null);
 
+  const [detailsOpen,setDetailsOpen]=useState(false);
   return (
     <header className="flex shrink-0 flex-col gap-2 border-b border-line bg-panel-raised px-3 py-2">
       <div className="flex items-center gap-2">
@@ -460,6 +298,7 @@ function DetailHeader({
         )}
         <div className="ml-auto flex items-center gap-2">
           <KillControl isActive={isActive} mutationsEnabled={mutationsEnabled} seeking={seeking} killState={killState} onKill={onKill} />
+          <Button variant="ghost" className="md:hidden" aria-expanded={detailsOpen} onClick={()=>setDetailsOpen(!detailsOpen)}>Details</Button>
           <button
             type="button"
             onClick={onClose}
@@ -470,7 +309,8 @@ function DetailHeader({
           </button>
         </div>
       </div>
-      <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs">
+      <p className="truncate font-mono text-xs text-text-muted md:hidden" title={fmtModelPair(modelReq,modelServed)}>{fmtModelPair(modelReq,modelServed)}</p>
+      <dl className={`${detailsOpen?'grid':'hidden md:grid'} max-h-[50dvh] grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 overflow-auto text-xs`}>
         <dt className="text-text-muted">model</dt>
         <dd className="font-mono text-text">{fmtModelPair(modelReq, modelServed)}</dd>
         <dt className="text-text-muted">upstream</dt>
@@ -610,28 +450,6 @@ function KillControl({
   );
 }
 
-function TabButton({ id, active, onClick, children }: { id: Tab; active: Tab; onClick: (t: Tab) => void; children: React.ReactNode }) {
-  const selected = id === active;
-  return (
-    <button
-      type="button"
-      role="tab"
-      aria-selected={selected}
-      onClick={() => onClick(id)}
-      className={cn(
-        'rounded-md px-2.5 py-1 text-xs transition-colors',
-        selected ? 'bg-accent/15 text-accent' : 'text-text-muted hover:text-text',
-      )}
-    >
-      {children}
-    </button>
-  );
-}
-
-/**
- * Sessions — the Chain tab's summary strip: harness, session node, the divergence classification
- * (with its cache-bust verdict) and the predecessor id. The panes above show the structural diff.
- */
 function ChainTab({ flow, predecessorId, error }: { flow: FlowSummary | null; predecessorId: string | null; error: string | null }) {
   const lineage = divergenceLabel(flow?.divergence_kind);
   const known = !!flow?.divergence_kind;
@@ -661,37 +479,6 @@ function ChainTab({ flow, predecessorId, error }: { flow: FlowSummary | null; pr
   );
 }
 
-function HeadersTab({ headers }: { headers?: Record<string, string> }) {
-  const entries = headers ? Object.entries(headers) : [];
-  if (entries.length === 0) {
-    return <div className="px-3 py-3 text-xs italic text-text-muted" data-testid="headers-empty">No inbound headers captured.</div>;
-  }
-  return (
-    <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 px-3 py-2 font-mono text-xs" data-testid="headers-tab">
-      {entries.map(([k, v]) => (
-        <div key={k} className="contents">
-          <dt className="text-accent">{k}</dt>
-          <dd className="truncate text-text" title={v}>{v}</dd>
-        </div>
-      ))}
-    </dl>
-  );
-}
-
-/**
- * The Error tab (gap 14 enriched): the terminal reason + monitor error, PLUS the captured upstream
- * error BODY (gap 05's `upstream_response`, live-detail only) when present. The capture state is
- * EXPLICIT (spec 14 don't-lie-with-zeros): a captured body is shown (`measured`, truncation flagged);
- * when capture is OFF/no body, an ERROR flow shows an explicit `unavailable` line — NEVER a blank that
- * implies "no error".
- *
- * The "No error." empty state depends ONLY on `!isError` (review round-3 HIGH): a FAILED/error flow
- * must NEVER read "No error.", regardless of `seeking` or whether live-body capture is suppressed. So
- * the capture block renders whenever `isError`. The captured body itself is live-detail only (`detail`
- * is `frozenDetail`, `null` while seeking), so on a SEEKED historical flow it is honestly UNAVAILABLE
- * and labelled as the HISTORICAL state ("capture unavailable on historical view"), DISTINCT from the
- * live capture-disabled state — never "No error.".
- */
 function ErrorTab({ detail, liveFlow, joinError, seeking, historical = false }: { detail: FlowDetailDto | null; liveFlow: FlowSummary | null; joinError: string | null; seeking: boolean; historical?: boolean }) {
   const reason = liveFlow?.terminal_reason ?? detail?.terminal_reason ?? null;
   const status = liveFlow?.status ?? detail?.status ?? null;

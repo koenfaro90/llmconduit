@@ -75,6 +75,7 @@ pub mod upstream_metrics;
 pub mod usage_accounting;
 pub mod vision;
 pub mod vision_probe;
+pub mod wire_capture;
 
 /// Build provenance, embedded at compile time by `build.rs`: git short commit,
 /// working-tree dirty flag, and UTC build timestamp. Surfaced in `--version`

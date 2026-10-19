@@ -58,6 +58,15 @@ when no token is configured it also permits fully unauthenticated non-loopback d
 uses same-origin `Origin`/`Host` validation for dashboard WebSockets. Kill requires `LLMCONDUIT_DASHBOARD_ALLOW_MUTATIONS=1`
 + a CSRF token.
 
+Request inspectors use full-width HTTP body tabs, with Copy and Download, rather
+than transformation/diff panes. `wire_capture_dir` enables exact HTTP entity-body
+archives (`src/wire_capture.rs`): no truncation/redaction/reformatting, private
+files, lossless byte-chunk deduplication and administrator-only reads. This is the
+explicitly requested raw-capture exception to diagnostic redaction rules below;
+all other logging/redaction surfaces keep their existing behavior. Ingress is
+captured before decompression, upstream bytes come from the built reqwest request,
+and every upstream send is retained separately. See `docs/request-wire-capture.md`.
+
 ## Code layout
 
 | Path | Role |

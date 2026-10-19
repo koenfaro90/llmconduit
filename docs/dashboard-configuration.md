@@ -48,6 +48,12 @@ separate from document controls; sign-in and SSO options have readable labels.
 Changing a document setting removes its existing override. Server-side validation,
 revision checks and stage/apply semantics remain authoritative.
 
+The request inspector has separate full-width HTTP body tabs and original-byte
+Copy/Download. Exact capture is configured under Observability; see
+[request wire capture](request-wire-capture.md). Legacy reconstructed captures are
+explicitly labeled. Mobile request filters and detailed timing sections collapse
+to leave room for the selected body.
+
 ## Stage and apply
 
 Edit a field or use Add/Edit/Copy/Remove directly to start a local draft, validate

@@ -1264,6 +1264,12 @@ export const mockFetch: typeof fetch = async (input, init): Promise<Response> =>
     };
     return json(resp);
   }
+  const wireMatch=path.match(/^\/dashboard\/api\/history\/requests\/([^/]+)\/wire$/);
+  if(wireMatch){const id=wireMatch[1]??'';if(id!=='api_002')return json(null);return json({schema:'llmconduit-exact-http/v1',api_call_id:id,parts:Object.fromEntries(Object.keys(MOCK_WIRE_BODIES).map(key=>[key,{file:key+'.body',chunks:[],headers:[{name:'content-type',value_base64:btoa(key.endsWith('_in')&&key!=='client_in'?'text/event-stream':'application/json')}],method:key==='client_in'?'POST':null,target:null,status:200,bytes:new TextEncoder().encode(MOCK_WIRE_BODIES[key]!).length,sha256:null,complete:true,error:null}]))});}
+  const exactBodyMatch=path.match(/^\/dashboard\/api\/history\/requests\/api_002\/wire\/([^/]+)$/);
+  if(exactBodyMatch){const value=MOCK_WIRE_BODIES[exactBodyMatch[1]??''];return value===undefined?json({error:'not found'},404):new Response(value,{headers:{'content-type':'application/octet-stream'}});}
+  const requestDetailMatch=path.match(/^\/dashboard\/api\/history\/requests\/([^/]+)$/);
+  if(requestDetailMatch){const request=MOCK_HISTORY_REQUESTS.find(r=>r.id===requestDetailMatch[1]);return request?json({request,events:[],events_truncated:false}):json({error:'request not found'},404);}
   const bodyMatch = path.match(/^\/dashboard\/api\/history\/requests\/([^/]+)\/body$/);
   if (bodyMatch) {
     const id = decodeURIComponent(bodyMatch[1] ?? '');
@@ -1754,3 +1760,11 @@ export const mockWsFactory = (url: string): WsLike => new MockWebSocket(url);
 
 /** The CSRF token the mock bootstrap exposes (mirrors the cookie the Rust shell sets). */
 export const mockBootstrapCsrf = MOCK_CSRF;
+
+/** Exact, non-redacted body fixture for the request inspector (not real secrets). */
+export const MOCK_WIRE_BODIES:Record<string,string>={
+ client_in:' { "api_key" : "fixture-kept", "text" : "'+'word '.repeat(60_000)+'LAST-INBOUND-BYTE" }\r\n',
+ upstream_000001_out:'{ "model" : "fixture", "tool_arguments":"\\u0061" }\r\n',
+ upstream_000001_in:'data: {"choices":[{"delta":{"reasoning_content":"kept reasoning"}}]}\r\n\r\ndata: [DONE]\r\n\r\n',
+ client_out:'data: {"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"{\\"key\\":1}"}}]}}]}\r\n\r\ndata: [DONE]\r\n\r\n',
+};

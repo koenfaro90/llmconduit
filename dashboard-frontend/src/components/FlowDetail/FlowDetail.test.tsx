@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { act, cleanup, fireEvent, waitFor, within } from '@testing-library/react';
 import { FlowDetail } from './FlowDetail';
 import { dashboardStore } from '../../store/dashboardStore';
@@ -7,6 +7,7 @@ import { mockKillLog, MOCK_KILL_UNAUTHORIZED_ID } from '../../api/mock';
 import { makeFlow, renderWithQuery, resetWorld, seedFlows } from '../testHarness';
 import type { DebugWsMessage, FlowDetail as FlowDetailDto } from '../../api/types';
 
+vi.mock('../ui/JsonEditor',()=>({JsonEditor:({value,label}:{value:string;label:string})=><textarea readOnly aria-label={label} value={value}/>}));
 function noop() {}
 
 /** Push a monitor message into the live ring, stamped with its arrival `monitor_seq`. */
@@ -14,7 +15,7 @@ function pushMonitor(msg: DebugWsMessage, seq = 0): void {
   act(() => dashboardStore.getState().pushMonitor(msg, seq));
 }
 
-describe('FlowDetail — 3-pane inspector (mock backend)', () => {
+describe('FlowDetail — HTTP body tabs (mock backend)', () => {
   beforeEach(() => {
     // Mock mode: mockFetch answers /flows/:id + the kill route.
     resetWorld({ mock: true });
@@ -26,31 +27,13 @@ describe('FlowDetail — 3-pane inspector (mock backend)', () => {
   });
   afterEach(cleanup);
 
-  it('renders all 3 bodies and tints the diff between layers (A→B→C)', async () => {
-    const { getByTestId } = renderWithQuery(<FlowDetail apiCallId="api_001" onClose={noop} />);
-    // The /flows/:id query resolves the three bodies.
-    await waitFor(() => expect(getByTestId('jsonpane-code-A · inbound').querySelectorAll('.json-line').length).toBeGreaterThan(0));
-    const paneB = getByTestId('jsonpane-code-B · normalized');
-    const paneC = getByTestId('jsonpane-code-C · upstream');
-    expect(paneB.querySelectorAll('.json-line').length).toBeGreaterThan(0);
-    expect(paneC.querySelectorAll('.json-line').length).toBeGreaterThan(0);
-    // The mock bodies differ at $.model (gpt-4o → llama) and add $.stream on C — tinted lines exist.
-    const tintedB = paneB.querySelectorAll('.json-line[data-diff]');
-    const tintedC = paneC.querySelectorAll('.json-line[data-diff]');
-    expect(tintedB.length + tintedC.length).toBeGreaterThan(0);
+  it('uses separate body tabs with copy controls and has no diff panes', async()=>{
+    const ui=renderWithQuery(<FlowDetail apiCallId="api_001" onClose={noop}/>);
+    expect(ui.queryByTestId('pane-row')).toBeNull();
+    for(const name of ['Headers','Inbound request','Upstream request','Upstream response','Inbound response'])expect(ui.getByRole('tab',{name})).toBeTruthy();
+    await waitFor(()=>expect(ui.getByRole('button',{name:'Copy legacy capture'})).toBeEnabled());
   });
 
-  it('scroll-syncs the panes (scrolling A mirrors to B and C)', async () => {
-    const { getByTestId } = renderWithQuery(<FlowDetail apiCallId="api_001" onClose={noop} />);
-    await waitFor(() => expect(getByTestId('jsonpane-scroll-A · inbound')).toBeTruthy());
-    const a = getByTestId('jsonpane-scroll-A · inbound');
-    const b = getByTestId('jsonpane-scroll-B · normalized');
-    const c = getByTestId('jsonpane-scroll-C · upstream');
-    a.scrollTop = 40;
-    fireEvent.scroll(a);
-    expect(b.scrollTop).toBe(40);
-    expect(c.scrollTop).toBe(40);
-  });
 
   it('Timeline tab populates from monitor event_append; deltas render output + tool card', async () => {
     const { getByTestId, getByRole } = renderWithQuery(<FlowDetail apiCallId="api_001" onClose={noop} />);
@@ -64,7 +47,8 @@ describe('FlowDetail — 3-pane inspector (mock backend)', () => {
     pushMonitor({ type: 'segment_append', response_id: 'resp_001', segment: { timestamp_ms: 1, kind: 'output', text: 'Hello world' } }, 4);
     pushMonitor({ type: 'segment_append', response_id: 'resp_001', segment: { timestamp_ms: 2, kind: 'tool', text: JSON.stringify({ name: 'search' }) } }, 5);
 
-    // Deltas sub-panel shows the output text + an expandable tool card.
+    // Output is an explicit tab, not a second competing panel.
+    fireEvent.click(getByRole('tab',{name:'Output'}));
     expect(getByTestId('deltas-panel').textContent).toContain('Hello world');
     const card = getByTestId('tool-card');
     expect(card.textContent).toContain('search');
@@ -118,30 +102,6 @@ describe('FlowDetail — 3-pane inspector (mock backend)', () => {
     expect(dashboardStore.getState().flows.get(MOCK_KILL_UNAUTHORIZED_ID)).toBeUndefined();
   });
 
-  it('pane B marks a field present in B but dropped by C as removed (finding 4)', async () => {
-    // A crafted 3-layer fixture where `b_only` exists in B (normalized) but is dropped in C
-    // (upstream). Pane B must visibly tint `b_only` as REMOVED (it leaves on the way to C), which
-    // the A→B-only diff never showed. `api_replay` is unknown to the mock so /flows/:id 404s and
-    // does NOT overwrite the injected detail.
-    seedFlows([makeFlow({ api_call_id: 'api_replay', response_id: 'resp_replay', status: 'completed', started_ms: 1_700_000_000_000 })]);
-    const detail: FlowDetailDto = {
-      flow_seq: 1, api_call_id: 'api_replay', response_id: 'resp_replay', status: 'completed', cost_confidence: 'unavailable',
-      deltas: [], started_ms: 1_700_000_000_000,
-      // `b_only` is present in A and B alike (unchanged A→B) but dropped by C — so the ONLY signal
-      // for it is the B→C removal, which must surface in pane B (it would be invisible under the
-      // A→B-only diff that pane B previously used).
-      inbound_body: { model: 'gpt-4o', keep: 1, b_only: 'dropped-next' },
-      normalized: { model: 'llama-3.1-70b', keep: 1, b_only: 'dropped-next' },
-      upstream_body: { model: 'llama-3.1-70b', keep: 1 }, // b_only dropped here
-    };
-    const { getByTestId, queryClient } = renderWithQuery(<FlowDetail apiCallId="api_replay" onClose={noop} />);
-    act(() => queryClient.setQueryData(['flows', 'api_replay'], detail));
-    await waitFor(() => expect(getByTestId('jsonpane-code-B · normalized').querySelectorAll('.json-line').length).toBeGreaterThan(0));
-    const paneB = getByTestId('jsonpane-code-B · normalized');
-    const bOnlyLine = paneB.querySelector('.json-line[data-path="$.b_only"]') as HTMLElement | null;
-    // The B-only field that C drops is tinted removed in pane B (combined middle diff).
-    expect(bOnlyLine?.dataset.diff).toBe('removed');
-  });
 
   it('replays REST detail.deltas into the deltas panel for a completed flow (finding 5)', async () => {
     // A completed flow loaded via REST has NO live monitor segments — its streamed output lives
@@ -160,6 +120,7 @@ describe('FlowDetail — 3-pane inspector (mock backend)', () => {
     };
     const { getByTestId, queryClient } = renderWithQuery(<FlowDetail apiCallId="api_replay" onClose={noop} />);
     act(() => queryClient.setQueryData(['flows', 'api_replay'], detail));
+    fireEvent.click(within(getByTestId('flow-detail')).getByRole('tab',{name:'Output'}));
     // The replayed deltas render (coalesced) even with NO live monitor frames pushed.
     await waitFor(() => expect(getByTestId('deltas-panel').textContent).toContain('Replayed output'));
   });
@@ -169,7 +130,7 @@ describe('FlowDetail — 3-pane inspector (mock backend)', () => {
     // carries the server roll-up cost. The header must surface that roll-up, not "—".
     const { getByTestId } = renderWithQuery(<FlowDetail apiCallId="api_001" onClose={noop} />);
     // Wait for the detail query (with the roll-up cost) to resolve.
-    await waitFor(() => expect(getByTestId('jsonpane-code-A · inbound').querySelectorAll('.json-line').length).toBeGreaterThan(0));
+    await waitFor(()=>expect(getByTestId('flow-detail')).toBeTruthy());
     // The seeded mock detail cost for api_001 is 0.0061 → formatted into the cost/elapsed cell.
     await waitFor(() => expect(getByTestId('flow-detail').textContent).toContain('$0.0061'));
   });
@@ -733,10 +694,8 @@ describe('FlowDetail — time-travel seek + body eviction', () => {
     await waitFor(() => {
       expect(document.querySelector('[data-testid="seek-badge"]')).toBeTruthy();
     });
-    // Each pane shows the evicted placeholder (with the snapshot qualifier) rather than JSON.
-    const empties = document.querySelectorAll('[data-testid^="jsonpane-empty-"]');
-    expect(empties.length).toBe(3);
-    expect(empties[0]!.textContent).toContain('body evicted');
+    expect(document.querySelector('[data-testid="pane-row"]')).toBeNull();
+    expect(document.querySelector('[data-testid="request-body-tabs"]')).toBeTruthy();
   });
 
   it('DISABLES the kill button while seeking — no mutation against the frozen cut (finding 2)', async () => {
@@ -811,6 +770,7 @@ describe('FlowDetail — time-travel seek + body eviction', () => {
     act(() => dashboardStore.getState().enterSeek(started + 1_000));
     await waitFor(() => expect(document.querySelector('[data-testid="seek-badge"]')).toBeTruthy());
 
+    fireEvent.click(getByRole('tab',{name:'Output'}));
     // Deltas: the in-cut monitor segment shows; the post-cut segment and the REST replay do NOT.
     const deltas = getByTestId('deltas-panel').textContent ?? '';
     expect(deltas).toContain('IN-CUT');
@@ -830,8 +790,8 @@ describe('FlowDetail — time-travel seek + body eviction', () => {
     // Even after a tick, no detail data lands (the query is disabled out-of-cut while seeking).
     await act(async () => { await Promise.resolve(); });
     expect(queryClient.getQueryData(['flows', 'api_001'])).toBeUndefined();
-    const empties = document.querySelectorAll('[data-testid^="jsonpane-empty-"]');
-    expect(empties.length).toBe(3);
+    expect(document.body.textContent).toContain('not present in the selected snapshot');
+    expect(document.querySelector('[data-testid="request-body-tabs"]')).toBeNull();
   });
 
   it('a kill in-flight when seek begins does NOT roll back into the frozen store (finding 2)', async () => {
@@ -925,15 +885,8 @@ describe('FlowDetail — Chain tab (predecessor diff from the durable content st
     expect(getByTestId('chain-session').textContent).toBe('sess_codex');
     expect(getByTestId('chain-lineage').textContent).toBe('cache bust · tools');
     expect(getByTestId('chain-predecessor').textContent).toBe('api_005');
-    // Both reassembled bodies load from the mock history API; the diff tints the added tool.
-    await waitFor(() => expect(getByTestId('jsonpane-code-T · this request').querySelectorAll('.json-line').length).toBeGreaterThan(0));
-    await waitFor(() => expect(getByTestId('jsonpane-code-P · predecessor').querySelectorAll('.json-line').length).toBeGreaterThan(0));
-    const tinted = getByTestId('jsonpane-code-T · this request').querySelectorAll('.json-line[data-diff]');
-    expect(tinted.length).toBeGreaterThan(0);
-    // The transformation panes come back when leaving the tab.
-    fireEvent.click(getByRole('tab', { name: 'Headers' }));
+    expect(queryByTestId('pane-row')).toBeNull();
     expect(queryByTestId('chain-pane-row')).toBeNull();
-    expect(getByTestId('pane-row')).toBeTruthy();
   });
 
   it('a chain start has no predecessor pane content and says so', async () => {
@@ -943,6 +896,6 @@ describe('FlowDetail — Chain tab (predecessor diff from the durable content st
     fireEvent.click(getByRole('tab', { name: 'Chain' }));
     expect(getByTestId('chain-predecessor').textContent).toBe('—');
     expect(getByTestId('chain-lineage').textContent).toBe('new');
-    expect(getByTestId('jsonpane-empty-P · predecessor').textContent).toContain('no predecessor');
+    expect(document.querySelector('[data-testid="chain-pane-row"]')).toBeNull();
   });
 });

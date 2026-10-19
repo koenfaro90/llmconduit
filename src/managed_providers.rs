@@ -540,6 +540,7 @@ impl ManagedProviderUpstream {
             serving: backend.serving.clone(),
             capture: backend.capture.clone(),
             persistence_capture: backend.persistence_capture.clone(),
+            wire_capture: backend.wire_capture.clone(),
             authorization: backend.authorization.clone(),
             endpoint: backend.endpoint,
             authorization_route: Some("configured".to_string()),

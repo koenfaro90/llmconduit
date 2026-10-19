@@ -205,6 +205,7 @@ pub struct Gateway {
     /// keyed only on `config.turn_capture_dir` (spec Design overview #1 --
     /// its own instrumentation gate, independent of the debug UI).
     turn_capture: crate::turn_capture::TurnCapture,
+    wire_captures: crate::wire_capture::Registry,
     /// Bounded, nonblocking terminal/event writer used by the inference hot path.
     /// `None` keeps persistence at zero overhead. Kept separate from the read/admin
     /// store so an inference request can never await a database operation.
@@ -837,6 +838,7 @@ impl Gateway {
             // enabled sink via `with_turn_capture` when `turn_capture_dir` is
             // configured -- independent of `--with-debug-ui`.
             turn_capture: crate::turn_capture::TurnCapture::disabled(),
+            wire_captures: crate::wire_capture::Registry::default(),
             persistence_queue: None,
             persistence_keep_media: true,
             harness_detector: Arc::new(crate::harness::HarnessDetector::builtin()),
@@ -1075,6 +1077,10 @@ impl Gateway {
     /// Access the F1 durable per-turn capture handle. `is_enabled()` is `false`
     /// when `turn_capture_dir` is unset, in which case every capture op is a
     /// no-op (no thread, no alloc, no fs). Independent of the debug UI.
+    pub fn wire_captures(&self) -> &crate::wire_capture::Registry {
+        &self.wire_captures
+    }
+
     pub fn turn_capture(&self) -> &crate::turn_capture::TurnCapture {
         &self.turn_capture
     }
@@ -3107,7 +3113,12 @@ impl Gateway {
             // F1d: attach the turn-capture handle (see above) so the leaf's
             // `upstream_request` write can reach this turn's artifact.
             .with_capture(capture.clone())
-            .with_persistence_capture(persistence_capture.clone());
+            .with_persistence_capture(persistence_capture.clone())
+            .with_wire_capture(
+                api_call_id
+                    .as_deref()
+                    .and_then(|id| self.wire_captures().get(id)),
+            );
             let stream_result = tokio::select! {
                 biased;
                 _ = tx.closed() => return Err(AppError::cancelled()),

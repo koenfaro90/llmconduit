@@ -603,6 +603,8 @@ pub struct Config {
     /// response, and served response bytes (redacted). `None` disables the
     /// capture sink entirely (zero-op: no thread, no alloc, no fs).
     pub turn_capture_dir: Option<PathBuf>,
+    /// Private directory for exact, unmodified HTTP bodies. No capture size limit.
+    pub wire_capture_dir: Option<PathBuf>,
     pub upstream_chat_kwargs: JsonMap<String, JsonValue>,
     pub provider_metrics_targets: Vec<crate::provider_metrics::ProviderMetricsTarget>,
     pub upstreams: Vec<UpstreamConfig>,
@@ -1401,6 +1403,8 @@ pub struct PersistedConfig {
     /// `Config::turn_capture_dir`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_capture_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire_capture_dir: Option<String>,
     #[serde(default, skip_serializing_if = "JsonMap::is_empty")]
     pub upstream_chat_kwargs: JsonMap<String, JsonValue>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1739,6 +1743,7 @@ impl Default for PersistedConfig {
             system_prompt_prefix: None,
             upstream_request_log_path: None,
             turn_capture_dir: None,
+            wire_capture_dir: None,
             upstream_chat_kwargs: JsonMap::new(),
             upstreams: Vec::new(),
             fallback_upstreams: Vec::new(),
@@ -2002,6 +2007,12 @@ impl Config {
                 .as_ref()
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())
+                .map(PathBuf::from),
+            wire_capture_dir: config
+                .wire_capture_dir
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
                 .map(PathBuf::from),
             upstream_chat_kwargs: config.upstream_chat_kwargs.clone(),
             provider_metrics_targets,
@@ -4175,6 +4186,7 @@ model_profiles:
             system_prompt_prefix: Some("Global prefix.".to_string()),
             upstream_request_log_path: Some("/tmp/llmconduit-upstream.jsonl".to_string()),
             turn_capture_dir: Some("/tmp/llmconduit-turns".to_string()),
+            wire_capture_dir: None,
             upstream_chat_kwargs: JsonMap::from_iter([(
                 "clear_thinking".to_string(),
                 JsonValue::Bool(false),
@@ -4258,6 +4270,7 @@ model_profiles:
             system_prompt_prefix: None,
             upstream_request_log_path: None,
             turn_capture_dir: None,
+            wire_capture_dir: None,
             // Non-empty GLOBAL base: a global-only sibling key plus a nested key
             // (`thinking`) that CONFLICTS with the per-model policy below, so the
             // leaf precedence (per-model wins on conflict, global-only survives)
@@ -4458,6 +4471,7 @@ model_profiles:
             system_prompt_prefix: None,
             upstream_request_log_path: None,
             turn_capture_dir: None,
+            wire_capture_dir: None,
             upstream_chat_kwargs: JsonMap::new(),
             upstreams: Vec::new(),
             fallback_upstreams: Vec::new(),
@@ -4542,6 +4556,7 @@ model_profiles:
             system_prompt_prefix: None,
             upstream_request_log_path: None,
             turn_capture_dir: None,
+            wire_capture_dir: None,
             upstream_chat_kwargs: JsonMap::new(),
             upstreams: Vec::new(),
             fallback_upstreams: Vec::new(),
@@ -4632,6 +4647,7 @@ model_profiles:
             system_prompt_prefix: None,
             upstream_request_log_path: None,
             turn_capture_dir: None,
+            wire_capture_dir: None,
             upstream_chat_kwargs: JsonMap::new(),
             upstreams: Vec::new(),
             fallback_upstreams: Vec::new(),
@@ -4747,6 +4763,7 @@ model_profiles:
             system_prompt_prefix: None,
             upstream_request_log_path: None,
             turn_capture_dir: None,
+            wire_capture_dir: None,
             upstream_chat_kwargs: JsonMap::new(),
             upstreams: Vec::new(),
             fallback_upstreams: Vec::new(),
@@ -5191,6 +5208,7 @@ model_profiles:
             system_prompt_prefix: None,
             upstream_request_log_path: None,
             turn_capture_dir: None,
+            wire_capture_dir: None,
             upstream_chat_kwargs: JsonMap::new(),
             upstreams: Vec::new(),
             fallback_upstreams: Vec::new(),
@@ -5246,6 +5264,7 @@ model_profiles:
             system_prompt_prefix: None,
             upstream_request_log_path: None,
             turn_capture_dir: None,
+            wire_capture_dir: None,
             upstream_chat_kwargs: JsonMap::new(),
             upstreams: Vec::new(),
             fallback_upstreams: Vec::new(),
@@ -5407,6 +5426,7 @@ model_profiles:
 
             upstream_request_log_path: Some("/tmp/llmconduit-top/primary.jsonl".to_string()),
             turn_capture_dir: Some("/tmp/llmconduit-turns".to_string()),
+            wire_capture_dir: None,
             ..PersistedConfig::default()
         })
         .expect("config");
@@ -5432,6 +5452,7 @@ model_profiles:
             metrics_source: None,
 
             turn_capture_dir: Some("/tmp/llmconduit-turns".to_string()),
+            wire_capture_dir: None,
             upstreams: vec![PersistedUpstream {
                 metrics_url: None,
                 metrics_source: None,

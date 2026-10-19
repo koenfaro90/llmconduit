@@ -246,6 +246,7 @@ pub fn paths(scope: &str) -> Option<Vec<&'static str>> {
             "/upstream_metrics_source",
             "/upstream_request_log_path",
             "/turn_capture_dir",
+            "/wire_capture_dir",
             "/debug_log_max_age_hours",
             "/control_plane/storage/keep_media",
             "/control_plane/storage/retention_days",

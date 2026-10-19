@@ -1456,16 +1456,38 @@ impl ReqwestUpstreamClient {
         url: &Url,
         request: &ChatCompletionRequest,
         traffic_id: Option<&str>,
+        wire: Option<&Arc<crate::wire_capture::WireTurn>>,
     ) -> AppResult<reqwest::Response> {
         let mut builder = self.with_auth(self.client.post(url.clone()));
         if let Some(id) = traffic_id {
             builder = builder.header("X-Request-Id", id);
         }
-        builder
+        let built = builder
             .json(request)
-            .send()
-            .await
-            .map_err(|err| AppError::upstream(format!("upstream chat request failed: {err}")))
+            .build()
+            .map_err(|err| AppError::internal(format!("build upstream HTTP request: {err}")))?;
+        let exchange = if let Some(wire) = wire {
+            Some(
+                wire.upstream(&built)
+                    .await
+                    .map_err(|e| AppError::internal(format!("capture upstream HTTP request: {e}")))?
+                    .0,
+            )
+        } else {
+            None
+        };
+        let response =
+            self.client.execute(built).await.map_err(|err| {
+                AppError::upstream(format!("upstream chat request failed: {err}"))
+            })?;
+        match (wire, exchange) {
+            (Some(wire), Some(key)) => {
+                crate::wire_capture::upstream_response(response, Arc::clone(wire), key)
+                    .await
+                    .map_err(|e| AppError::internal(format!("capture upstream HTTP response: {e}")))
+            }
+            _ => Ok(response),
+        }
     }
 
     /// Append `request` to the JSONL request log (when configured), capture the
@@ -1491,6 +1513,7 @@ impl ReqwestUpstreamClient {
     /// its `upstream_request` section — last-writer-wins, so the retry call
     /// overwrites the first oversized attempt's write (AC-10). `None` when capture
     /// is disabled/uninstrumented; a no-op then.
+    #[allow(clippy::too_many_arguments)]
     async fn logged_send_chat_request(
         &self,
         url: &Url,
@@ -1499,6 +1522,7 @@ impl ReqwestUpstreamClient {
         traffic_id: Option<&str>,
         capture: Option<&Arc<TurnCaptureState>>,
         persistence: Option<&Arc<crate::flow_persistence::PersistenceCapture>>,
+        wire: Option<&Arc<crate::wire_capture::WireTurn>>,
     ) -> AppResult<reqwest::Response> {
         if let Some(ref logger) = self.request_logger
             && let Err(err) = logger.log(request).await
@@ -1531,7 +1555,7 @@ impl ReqwestUpstreamClient {
             // failover, and server-tool rounds are final-attempt-wins.
             persistence.stage_upstream_request(request);
         }
-        let response = self.send_chat_request(url, request, traffic_id).await;
+        let response = self.send_chat_request(url, request, traffic_id, wire).await;
         if response.is_ok()
             && let Some(persistence) = persistence
         {
@@ -1757,6 +1781,7 @@ impl ReqwestUpstreamClient {
         serving: Option<&Arc<ServingToken>>,
         capture: Option<&Arc<TurnCaptureState>>,
         persistence: Option<&Arc<crate::flow_persistence::PersistenceCapture>>,
+        wire: Option<&Arc<crate::wire_capture::WireTurn>>,
     ) -> AppResult<UpstreamStream> {
         // F1e review r1/r2: per-attempt reset of the `upstream_response` capture at
         // the START of this dispatch attempt, so the turn's raw response is
@@ -1780,7 +1805,15 @@ impl ReqwestUpstreamClient {
         // leaf client so the failover/routing layers never see a context-limit
         // error as a provider failure (it is a same-provider shrink-and-retry).
         let response = self
-            .logged_send_chat_request(url, &request, response_id, traffic_id, capture, persistence)
+            .logged_send_chat_request(
+                url,
+                &request,
+                response_id,
+                traffic_id,
+                capture,
+                persistence,
+                wire,
+            )
             .await?;
         // Gap 03 round-1 review (F1): the upstream response HEADERS just arrived — this is
         // the TRUE on-wire first-byte time. Stamp it BEFORE inspecting the status, so a
@@ -1836,6 +1869,7 @@ impl ReqwestUpstreamClient {
                     traffic_id,
                     capture,
                     persistence,
+                    wire,
                 )
                 .await?;
             let retry_status = retry_response.status();
@@ -2012,6 +2046,7 @@ impl UpstreamClient for ReqwestUpstreamClient {
         // SAME turn's `upstream_request` section (last-writer-wins).
         let capture = backend.capture.clone();
         let persistence = backend.persistence_capture.clone();
+        let wire = backend.wire_capture.clone();
         let request = sanitize_chat_request(backend.request, self.flatten_content);
         // D5 R4 (MEDIUM): finalize the ACTUAL on-wire model onto the shared serving
         // token, overwriting the engine's PRE-routing guess (and any earlier
@@ -2059,6 +2094,7 @@ impl UpstreamClient for ReqwestUpstreamClient {
                     serving.as_ref(),
                     capture.as_ref(),
                     persistence.as_ref(),
+                    wire.as_ref(),
                 )
                 .await
             {
@@ -2107,6 +2143,7 @@ impl UpstreamClient for ReqwestUpstreamClient {
                 serving.as_ref(),
                 capture.as_ref(),
                 persistence.as_ref(),
+                wire.as_ref(),
             )
             .await?;
         Ok(crate::traffic::hold_chat_stream(stream, traffic_lease))
@@ -2549,6 +2586,7 @@ impl FailoverUpstreamClient {
             // turn keeps capturing across a failover provider rebuild.
             capture: backend.capture.clone(),
             persistence_capture: backend.persistence_capture.clone(),
+            wire_capture: backend.wire_capture.clone(),
             authorization: backend.authorization.clone(),
             endpoint: backend.endpoint,
             authorization_route: backend.authorization_route.clone(),
@@ -3274,6 +3312,7 @@ impl RoutingUpstreamClient {
             // failover rebuild above, `request_for_provider`).
             capture: backend.capture.clone(),
             persistence_capture: backend.persistence_capture.clone(),
+            wire_capture: backend.wire_capture.clone(),
             authorization: backend.authorization.clone(),
             endpoint: backend.endpoint,
             authorization_route: Some(provider_name.to_string()),
@@ -4769,6 +4808,7 @@ pub struct BackendChatRequest {
     /// Bounded in-memory four-hop capture. Unlike `capture`, this never enables
     /// disk diagnostics and every database write remains a terminal `try_*`.
     pub persistence_capture: Option<Arc<crate::flow_persistence::PersistenceCapture>>,
+    pub wire_capture: Option<Arc<crate::wire_capture::WireTurn>>,
     /// Request-local provider/route authorization. Unrestricted unless inference
     /// auth is enforced. Rebuilds must clone this exact immutable scope.
     pub authorization: AuthorizationScope,
@@ -4806,6 +4846,7 @@ impl BackendChatRequest {
             serving,
             capture: None,
             persistence_capture: None,
+            wire_capture: None,
             authorization: AuthorizationScope::unrestricted(),
             endpoint: InferenceEndpoint::Responses,
             authorization_route: None,
@@ -4829,6 +4870,11 @@ impl BackendChatRequest {
     /// construction site (`engine.rs`'s `run_turn`) calls this.
     pub fn with_capture(mut self, capture: Option<Arc<TurnCaptureState>>) -> Self {
         self.capture = capture;
+        self
+    }
+
+    pub fn with_wire_capture(mut self, wire: Option<Arc<crate::wire_capture::WireTurn>>) -> Self {
+        self.wire_capture = wire;
         self
     }
 

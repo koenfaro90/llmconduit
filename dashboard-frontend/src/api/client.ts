@@ -674,6 +674,16 @@ export class DashboardClient {
    * `GET /history/requests/:id/body?hop=` — the FULL reassembled request body of one hop (the
    * content store joins the skeleton with its items). The response IS the body, not an envelope.
    */
+  wireManifest(id:string):Promise<import('../components/FlowDetail/wireModel').WireManifest|null> {return this.request(`/history/requests/${encodeURIComponent(id)}/wire`);}
+  storedRequestDetail(id:string):Promise<import('../components/FlowDetail/wireModel').StoredRequestDetail> {return this.request(`/history/requests/${encodeURIComponent(id)}`);}
+  async historyBodyBytes(id:string,part:string,exact=true):Promise<Uint8Array> {
+    const path=`/history/requests/${encodeURIComponent(id)}/${exact?'wire/'+encodeURIComponent(part):'body?hop='+encodeURIComponent(part)}`;
+    const response=await this.fetchImpl(this.basePath+path,{credentials:'include'});
+    if(response.status===401){this.onUnauthorized?.();throw new UnauthorizedError();}
+    if(!response.ok)throw new Error(`Body read failed: ${response.status}`);
+    return new Uint8Array(await response.arrayBuffer());
+  }
+
   historyRequestBody(id: string, hop: HistoryBodyHop = 'client_in'): Promise<unknown> {
     return this.request<unknown>(`/history/requests/${encodeURIComponent(id)}/body?hop=${hop}`);
   }

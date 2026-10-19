@@ -1,4 +1,5 @@
 import type { ApiKeyRecord, AuthApiKey, AuthUser, DebugWsMessage, FlowDetail, FlowStatus, FlowSummary, HistoryRequest, Usage, UserRecord } from '../../api/types';
+import {isAttempt} from '../../api/types';
 import { fmtModelPair } from '../FlowTable/format';
 
 export interface IdentityOptions {
@@ -148,7 +149,16 @@ function historyUsage(row: HistoryRequest): Usage | null {
     completion: row.output_tokens,
     total: row.input_tokens + row.output_tokens,
     cached: row.cached_tokens,
+    reasoning: row.reasoning_tokens,
   };
+}
+
+function storedPhases(row:HistoryRequest):Partial<FlowSummary>{
+ let phases:Record<string,unknown>={};let attempts:unknown;
+ try{const value:unknown=JSON.parse(row.timings_json??'{}');if(value&&typeof value==='object'&&!Array.isArray(value))phases=value as Record<string,unknown>;}catch{/* Old records may have no phase data. */}
+ try{attempts=JSON.parse(row.attempts_json??'null');}catch{/* Leave invalid traces unavailable. */}
+ const names=['ingress_ms','normalization_done_ms','routing_decision_ms','first_content_delta_ms','stream_end_ms','finalize_ms','first_upstream_byte_ms'] as const;
+ return {...Object.fromEntries(names.filter(k=>typeof phases[k]==='number'&&Number.isFinite(phases[k])&&Number(phases[k])>=0).map(k=>[k,phases[k]])),...(Array.isArray(attempts)&&attempts.every(isAttempt)?{attempts}:{})};
 }
 
 export function historyFlowSummary(row: HistoryRequest): FlowSummary {
@@ -169,6 +179,7 @@ export function historyFlowSummary(row: HistoryRequest): FlowSummary {
     elapsed_ms: row.completed_at_ms == null ? null : Math.max(0, row.completed_at_ms - row.created_at_ms),
     first_content_delta_ms: row.first_token_at_ms,
     ingress_ms: row.created_at_ms,
+    ...storedPhases(row),
     cost_confidence: 'unavailable',
     terminal_reason: row.terminal_reason ?? row.error,
     harness: row.harness,
@@ -200,6 +211,7 @@ export function historyFlowDetail(row: HistoryRequest, inboundBody?: unknown, up
     elapsed_ms: summary.elapsed_ms,
     first_content_delta_ms: summary.first_content_delta_ms,
     ingress_ms: summary.ingress_ms,
+    normalization_done_ms:summary.normalization_done_ms,routing_decision_ms:summary.routing_decision_ms,stream_end_ms:summary.stream_end_ms,finalize_ms:summary.finalize_ms,first_upstream_byte_ms:summary.first_upstream_byte_ms,attempts:summary.attempts,
     cost: null,
     cost_confidence: 'unavailable',
   };

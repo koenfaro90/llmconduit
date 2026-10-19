@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { getConnection, queryKeys } from '../../api/connection';
 import type { HistoryRequest } from '../../api/types';
+import {Button} from '../../components/ui/Button';
 import { FlowDetail } from '../../components/FlowDetail/FlowDetail';
 import { RequestTable } from '../../components/RequestTable/RequestTable';
 import { ALL_REQUEST_COLUMNS, DEFAULT_HIDDEN_REQUEST_COLUMNS } from '../../components/RequestTable/requestColumns';
@@ -30,6 +31,7 @@ function epochMs(value: string): number | undefined {
 export function RequestsView() {
   const { client, queryClient } = getConnection();
   const [filters, setFilters] = useState<Filters>(emptyFilters);
+  const [filtersOpen,setFiltersOpen]=useState(false);
   const [cursors, setCursors] = useState<Array<Cursor | null>>([null]);
   const [selectedRequest, setSelectedRequest] = useState<HistoryRequest | null>(null);
   const [clearOpen, setClearOpen] = useState(false);
@@ -110,14 +112,15 @@ export function RequestsView() {
       <div className="border-b border-line bg-panel px-4 py-3">
         <div className="flex items-baseline gap-3">
           <h1 className="text-sm font-semibold uppercase tracking-[0.18em] text-text">requests</h1>
-          <span className="text-xs text-text-muted">All retained requests · live while streaming · no time limit</span>
+          <span className="hidden text-xs text-text-muted sm:inline">All retained requests · live while streaming · no time limit</span>
+          <Button variant="ghost" className="ml-auto md:hidden" aria-expanded={filtersOpen} onClick={()=>setFiltersOpen(!filtersOpen)}>Filters</Button>
           {isAdmin && <button type="button" className="ml-auto rounded border border-status-down/60 px-2 py-1 text-xs text-status-down hover:bg-status-down/10"
             onClick={() => { setClearPhrase(''); setClearNotice(null); clearMutation.reset(); setClearOpen(true); }}>
             Clear history…
           </button>}
         </div>
         {clearNotice && <p className="mt-2 text-xs text-text-muted" role="status">{clearNotice}</p>}
-        <div className="mt-3 flex flex-wrap items-end gap-2" aria-label="Request filters">
+        <div className={`mt-3 flex-wrap items-end gap-2 ${filtersOpen?'flex':'hidden md:flex'}`} aria-label="Request filters">
           <label className="flex min-w-[200px] flex-1 flex-col gap-1 text-[10px] uppercase tracking-wider text-text-muted">
             Search R-#, S-#, model, provider, harness, session
             <input aria-label="Search requests" value={filters.q} onChange={(event) => update({ ...filters, q: event.target.value })}

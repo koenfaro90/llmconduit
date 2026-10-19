@@ -467,6 +467,14 @@ fn protected_routes(gateway: Arc<Gateway>, auth: Arc<DashboardAuth>) -> Router<A
             get(crate::persistent_history_api::history_session_detail),
         )
         .route("/dashboard/api/history/usage", get(history_usage))
+        .route(
+            "/dashboard/api/history/requests/{id}/wire",
+            get(crate::wire_capture::manifest_api),
+        )
+        .route(
+            "/dashboard/api/history/requests/{id}/wire/{part}",
+            get(crate::wire_capture::body_api),
+        )
         .route("/dashboard/api/history/metrics", get(history_metrics))
         .route(
             "/dashboard/api/history/activity",
@@ -1550,6 +1558,35 @@ async fn log_api_call(
         }
     };
 
+    // Capture the original entity bytes BEFORE decompression or JSON adapters.
+    let wire_turn = if is_flow_capture_request(&method, uri.path()) {
+        if let Some(root) = &gateway.config().wire_capture_dir {
+            match crate::wire_capture::WireTurn::start(
+                root,
+                &api_call_id,
+                method.as_str(),
+                &uri.to_string(),
+                &headers,
+                &body_bytes,
+            )
+            .await
+            {
+                Ok(turn) => {
+                    gateway.wire_captures().insert(api_call_id.clone(), &turn);
+                    Some(turn)
+                }
+                Err(error) => {
+                    tracing::error!(%error,"cannot start exact HTTP capture");
+                    return StatusCode::INSUFFICIENT_STORAGE.into_response();
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     // Inbound `Content-Encoding` decompression (codex-tui 0.145+ sends
     // `Content-Encoding: zstd` for Responses bodies). Decoded here, BEFORE the
     // log/body-summary/flow-store/turn-capture seams, so every downstream
@@ -1958,7 +1995,7 @@ async fn log_api_call(
     // The `api_call_id` extension the engine reads to link `response_id →
     // api_call_id` (D1) and to reach the per-turn capture state (F1c) is inserted
     // ONCE if EITHER gate wants it — never double-inserted when both fire.
-    if flow_gate || capture_gate || persistence_gate {
+    if flow_gate || capture_gate || persistence_gate || wire_turn.is_some() {
         parts
             .extensions
             .insert(crate::dashboard_flow::ApiCallId(api_call_id.clone()));
@@ -2066,6 +2103,17 @@ async fn log_api_call(
     // PRE-body-read 413/400 rejections above (no turn minted) are out of scope.
     let response = if turn_capture_state.is_some() || persistence_capture.is_some() {
         tee_served_body(response, turn_capture_state, persistence_capture)
+    } else {
+        response
+    };
+    let response = if let Some(turn) = wire_turn {
+        match crate::wire_capture::served_response(response, turn).await {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::error!(%error,"cannot capture client HTTP response");
+                return StatusCode::INSUFFICIENT_STORAGE.into_response();
+            }
+        }
     } else {
         response
     };

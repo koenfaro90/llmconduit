@@ -809,6 +809,9 @@ export interface HistoryRequest {
   input_tokens: number | null;
   output_tokens: number | null;
   cached_tokens: number | null;
+  reasoning_tokens?: number | null;
+  timings_json?: string | null;
+  attempts_json?: string | null;
   error: string | null;
   terminal_reason?: string | null;
   client_label: string | null;

@@ -86,25 +86,9 @@ export function useFlowDetail(apiCallId: string | null, historyRequest?: History
     retry: historyRequest ? false : undefined,
   });
   const historical = !!historyRequest && (connection === 'seeking' || !inCut || detailQuery.isError);
-  const historicalBodies = useQuery({
-    queryKey: apiCallId ? ['history', 'requests', apiCallId, 'inspector-bodies'] : ['history', 'requests', '__none__', 'inspector-bodies'],
-    queryFn: async () => {
-      const [inbound, upstream] = await Promise.allSettled([
-        client.historyRequestBody(apiCallId as string, 'client_in'),
-        client.historyRequestBody(apiCallId as string, 'upstream_out'),
-      ]);
-      return {
-        inbound: inbound.status === 'fulfilled' ? inbound.value : undefined,
-        upstream: upstream.status === 'fulfilled' ? upstream.value : undefined,
-      };
-    },
-    enabled: historical,
-    retry: false,
-    refetchInterval: historical && historyRequest?.status === 'running' ? 3_000 : false,
-  });
   const liveFlow = historical && historyRequest ? historyFlowSummary(historyRequest) : storeFlow;
   const detail = historical && historyRequest
-    ? historyFlowDetail(historyRequest, historicalBodies.data?.inbound, historicalBodies.data?.upstream)
+    ? historyFlowDetail(historyRequest)
     : detailEnabled ? detailQuery.data ?? null : null;
   // Non-body surfaces (headers/deltas/timeline/status/usage/cost/elapsed) must come from the FROZEN
   // cut while seeking, so the live REST detail is withheld from them (finding 1).
