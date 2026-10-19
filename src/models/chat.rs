@@ -206,9 +206,10 @@ impl ChatCompletionChunk {
         }
         self.choices.iter().any(|choice| {
             let d = &choice.delta;
-            [&d.content, &d.reasoning_content, &d.refusal]
+            [&d.content, &d.refusal]
                 .iter()
                 .any(|s| s.as_ref().is_some_and(|v| !v.is_empty()))
+                || d.reasoning_delta().is_some_and(|text| !text.is_empty())
                 || d.function_call.as_ref().is_some_and(arguments)
                 || d.tool_calls
                     .as_ref()
@@ -854,6 +855,9 @@ mod generation_tests {
         for delta in [
             serde_json::json!({"content":"x"}),
             serde_json::json!({"reasoning_content":"x"}),
+            serde_json::json!({"reasoning":"x"}),
+            serde_json::json!({"reasoning_content":"","reasoning":"x"}),
+            serde_json::json!({"thinking":{"content":"x"}}),
             serde_json::json!({"refusal":"x"}),
             serde_json::json!({"function_call":{"arguments":"{"}}),
             serde_json::json!({"tool_calls":[{"function":{"arguments":"{"}}]}),
