@@ -68,6 +68,18 @@ pub fn render(spec: &Value, placement: Option<&Placement>) -> Result<Value, Stri
         object.remove("metadata");
         object.remove("sizes");
     }
+    // A Compose-style bind discriminator is redundant in Fleet's bind-only
+    // mount schema. Normalize it before the strict agent decoder, including
+    // unload commands for previously accepted recipe documents.
+    if let Some(mounts) = model.get_mut("mounts").and_then(Value::as_array_mut) {
+        for mount in mounts {
+            if let Some(object) = mount.as_object_mut()
+                && object.get("type").and_then(Value::as_str) == Some("bind")
+            {
+                object.remove("type");
+            }
+        }
+    }
     if let Some(p) = placement {
         if p.addresses.is_empty()
             || p.rank as usize >= p.addresses.len()
@@ -509,6 +521,16 @@ pub async fn select(
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn compose_bind_mounts_render_as_strict_fleet_mounts() {
+        let spec = serde_json::json!({"image":"pinned", "mounts":[{"type":"bind","source":"/hf/inspection","target":"/inspection","read_only":true}]});
+        let rendered = super::render(&spec, None).unwrap();
+        assert_eq!(
+            rendered["mounts"][0],
+            serde_json::json!({"source":"/hf/inspection","target":"/inspection","read_only":true})
+        );
+        assert_eq!(spec["mounts"][0]["type"], "bind");
+    }
     use super::*;
     #[test]
     fn gpu_placement_round_trips_and_renders_each_rank_independently() {
