@@ -5460,6 +5460,41 @@ async fn d3_completed_flow_finalizes_with_cumulative_usage() {
 }
 
 #[tokio::test]
+async fn generation_timings_tool_only_turn_keeps_content_clock_absent() {
+    let upstream = MockUpstream::default();
+    upstream
+        .push_response(vec![
+            Ok(tool_call_chunk("chat-t", "call_1", "lookup", "{\"q\":")),
+            Ok(tool_call_chunk("chat-t", "call_1", "lookup", "\"test\"}")),
+            Ok(usage_chunk("chat-t", 100, 20, 120, None, Some(8))),
+        ])
+        .await;
+    let gateway = test_gateway_with_flow_store(upstream, MockSearch::default());
+    let api_id = d3_open_flow(&gateway);
+    let mut request = base_request(vec![user_message("hi")]);
+    request.tools = vec![ToolSpec::Function {
+        name: "lookup".to_string(),
+        description: String::new(),
+        parameters: json!({"type":"object","properties":{"q":{"type":"string"}}}),
+        strict: false,
+    }];
+    let stream = gateway
+        .clone()
+        .stream_responses_with_api_call_id(request, Some(api_id.clone()))
+        .await
+        .unwrap();
+    let _ = collect_stream(stream).await;
+    let record = d3_await_terminal(&gateway, &api_id).await;
+    assert!(record.phases.first_content_delta_ms.is_none());
+    assert!(record.phases.generation.first_generation_delta_ms.is_some());
+    assert_eq!(record.phases.generation.generation_tokens, Some(19));
+    assert_eq!(
+        record.phases.generation.generation_timing_complete,
+        Some(true)
+    );
+}
+
+#[tokio::test]
 async fn gap02_phases_populate_on_real_streamed_turn() {
     // Gap 02 acceptance: a real streamed turn populates ALL six per-phase timestamps
     // on the FlowRecord (and the body-free SnapshotFlowSummary projection), and they
@@ -5591,6 +5626,10 @@ async fn gap02_reasoning_deltas_do_not_stamp_ttft_content_does() {
         rec_a.phases.first_content_delta_ms.is_none(),
         "reasoning deltas (no content) must NOT stamp TTFT — got {:?}",
         rec_a.phases.first_content_delta_ms
+    );
+    assert!(
+        rec_a.phases.generation.first_generation_delta_ms.is_some(),
+        "reasoning does stamp the separate generation clock"
     );
     // It DID stream (reasoning) and DID complete, so stream_end is stamped — only TTFT
     // is absent, proving the gate is content-specific, not a missing-seam artifact.

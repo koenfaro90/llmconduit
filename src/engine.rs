@@ -3247,11 +3247,30 @@ impl Gateway {
             // arguments before the name. The gate is a pure decision machine; the
             // engine forwards its emissions via `emit_function_call_delta`.
             let mut tool_delta_gate = ToolDeltaGate::new();
+            let measure_generation = api_call_id.is_some() || persistence_phases.is_some();
+            let mut generation_first = None;
+            let mut generation_last = None;
             loop {
                 let Some(chunk) = Self::next_upstream_chunk(&mut stream, &tx, &abort_token).await?
                 else {
                     break;
                 };
+                if measure_generation && chunk.has_generated_output() {
+                    let now = std::time::Instant::now();
+                    if generation_first.is_none() {
+                        generation_first = Some(now);
+                        let ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis();
+                        serving_token.record_generation_start(ms);
+                        if let Some(id) = &api_call_id {
+                            self.flow_store()
+                                .record_generation(id, serving_token.generation_snapshot());
+                        }
+                    }
+                    generation_last = Some(now);
+                }
                 if let Some(usage) = chunk.usage.clone() {
                     // D3 (R1 #2): the cumulative-aware dashboard/monitor UPSERT is the
                     // ONLY consumer of `total`, and both its sinks are dashboard-only
@@ -3490,6 +3509,16 @@ impl Gateway {
                                 .await?;
                         }
                     }
+                }
+            }
+            if let Some(first) = generation_first {
+                serving_token.record_generation_round(
+                    generation_last.map(|last| last.duration_since(first).as_micros()),
+                    turn_usage.as_ref().map(|usage| usage.completion_tokens),
+                );
+                if let Some(id) = &api_call_id {
+                    self.flow_store()
+                        .record_generation(id, serving_token.generation_snapshot());
                 }
             }
             if let Some(usage) = turn_usage {

@@ -56,7 +56,7 @@ describe('durable request display', () => {
     expect(first).toEqual({ firstOutputAtMs: 1250, streamingPhase: 'decoding' });
     expect(requestSignals([dispatch(1100), { type: 'segment_append', response_id: 'resp_1',
       segment: { timestamp_ms: 1200, kind: 'reasoning', text: 'thinking' } }]).get('resp_1'))
-      .toEqual({ firstOutputAtMs: undefined, streamingPhase: 'decoding' });
+      .toEqual({ firstOutputAtMs: 1200, streamingPhase: 'decoding' });
     const next = requestSignals([dispatch(1100), output(1250), dispatch(1250)]).get('resp_1');
     expect(next).toEqual({ firstOutputAtMs: 1250, streamingPhase: 'prefilling' });
   });
@@ -125,4 +125,27 @@ it('preserves stored reasoning, phase timing and attempt details in historical r
  const row={...history,status:'completed',input_tokens:66537,output_tokens:154,cached_tokens:64000,reasoning_tokens:65,timings_json:JSON.stringify({normalization_done_ms:1002,routing_decision_ms:1003,first_upstream_byte_ms:1020,stream_end_ms:1100,finalize_ms:1101}),attempts_json:JSON.stringify([attempt])};
  expect(historyFlowSummary(row)).toMatchObject({usage:{prompt:66537,completion:154,cached:64000,reasoning:65},attempts:[attempt],normalization_done_ms:1002,routing_decision_ms:1003,first_upstream_byte_ms:1020,stream_end_ms:1100,finalize_ms:1101});
  expect(historyFlowDetail(row)).toMatchObject({usage:{reasoning:65},attempts:[attempt],first_upstream_byte_ms:1020});
+});
+
+
+it('retains reasoning/tool-only TTFT and per-round average decode after reload', () => {
+  const row = {...history, status:'completed', completed_at_ms:4000, first_token_at_ms:1200,
+    output_tokens:1000, reasoning_tokens:900,
+    timings_json:JSON.stringify({first_generation_delta_ms:1200, generation_duration_us:2_000_000,
+      generation_tokens:998, generation_timing_complete:true})};
+  expect(requestDisplay(row,null,9000)).toMatchObject({ttftMs:200, decodingTokensPerSec:499,decodeQuality:'derived'});
+  expect(historyFlowDetail(row).first_content_delta_ms).toBeNull();
+  expect(historyFlowDetail(row)).toMatchObject({first_generation_delta_ms:1200,generation_duration_us:2_000_000,generation_tokens:998,generation_timing_complete:true});
+});
+it('does not invent historical tool-only timings from response headers',()=>{
+  const row={...history,status:'completed',completed_at_ms:4000,output_tokens:300,
+    timings_json:JSON.stringify({first_upstream_byte_ms:1100,stream_end_ms:3990})};
+  expect(requestDisplay(row,null,9000)).toMatchObject({ttftMs:null,decodingTokensPerSec:null});
+});
+it('labels the wider historical content window and rejects buffered/incomplete generation timings',()=>{
+  const row={...history,status:'completed',completed_at_ms:4000,first_token_at_ms:1200,output_tokens:101,
+    timings_json:JSON.stringify({stream_end_ms:3200})};
+  expect(requestDisplay(row,null,9000)).toMatchObject({ttftMs:200,decodingTokensPerSec:50});
+  expect(requestDisplay(row,null,9000).decodeNote).toContain('Historical approximation');
+  expect(requestDisplay({...row,timings_json:JSON.stringify({generation_timing_complete:false,stream_end_ms:3200})},null,9000).decodingTokensPerSec).toBeNull();
 });

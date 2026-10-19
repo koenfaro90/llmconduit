@@ -4512,6 +4512,7 @@ struct ServingInfo {
     /// First canonical content delta emitted to the client. Retained on the same
     /// evict-safe token as usage so terminal metrics never need to re-read the store.
     first_content_delta_ms: Option<u128>,
+    generation: crate::dashboard_flow::GenerationTimings,
     /// Clean stream end after the terminal response event was emitted.
     stream_end_ms: Option<u128>,
     /// Gap 03 round-1 review (F1): a PER-ATTEMPT scratch slot holding the epoch-ms the
@@ -4649,6 +4650,36 @@ impl ServingToken {
     pub fn attempts_snapshot(&self) -> (Vec<crate::dashboard_flow::Attempt>, Option<u128>) {
         let info = self.lock();
         (info.attempts.clone(), info.first_upstream_byte_ms)
+    }
+
+    pub fn generation_snapshot(&self) -> crate::dashboard_flow::GenerationTimings {
+        self.lock().generation
+    }
+
+    pub fn record_generation_start(&self, ms: u128) {
+        self.lock()
+            .generation
+            .first_generation_delta_ms
+            .get_or_insert(u64::try_from(ms).unwrap_or(u64::MAX));
+    }
+
+    pub fn record_generation_round(&self, duration_us: Option<u128>, tokens: Option<i64>) {
+        let mut info = self.lock();
+        let g = &mut info.generation;
+        let valid = duration_us.is_some_and(|v| v > 0) && tokens.is_some_and(|v| v > 1);
+        g.generation_timing_complete = Some(g.generation_timing_complete.unwrap_or(true) && valid);
+        if valid {
+            g.generation_duration_us = Some(
+                g.generation_duration_us
+                    .unwrap_or(0)
+                    .saturating_add(u64::try_from(duration_us.unwrap()).unwrap_or(u64::MAX)),
+            );
+            g.generation_tokens = Some(
+                g.generation_tokens
+                    .unwrap_or(0)
+                    .saturating_add(tokens.unwrap() - 1),
+            );
+        }
     }
 
     /// Record the first canonical content delta timestamp (first-write-wins).

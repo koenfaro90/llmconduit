@@ -218,6 +218,10 @@ describe('dashboardStore — patchFlowStatus threads projected spine fields (gap
         normalization_done_ms: 1_700_000_000_050,
         routing_decision_ms: 1_700_000_000_090,
         first_content_delta_ms: 1_700_000_000_500,
+        first_generation_delta_ms: 1_700_000_000_250,
+        generation_duration_us: 2_000_000,
+        generation_tokens: 400,
+        generation_timing_complete: true,
         stream_end_ms: 1_700_000_001_000,
         finalize_ms: 1_700_000_001_100,
         attempts: [SERVED],
@@ -230,6 +234,10 @@ describe('dashboardStore — patchFlowStatus threads projected spine fields (gap
     expect(row?.normalization_done_ms).toBe(1_700_000_000_050);
     expect(row?.routing_decision_ms).toBe(1_700_000_000_090);
     expect(row?.first_content_delta_ms).toBe(1_700_000_000_500);
+    expect(row?.first_generation_delta_ms).toBe(1_700_000_000_250);
+    expect(row?.generation_duration_us).toBe(2_000_000);
+    expect(row?.generation_tokens).toBe(400);
+    expect(row?.generation_timing_complete).toBe(true);
     expect(row?.stream_end_ms).toBe(1_700_000_001_000);
     expect(row?.finalize_ms).toBe(1_700_000_001_100);
     expect(row?.first_upstream_byte_ms).toBe(1_700_000_000_350);

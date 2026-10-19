@@ -194,6 +194,29 @@ pub struct ChatCompletionChunk {
     pub usage: Option<ChunkUsage>,
 }
 
+impl ChatCompletionChunk {
+    /// Role announcements, empty deltas, usage and signatures are not generated output.
+    pub fn has_generated_output(&self) -> bool {
+        fn arguments(call: &ChatFunctionCall) -> bool {
+            call.arguments.as_ref().is_some_and(|v| match v {
+                Value::String(text) => !text.is_empty(),
+                Value::Null => false,
+                _ => true,
+            })
+        }
+        self.choices.iter().any(|choice| {
+            let d = &choice.delta;
+            [&d.content, &d.reasoning_content, &d.refusal]
+                .iter()
+                .any(|s| s.as_ref().is_some_and(|v| !v.is_empty()))
+                || d.function_call.as_ref().is_some_and(arguments)
+                || d.tool_calls
+                    .as_ref()
+                    .is_some_and(|calls| calls.iter().any(|call| arguments(&call.function)))
+        })
+    }
+}
+
 // Provider telemetry must never break an otherwise valid response chunk.
 fn optional_engine_metrics<'de, D: serde::Deserializer<'de>>(
     d: D,
@@ -809,5 +832,37 @@ mod tests {
 
         assert_eq!(tool.function.name, "echo");
         assert_eq!(tool.function.description, "");
+    }
+}
+
+#[cfg(test)]
+mod generation_tests {
+    use super::*;
+    #[test]
+    fn generation_ignores_headers_heartbeat_and_usage_but_counts_reasoning_and_tools() {
+        for delta in [
+            serde_json::json!({"role":"assistant"}),
+            serde_json::json!({"content":""}),
+            serde_json::json!({"tool_calls":[{"function":{"name":"lookup","arguments":""}}]}),
+        ] {
+            let chunk: ChatCompletionChunk = serde_json::from_value(
+                serde_json::json!({"id":"x","choices":[{"index":0,"delta":delta}]}),
+            )
+            .unwrap();
+            assert!(!chunk.has_generated_output());
+        }
+        for delta in [
+            serde_json::json!({"content":"x"}),
+            serde_json::json!({"reasoning_content":"x"}),
+            serde_json::json!({"refusal":"x"}),
+            serde_json::json!({"function_call":{"arguments":"{"}}),
+            serde_json::json!({"tool_calls":[{"function":{"arguments":"{"}}]}),
+        ] {
+            let chunk: ChatCompletionChunk = serde_json::from_value(
+                serde_json::json!({"id":"x","choices":[{"index":0,"delta":delta}]}),
+            )
+            .unwrap();
+            assert!(chunk.has_generated_output());
+        }
     }
 }

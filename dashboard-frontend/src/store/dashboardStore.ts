@@ -393,6 +393,10 @@ export const dashboardStore = createStore<DashboardState>((set, get) => ({
         normalization_done_ms: p.normalization_done_ms ?? prev?.normalization_done_ms,
         routing_decision_ms: p.routing_decision_ms ?? prev?.routing_decision_ms,
         first_content_delta_ms: p.first_content_delta_ms ?? prev?.first_content_delta_ms,
+        first_generation_delta_ms: p.first_generation_delta_ms ?? prev?.first_generation_delta_ms,
+        generation_duration_us: p.generation_duration_us ?? prev?.generation_duration_us,
+        generation_tokens: p.generation_tokens ?? prev?.generation_tokens,
+        generation_timing_complete: p.generation_timing_complete ?? prev?.generation_timing_complete,
         stream_end_ms: p.stream_end_ms ?? prev?.stream_end_ms,
         finalize_ms: p.finalize_ms ?? prev?.finalize_ms,
         // `attempts` is an ARRAY, so `p.attempts ?? prev?.attempts` is WRONG (gap 10b review round

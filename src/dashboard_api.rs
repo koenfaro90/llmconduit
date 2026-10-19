@@ -2453,6 +2453,12 @@ mod tests {
             first_content_delta_ms: Some(1_500),
             stream_end_ms: Some(5_320),
             finalize_ms: Some(5_340),
+            generation: crate::dashboard_flow::GenerationTimings {
+                first_generation_delta_ms: Some(1_250),
+                generation_duration_us: Some(4_000_000),
+                generation_tokens: Some(800),
+                generation_timing_complete: Some(true),
+            },
         }
     }
 

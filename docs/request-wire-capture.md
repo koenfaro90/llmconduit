@@ -59,3 +59,30 @@ retained inbound skeleton events in one indexed batch for the requested page,
 without reconstructing message blobs or sending bodies to the table. Column
 sorting/filtering operates on the loaded page; the view's server filters still
 search retained history.
+
+## Request timing columns
+
+TTFT uses the first nonempty upstream text, reasoning, refusal or tool-argument
+payload relative to request ingress. Role announcements, empty deltas, signatures,
+response headers and usage-only chunks do not count. This gateway-observed clock
+is separate from `first_content_delta_ms`, which still measures content delivery
+to the client. Both clocks survive in `timings_json`; `first_token_at_ms` projects
+the generated-output clock for new requests. No timing is reconstructed from raw
+body archives, which do not contain per-chunk arrival times.
+
+After completion, Decode speed retains an average from upstream-reported completion
+tokens (including reasoning, without double counting) minus one first token per
+upstream round, divided by the summed monotonic first-to-last output windows.
+Prefill, usage-tail latency and server-tool execution are excluded. This is a
+**derived gateway-observed rate**, affected by transport buffering and speculative
+chunks; it is not an engine-reported timing or a benchmark. Every generated round
+must have usage and a nonzero streaming window, otherwise the rate stays unavailable.
+Live speed still requires successive reported token-counter updates; final-only
+usage cannot provide an instantaneous live speed.
+
+Historical content-only records can show a clearly identified approximation using
+first content delivery through stream end. Historical tool-only requests without
+a first-token timestamp remain unavailable. HTTP TTFB is never substituted for TTFT.
+New timings are flattened onto REST list/detail and WebSocket flow updates, stored
+independently of bounded live-flow retention, and reused for numeric sorting and
+filtering in the shared request table.

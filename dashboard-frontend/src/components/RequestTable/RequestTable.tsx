@@ -27,7 +27,7 @@ const HEADERS: Record<RequestColumn, { label: string; width: string; title?: str
   cached: { label: 'Cached IN', width: 'w-[90px]', numeric: true, title: 'Reported cached input tokens; — when not reported' },
   newIn: { label: 'New IN', width: 'w-[105px]', numeric: true, title: 'Uncached input tokens = reported input minus reported cached input; — means cache usage was not reported.' },
   tokensOut: { label: 'Tokens OUT', width: 'w-[80px]', numeric: true, title: 'Upstream-reported usage; may arrive only at completion' },
-  decodeSpeed: { label: 'Decode speed', width: 'w-[105px]', numeric: true, title: 'Rate from consecutive reported output-token counts while decoding.' },
+  decodeSpeed: { label: 'Decode speed', width: 'w-[105px]', numeric: true, title: 'Live reported-token rate, or retained average decode rate after completion. Hover a value for its timing source.' },
   reasoningEffort: { label: 'Reasoning effort', width: 'w-[140px]', title: 'Inbound reasoning_effort or reasoning.effort; no profile defaults.' },
   thinking: { label: 'Thinking', width: 'w-[190px]', title: 'Inbound thinking, or chat_template_kwargs.thinking / enable_thinking.' },
   clearThinking: { label: 'clear_thinking', width: 'w-[135px]', title: 'Inbound clear_thinking, including chat_template_kwargs.' },
@@ -39,10 +39,10 @@ const HEADERS: Record<RequestColumn, { label: string; width: string; title?: str
   lineage: { label: 'Lineage', width: 'w-[125px]' },
 };
 
-function requestTableColumnDefs(columns: readonly RequestColumn[] = ALL_REQUEST_COLUMNS): DataTableColumn<HistoryRequest>[] {
+function requestTableColumnDefs(columns: readonly RequestColumn[] = ALL_REQUEST_COLUMNS, displays?: Map<string, RequestDisplay>): DataTableColumn<HistoryRequest>[] {
   return columns.map((column) => ({
     id: column,
-    value: row => inboundSetting(row,column) ?? requestSortValue(row,column),
+    value: row => column === 'ttft' ? displays?.get(row.id)?.ttftMs ?? null : column === 'decodeSpeed' ? displays?.get(row.id)?.decodingTokensPerSec ?? null : inboundSetting(row,column) ?? requestSortValue(row,column),
     label: HEADERS[column].label,
     width: `${Number(HEADERS[column].width.match(/\d+/)?.[0]) || 180}px`,
     align: HEADERS[column].numeric ? 'right' : 'left',
@@ -124,13 +124,16 @@ export function RequestTable({ rows, selectedId = null, onSelect, columns = ALL_
   const identities = useMemo(() => identityOptions(authUsers.data?.users, authKeys.data?.api_keys, legacyUsers.data?.users, legacyKeys.data?.keys),
     [authUsers.data, authKeys.data, legacyUsers.data, legacyKeys.data]);
 
-  const tableColumns = requestTableColumnDefs(columns);
+  const displays = new Map(rows.map(row => {
+    const live = liveFlows?.get(row.id) ?? null;
+    const signals = signalsByResponse.get(live?.response_id ?? row.response_id ?? '');
+    return [row.id, requestDisplay(row, live, nowMs, signals, decodingRate(usageSamples.get(row.id) ?? [], performance.now()))];
+  }));
+  const tableColumns = requestTableColumnDefs(columns, displays);
   return <DataTable interactive id={tableId} columnStateKey={`${tableId}-numeric`} rows={rows} rowKey={(row) => row.id} columns={tableColumns}
     rowTestId={rowTestId} tableTestId="request-table" pagination={pagination} emptyMessage={emptyMessage}
     className="h-full" renderRow={(row, visible) => {
-      const live = liveFlows?.get(row.id) ?? null;
-      const signals = signalsByResponse.get(live?.response_id ?? row.response_id ?? '');
-      const display = requestDisplay(row, live, nowMs, signals, decodingRate(usageSamples.get(row.id) ?? [], performance.now()));
+      const display = displays.get(row.id)!;
       return <RequestTableRow key={row.id} row={row} display={display} columns={visible.map((column) => column.id as RequestColumn)}
         identity={requestIdentity(row, identities)} selected={selectedId === row.id} onSelect={onSelect ? () => onSelect(row) : undefined} rowTestId={rowTestId} />;
     }} />;
@@ -180,7 +183,7 @@ function RequestCell({ column, row, display, identity }: {
     case 'session': return <td className="truncate px-2 py-2 font-mono text-text-muted" title={display.session}>{display.session}</td>;
     case 'status': return <td className={`px-2 py-2 ${display.status === 'failed' ? 'text-status-down' : ['queued', 'prefilling', 'decoding'].includes(display.status) ? 'text-accent' : 'text-text'}`}
       title={display.status === 'queued' ? 'Accepted; preparing, routing, or waiting for an upstream response' : display.status === 'prefilling' ? 'Upstream responded; waiting for the next output delta' : undefined}>{display.status}</td>;
-    case 'ttft': return <td className="px-2 py-2 text-right tabular-nums text-text-muted">{fmtElapsed(display.ttftMs)}</td>;
+    case 'ttft': return <td className="px-2 py-2 text-right tabular-nums text-text-muted" data-testid="request-ttft" title={display.ttftNote}>{fmtElapsed(display.ttftMs)}</td>;
     case 'duration': return <td className="px-2 py-2 text-right tabular-nums text-text-muted" title={['queued', 'prefilling', 'decoding'].includes(display.status) ? 'Elapsed so far' : undefined}>{fmtElapsed(display.durationMs)}</td>;
     case 'tokensIn': return <td className="px-2 py-2 text-right tabular-nums text-text-muted">{fmtTokens(display.inputTokens)}</td>;
     case 'cached': return <td className="px-2 py-2 text-right tabular-nums text-text-muted">{fmtTokens(row.cached_tokens)}</td>;
@@ -196,7 +199,7 @@ function RequestCell({ column, row, display, identity }: {
       </span></>}
     </td>;
     case 'tokensOut': return <td className="px-2 py-2 text-right tabular-nums text-text-muted">{fmtTokens(display.outputTokens)}</td>;
-    case 'decodeSpeed': return <td className="px-2 py-2 text-right tabular-nums text-text" data-testid="request-decode-speed" data-quality={display.decodingTokensPerSec == null ? 'unavailable' : 'measured'}>{fmtTokensPerSec(display.decodingTokensPerSec)}</td>;
+    case 'decodeSpeed': return <td className="px-2 py-2 text-right tabular-nums text-text" data-testid="request-decode-speed" data-quality={display.decodeQuality} title={display.decodeNote}>{fmtTokensPerSec(display.decodingTokensPerSec)}</td>;
     case 'model': return <td className="truncate px-2 py-2 text-text" title={display.model}>{display.model}</td>;
     case 'provider': return <td className="truncate px-2 py-2 text-text-muted">{row.backend ?? '—'}</td>;
     case 'protocol': return <td className="truncate px-2 py-2 text-text-muted">{row.client_protocol}</td>;

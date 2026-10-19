@@ -123,6 +123,10 @@ export type SpineFlow = Pick<
   | 'normalization_done_ms'
   | 'routing_decision_ms'
   | 'first_content_delta_ms'
+  | 'first_generation_delta_ms'
+  | 'generation_duration_us'
+  | 'generation_tokens'
+  | 'generation_timing_complete'
   | 'stream_end_ms'
   | 'finalize_ms'
   | 'finished_ms'
@@ -307,7 +311,10 @@ export function latencyBreakdown(
     : { valueMs: null, quality: 'unavailable', detail: 'total unavailable — no measured span yet' };
 
   // ---- TTFT: measured from first_content, else the derived first-visible-activity fallback ----
-  const ttft = computeTtft(ingress, startedMs, firstContent, monitorOutputs);
+  const generated = flow ? epoch(flow.first_generation_delta_ms) : null;
+  const ttft: Figure = generated != null && ingress != null
+    ? {valueMs:Math.max(0,generated-ingress),quality:'measured',detail:'Gateway-observed first generated text/reasoning/refusal/tool arguments, relative to ingress.'}
+    : computeTtft(ingress, startedMs, firstContent, monitorOutputs);
 
   // ---- Wire TTFB relative to ingress (gap 03) ----
   const ttfb: Figure = ingress !== null && upstreamByte !== null
@@ -319,7 +326,11 @@ export function latencyBreakdown(
     : { valueMs: null, quality: 'unavailable', detail: 'wire TTFB unavailable — no upstream first byte measured' };
 
   // ---- Stream tok/s (derived) ----
-  const rate = computeRate(flow?.usage, firstContent, streamEnd);
+  const rate: RateFigure = flow?.generation_timing_complete != null
+    ? flow.generation_timing_complete && (flow.generation_duration_us ?? 0) > 0 && (flow.generation_tokens ?? 0) > 0
+      ? {tokensPerSec:flow.generation_tokens! * 1_000_000 / flow.generation_duration_us!,quality:'derived',detail:'Average gateway-observed decode: reported tokens minus one per round, divided by summed first-to-last output windows. Includes reasoning; excludes prefill and server-tool waits. Not engine timing.'}
+      : {tokensPerSec:null,quality:'unavailable',detail:'No complete generation window and reported token count.'}
+    : computeRate(flow?.usage, firstContent, streamEnd);
 
   return { total, ttft, ttfb, rate, segments, knownSpanMs };
 }

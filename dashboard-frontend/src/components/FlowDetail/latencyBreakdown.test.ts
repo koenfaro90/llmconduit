@@ -248,3 +248,12 @@ describe('latencyBreakdown — honest per-flow phase decomposition (gap 10)', ()
     expect(m.ttft.quality).toBe('unavailable');
   });
 });
+
+it('uses persisted generation timings for reasoning/tool-only requests without inventing content delivery',()=>{
+ const model=latencyBreakdown(flow({ingress_ms:T,first_generation_delta_ms:T+200,
+   generation_duration_us:2_000_000,generation_tokens:998,generation_timing_complete:true,stream_end_ms:T+4000}));
+ expect(model.ttft).toMatchObject({valueMs:200,quality:'measured'});
+ expect(model.rate).toMatchObject({tokensPerSec:499,quality:'derived'});
+ expect(model.rate.detail).toContain('gateway-observed');
+ expect(seg(model,'generation').quality).toBe('unavailable');
+});

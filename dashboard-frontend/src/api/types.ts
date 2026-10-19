@@ -114,6 +114,12 @@ export interface PhaseTimings {
    * When present ⇒ the breakdown labels TTFT **measured**.
    */
   first_content_delta_ms?: number | null;
+  /** First nonempty upstream text/reasoning/refusal/tool-argument delta (gateway clock). */
+  first_generation_delta_ms?: number | null;
+  /** Sum of per-round first-to-last generated-delta windows; excludes tool waits/prefill. */
+  generation_duration_us?: number | null;
+  generation_tokens?: number | null;
+  generation_timing_complete?: boolean | null;
   /** Stream completion (terminal `response.completed`/`incomplete`). Absent on a mid-stream error. */
   stream_end_ms?: number | null;
   /** Terminal finalize (every terminal: completed/failed/cancelled); the right edge. */
@@ -1965,6 +1971,10 @@ function isOptPhaseTimings(v: Record<string, unknown>): boolean {
     isOptUint(v.normalization_done_ms) &&
     isOptUint(v.routing_decision_ms) &&
     isOptUint(v.first_content_delta_ms) &&
+    isOptUint(v.first_generation_delta_ms) &&
+    isOptUint(v.generation_duration_us) &&
+    isOptUint(v.generation_tokens) &&
+    (v.generation_timing_complete == null || typeof v.generation_timing_complete === 'boolean') &&
     isOptUint(v.stream_end_ms) &&
     isOptUint(v.finalize_ms)
   );

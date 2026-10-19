@@ -898,6 +898,8 @@ impl FlowSessionFacts {
 /// rule holds: a missing phase is NEVER coerced to `0`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize, ToSchema)]
 pub struct PhaseTimings {
+    #[serde(flatten)]
+    pub generation: GenerationTimings,
     /// Request ingress — when the FlowStore first `open`ed the record (≈ `started_ms`).
     /// Always `Some` once a record exists; the explicit phase value the waterfall
     /// anchors the other phases against.
@@ -930,6 +932,22 @@ pub struct PhaseTimings {
     /// once the flow is terminal; the right edge of the waterfall.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finalize_ms: Option<u128>,
+}
+
+/// Gateway-observed generation, separate from client content delivery. Durations
+/// sum monotonic per-round windows, excluding prefill and server-tool waits.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize, ToSchema)]
+pub struct GenerationTimings {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_generation_delta_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation_duration_us: Option<u64>,
+    /// Provider completion tokens minus one first token per measured round.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation_tokens: Option<i64>,
+    /// False when a generated round lacked usage or arrived in one buffered chunk.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation_timing_complete: Option<bool>,
 }
 
 impl PhaseTimings {
@@ -1683,6 +1701,14 @@ impl DashboardFlowStore {
             record.phases.stamp_first_content_delta(now);
         });
         now
+    }
+
+    pub fn record_generation(&self, id: &str, generation: GenerationTimings) {
+        if !self.enabled {
+            return;
+        }
+        let mut state = self.lock();
+        state.update(id, |record| record.phases.generation = generation);
     }
 
     /// Gap 02 — stamp the **stream end** phase: the engine reached the terminal

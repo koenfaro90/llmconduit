@@ -39,6 +39,9 @@ export function requestIdentity(row: HistoryRequest, options: IdentityOptions): 
 export interface RequestDisplay {
   status: string;
   decodingTokensPerSec: number | null;
+  decodeNote: string;
+  decodeQuality: 'measured' | 'derived' | 'unavailable';
+  ttftNote: string;
   endMs: number | null;
   ttftMs: number | null;
   durationMs: number | null;
@@ -65,9 +68,7 @@ export function requestSignals(messages: DebugWsMessage[]): Map<string, RequestS
     } else if (message.type === 'segment_append') {
       const prior = signals.get(message.response_id);
       signals.set(message.response_id, {
-        // Reasoning and tool-argument deltas also mean generation has begun, but
-        // neither is the first client-visible content token used for TTFT.
-        firstOutputAtMs: prior?.firstOutputAtMs ?? (message.segment.kind === 'output' ? message.segment.timestamp_ms : undefined),
+        firstOutputAtMs: prior?.firstOutputAtMs ?? (message.segment.text.length > 0 ? message.segment.timestamp_ms : undefined),
         streamingPhase: 'decoding',
       });
     }
@@ -92,7 +93,10 @@ export function requestDisplay(row: HistoryRequest, live: FlowSummary | null, no
   const persistedTerminal = row.status !== 'running' && row.status !== 'open';
   const liveTerminal = live && live.status !== 'open' ? live.status : null;
   const terminal = persistedTerminal || liveTerminal != null;
-  const firstOutputAtMs = signals.firstOutputAtMs ?? row.first_token_at_ms ?? live?.first_content_delta_ms;
+  const stored = storedPhases(row);
+  const generationFirst = stored.first_generation_delta_ms ?? live?.first_generation_delta_ms;
+  const firstOutputAtMs = generationFirst ?? (persistedTerminal ? row.first_token_at_ms : null)
+    ?? signals.firstOutputAtMs ?? row.first_token_at_ms ?? live?.first_content_delta_ms;
   const status = persistedTerminal ? row.status : liveTerminal ??
     (signals.streamingPhase === 'decoding' ? 'decoding'
       : signals.streamingPhase === 'prefilling' ? 'prefilling'
@@ -101,13 +105,8 @@ export function requestDisplay(row: HistoryRequest, live: FlowSummary | null, no
   const liveStartMs = live?.ingress_ms ?? live?.started_ms;
   const endMs = terminal ? row.completed_at_ms ?? live?.finished_ms ??
     (live?.elapsed_ms == null || liveStartMs == null ? null : liveStartMs + live.elapsed_ms) : null;
-  const ttftMs = persistedTerminal && row.first_token_at_ms != null
-    ? Math.max(0, row.first_token_at_ms - row.created_at_ms)
-    : live?.first_content_delta_ms != null
-      ? Math.max(0, live.first_content_delta_ms - (liveStartMs ?? row.created_at_ms))
-      : firstOutputAtMs != null
-        ? Math.max(0, firstOutputAtMs - (liveStartMs ?? row.created_at_ms))
-        : row.first_token_at_ms == null ? null : Math.max(0, row.first_token_at_ms - row.created_at_ms);
+  const ttftStart = persistedTerminal ? stored.ingress_ms ?? row.created_at_ms : liveStartMs ?? row.created_at_ms;
+  const ttftMs = firstOutputAtMs == null ? null : Math.max(0, firstOutputAtMs - ttftStart);
   const durationMs = terminal
     ? row.completed_at_ms != null ? Math.max(0, row.completed_at_ms - row.created_at_ms) : live?.elapsed_ms ?? (endMs == null ? null : Math.max(0, endMs - row.created_at_ms))
     : Math.max(0, nowMs - row.created_at_ms);
@@ -119,9 +118,35 @@ export function requestDisplay(row: HistoryRequest, live: FlowSummary | null, no
     && Number.isFinite(inputTokens) && Number.isFinite(cachedTokens)
     && cachedTokens >= 0 && cachedTokens <= inputTokens
     ? inputTokens - cachedTokens : null;
+  const timing = stored.generation_timing_complete != null ? stored : live;
+  const generationUs = timing?.generation_duration_us;
+  const generationTokens = timing?.generation_tokens;
+  const completeRate = terminal && timing?.generation_timing_complete === true
+    && generationUs != null && generationUs > 0 && Number.isFinite(generationUs)
+    && generationTokens != null && generationTokens > 0 && Number.isFinite(generationTokens)
+    ? generationTokens * 1_000_000 / generationUs : null;
+  // Old content-only records have a wider delivery window. Keep their provenance
+  // explicit; never substitute HTTP response headers for a missing first token.
+  const legacyFirst = row.first_token_at_ms ?? stored.first_content_delta_ms ?? live?.first_content_delta_ms;
+  const legacyEnd = stored.stream_end_ms ?? live?.stream_end_ms;
+  const outputTokens = persistedTerminal ? row.output_tokens : live?.usage?.completion ?? row.output_tokens;
+  const legacyRate = terminal && timing?.generation_timing_complete == null && legacyFirst != null
+    && legacyEnd != null && legacyEnd > legacyFirst && outputTokens != null && outputTokens > 1
+    ? (outputTokens - 1) * 1000 / (legacyEnd - legacyFirst) : null;
+  const liveRate = status === 'decoding' ? decodingTokensPerSec : null;
+  const rate = completeRate ?? legacyRate ?? liveRate;
   return {
     status,
-    decodingTokensPerSec: status === 'decoding' ? decodingTokensPerSec : null,
+    decodingTokensPerSec: rate,
+    decodeQuality: rate == null ? 'unavailable' : liveRate != null && completeRate == null && legacyRate == null ? 'measured' : 'derived',
+    decodeNote: completeRate != null
+      ? 'Average gateway-observed decode: reported completion tokens minus one per round, divided by summed first-to-last generated-output windows. Includes reasoning; excludes prefill and server-tool waits. Network buffering can affect this rate; it is not engine timing.'
+      : legacyRate != null ? 'Historical approximation: reported output tokens minus one, divided by first content delivery to stream end. May include buffering and tool waits.'
+        : liveRate != null ? 'Live rate from consecutive upstream-reported completion-token counts.'
+          : 'Unavailable: no complete streamed generation window and reported token count. HTTP headers are not a first token.',
+    ttftNote: generationFirst != null ? 'Request ingress to first generated upstream text, reasoning, refusal or tool arguments (gateway-observed).'
+      : firstOutputAtMs != null ? 'First observed output latency; historical records use first content delivery.'
+        : 'Unavailable: first generated output was not captured for this request.',
     endMs,
     ttftMs,
     durationMs,
@@ -157,11 +182,12 @@ function storedPhases(row:HistoryRequest):Partial<FlowSummary>{
  let phases:Record<string,unknown>={};let attempts:unknown;
  try{const value:unknown=JSON.parse(row.timings_json??'{}');if(value&&typeof value==='object'&&!Array.isArray(value))phases=value as Record<string,unknown>;}catch{/* Old records may have no phase data. */}
  try{attempts=JSON.parse(row.attempts_json??'null');}catch{/* Leave invalid traces unavailable. */}
- const names=['ingress_ms','normalization_done_ms','routing_decision_ms','first_content_delta_ms','stream_end_ms','finalize_ms','first_upstream_byte_ms'] as const;
- return {...Object.fromEntries(names.filter(k=>typeof phases[k]==='number'&&Number.isFinite(phases[k])&&Number(phases[k])>=0).map(k=>[k,phases[k]])),...(Array.isArray(attempts)&&attempts.every(isAttempt)?{attempts}:{})};
+ const names=['ingress_ms','normalization_done_ms','routing_decision_ms','first_content_delta_ms','first_generation_delta_ms','generation_duration_us','generation_tokens','stream_end_ms','finalize_ms','first_upstream_byte_ms'] as const;
+ return {...(typeof phases.generation_timing_complete==='boolean'?{generation_timing_complete:phases.generation_timing_complete}:{}),...Object.fromEntries(names.filter(k=>typeof phases[k]==='number'&&Number.isFinite(phases[k])&&Number(phases[k])>=0).map(k=>[k,phases[k]])),...(Array.isArray(attempts)&&attempts.every(isAttempt)?{attempts}:{})};
 }
 
 export function historyFlowSummary(row: HistoryRequest): FlowSummary {
+  const phases = storedPhases(row);
   const uri = row.client_protocol === 'anthropic_messages' ? '/v1/messages'
     : row.client_protocol === 'chat_completions' ? '/v1/chat/completions' : '/v1/responses';
   return {
@@ -177,9 +203,9 @@ export function historyFlowSummary(row: HistoryRequest): FlowSummary {
     started_ms: row.created_at_ms,
     finished_ms: row.completed_at_ms,
     elapsed_ms: row.completed_at_ms == null ? null : Math.max(0, row.completed_at_ms - row.created_at_ms),
-    first_content_delta_ms: row.first_token_at_ms,
+    first_content_delta_ms: phases.first_generation_delta_ms != null ? phases.first_content_delta_ms ?? null : row.first_token_at_ms,
     ingress_ms: row.created_at_ms,
-    ...storedPhases(row),
+    ...phases,
     cost_confidence: 'unavailable',
     terminal_reason: row.terminal_reason ?? row.error,
     harness: row.harness,
@@ -210,6 +236,10 @@ export function historyFlowDetail(row: HistoryRequest, inboundBody?: unknown, up
     finished_ms: summary.finished_ms,
     elapsed_ms: summary.elapsed_ms,
     first_content_delta_ms: summary.first_content_delta_ms,
+    first_generation_delta_ms: summary.first_generation_delta_ms,
+    generation_duration_us: summary.generation_duration_us,
+    generation_tokens: summary.generation_tokens,
+    generation_timing_complete: summary.generation_timing_complete,
     ingress_ms: summary.ingress_ms,
     normalization_done_ms:summary.normalization_done_ms,routing_decision_ms:summary.routing_decision_ms,stream_end_ms:summary.stream_end_ms,finalize_ms:summary.finalize_ms,first_upstream_byte_ms:summary.first_upstream_byte_ms,attempts:summary.attempts,
     cost: null,

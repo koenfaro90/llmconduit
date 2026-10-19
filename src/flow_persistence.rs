@@ -275,7 +275,8 @@ impl PersistenceTerminalGuard {
         let (route, provider) = self.serving.snapshot();
         let (model_served, usage) = self.serving.metrics_snapshot();
         let (attempts, first_upstream_byte_ms) = self.serving.attempts_snapshot();
-        let phases = self.phases.snapshot();
+        let mut phases = self.phases.snapshot();
+        phases.generation = self.serving.generation_snapshot();
         let metrics = TerminalMetricsInputs {
             model_served,
             endpoint: String::new(),
@@ -522,7 +523,13 @@ pub fn finish_from_terminal(
         response_id: input.response_id.map(str::to_owned),
         status: input.outcome.as_str().to_owned(),
         completed_at_ms: epoch_ms(input.completed_at_ms),
-        first_token_at_ms: input.phases.first_content_delta_ms.map(epoch_ms),
+        first_token_at_ms: input
+            .phases
+            .generation
+            .first_generation_delta_ms
+            .map(u128::from)
+            .or(input.phases.first_content_delta_ms)
+            .map(epoch_ms),
         input_tokens: usage.map(|value| value.prompt),
         output_tokens: usage.map(|value| value.completion),
         cached_tokens: usage.and_then(|value| value.cached),
@@ -1376,6 +1383,57 @@ mod tests {
     use async_trait::async_trait;
     use std::num::NonZeroUsize;
 
+    #[test]
+    fn generation_timings_survive_round_trip_and_eviction_safe_terminal_persistence() {
+        let token = crate::upstream::ServingToken::default();
+        token.record_generation_start(1200);
+        token.record_generation_start(2200);
+        token.record_generation_round(Some(2_000_000), Some(501));
+        token.record_generation_round(Some(1_000_000), Some(251));
+        let generation = token.generation_snapshot();
+        assert_eq!(generation.first_generation_delta_ms, Some(1200));
+        assert_eq!(generation.generation_tokens, Some(750));
+        assert_eq!(generation.generation_duration_us, Some(3_000_000));
+        assert_eq!(generation.generation_timing_complete, Some(true));
+        let phases = PhaseTimings {
+            generation,
+            ..Default::default()
+        };
+        let encoded = serde_json::to_value(phases).unwrap();
+        assert_eq!(encoded["first_generation_delta_ms"], 1200);
+        assert_eq!(
+            serde_json::from_value::<PhaseTimings>(encoded).unwrap(),
+            phases
+        );
+        let finish = finish_from_terminal(TerminalPersistenceInput {
+            response_id: None,
+            outcome: PersistenceOutcome::Completed,
+            completed_at_ms: 6000,
+            phases,
+            first_upstream_byte_ms: Some(1100),
+            terminal_reason: None,
+            error: None,
+            client_label: None,
+            client_source: None,
+            metrics: &TerminalMetricsInputs::default(),
+        })
+        .unwrap();
+        assert_eq!(finish.first_token_at_ms, Some(1200));
+        let saved: PhaseTimings =
+            serde_json::from_str(finish.timings_json.as_ref().unwrap()).unwrap();
+        assert_eq!(saved.generation, generation);
+        token.record_generation_round(Some(0), Some(250));
+        assert_eq!(
+            token.generation_snapshot().generation_timing_complete,
+            Some(false)
+        );
+        token.record_generation_round(Some(1000), None);
+        assert_eq!(
+            token.generation_snapshot().generation_timing_complete,
+            Some(false)
+        );
+    }
+
     #[derive(Default)]
     struct RecordingWriter {
         finishes: Mutex<Vec<(String, RequestFinish)>>,
@@ -1441,6 +1499,7 @@ mod tests {
             first_content_delta_ms: Some(1_070),
             stream_end_ms: Some(1_090),
             finalize_ms: Some(1_100),
+            ..PhaseTimings::default()
         };
 
         let finish = finish_from_terminal(TerminalPersistenceInput {

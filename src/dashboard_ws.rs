@@ -2517,6 +2517,12 @@ mod tests {
             first_content_delta_ms: Some(1_500),
             stream_end_ms: None,
             finalize_ms: None,
+            generation: crate::dashboard_flow::GenerationTimings {
+                first_generation_delta_ms: Some(1_250),
+                generation_duration_us: Some(4_000_000),
+                generation_tokens: Some(800),
+                generation_timing_complete: Some(true),
+            },
         };
         let attempt = Attempt {
             provider: Some("vllm-a".to_string()),
