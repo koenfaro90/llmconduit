@@ -45,7 +45,7 @@ describe('latencyBreakdown — honest per-flow phase decomposition (gap 10)', ()
     expect(seg(m, 'finalize')).toMatchObject({ durationMs: 20, quality: 'measured' });
 
     // TTFT is MEASURED (first content − ingress), tok/s DERIVED, total measured + not fabricated.
-    expect(m.ttft).toMatchObject({ valueMs: 270, quality: 'measured' });
+    expect(m.ttft).toMatchObject({ valueMs: 450, quality: 'measured' });
     expect(m.ttfb).toMatchObject({ valueMs: 270, quality: 'measured' });
     expect(m.total).toMatchObject({ valueMs: 1470, quality: 'measured' });
     // tok/s = 500 tokens / 1.0s = 500.
@@ -181,24 +181,24 @@ describe('latencyBreakdown — honest per-flow phase decomposition (gap 10)', ()
     expect(m.knownSpanMs).toBe(0);
   });
 
-  it('does not substitute monitor output for a missing first-byte timestamp', () => {
+  it('no measured TTFT ⇒ DERIVED first-visible-activity fallback from monitor output, labelled estimated', () => {
     // No first_content_delta, but a monitor `output` segment 320ms after started_ms.
     const m = latencyBreakdown(
       flow({ started_ms: T, ingress_ms: T, normalization_done_ms: T + 30, routing_decision_ms: T + 50 }),
       [output(T - 5), output(T + 320)].slice(1), // first usable output at +320 (the −5 is filtered as garbage)
     );
-    expect(m.ttft).toMatchObject({ valueMs: null, quality: 'unavailable' });
+    expect(m.ttft).toMatchObject({ valueMs: 320, quality: 'estimated' });
     // It is explicitly labelled as activity, NOT upstream first byte.
-    expect(m.ttft.detail).toMatch(/first-byte/i);
+    expect(m.ttft.detail).toMatch(/first-visible-activity/i);
     expect(m.ttft.detail).not.toMatch(/measured/i);
   });
 
-  it('first response byte determines TTFT independently of generation and content', () => {
+  it('the MEASURED first_content_delta WINS over the monitor-output fallback', () => {
     const m = latencyBreakdown(
-      flow({ started_ms: T, ingress_ms: T, first_content_delta_ms: T + 200,first_generation_delta_ms:T+150,first_upstream_byte_ms:T+100 }),
+      flow({ started_ms: T, ingress_ms: T, first_content_delta_ms: T + 200 }),
       [output(T + 999)], // a later monitor output must NOT override the measured TTFT
     );
-    expect(m.ttft).toMatchObject({ valueMs: 100, quality: 'measured' });
+    expect(m.ttft).toMatchObject({ valueMs: 200, quality: 'measured' });
   });
 
   it('ignores non-output monitor segments for the derived TTFT fallback', () => {
@@ -237,7 +237,7 @@ describe('latencyBreakdown — honest per-flow phase decomposition (gap 10)', ()
 
   it('falls back to started_ms as the ingress anchor when ingress_ms is absent', () => {
     // No ingress_ms, but started_ms + first_content ⇒ TTFT is still measured from started_ms.
-    const m = latencyBreakdown(flow({ started_ms: T, first_content_delta_ms: T + 900,first_upstream_byte_ms:T+350 }), []);
+    const m = latencyBreakdown(flow({ started_ms: T, first_content_delta_ms: T + 350 }), []);
     expect(m.ttft).toMatchObject({ valueMs: 350, quality: 'measured' });
   });
 
@@ -250,9 +250,9 @@ describe('latencyBreakdown — honest per-flow phase decomposition (gap 10)', ()
 });
 
 it('uses persisted generation timings for reasoning/tool-only requests without inventing content delivery',()=>{
- const model=latencyBreakdown(flow({ingress_ms:T,first_upstream_byte_ms:T+100,first_generation_delta_ms:T+200,
+ const model=latencyBreakdown(flow({ingress_ms:T,first_generation_delta_ms:T+200,
    generation_duration_us:2_000_000,generation_tokens:998,generation_timing_complete:true,stream_end_ms:T+4000}));
- expect(model.ttft).toMatchObject({valueMs:100,quality:'measured'});
+ expect(model.ttft).toMatchObject({valueMs:200,quality:'measured'});
  expect(model.rate).toMatchObject({tokensPerSec:499,quality:'derived'});
  expect(model.rate.detail).toContain('gateway-observed');
  expect(seg(model,'generation').quality).toBe('unavailable');

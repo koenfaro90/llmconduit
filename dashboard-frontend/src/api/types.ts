@@ -109,8 +109,9 @@ export interface PhaseTimings {
   /** Upstream routing/lowering decision committed. Absent if the flow never reached the wire. */
   routing_decision_ms?: number | null;
   /**
-   * First canonical content delivery; separate from the dashboard TTFT, which uses
-   * first_upstream_byte_ms. Absent if no ordinary content was delivered.
+   * True client TTFT — the first canonical **content** SSE delta to the client (NOT reasoning,
+   * tool-argument, refusal, or signature deltas). Absent if the flow errored before any content.
+   * When present ⇒ the breakdown labels TTFT **measured**.
    */
   first_content_delta_ms?: number | null;
   /** First nonempty upstream text/reasoning/refusal/tool-argument delta (gateway clock). */

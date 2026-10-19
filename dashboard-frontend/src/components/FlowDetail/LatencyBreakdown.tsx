@@ -16,8 +16,8 @@
  *  - a segment whose TRUE endpoint is unknown but a wider known pair stands in (the prefill phase
  *    without a wire TTFB ⇒ a routing→first-token span) is tagged `derived` and carries a visible
  *    `derived` legend badge — shown for context, NEVER presented as the measured phase.
- *  - TTFT is request ingress to first upstream response byte (including headers).
- *    Missing byte timestamps remain unavailable, independent of output/monitor events.
+ *  - TTFT is `measured` (first content delta) or, until then, an `estimated` first-visible-activity
+ *    fallback that is LABELLED `est` (dashboard-visible activity, never claimed as upstream TTFB).
  *  - stream `tok/s` is `derived`; unavailable ⇒ `—`, never `0`.
  *  - a clock-disordered segment is FLAGGED (a skew marker), never rendered negative.
  */

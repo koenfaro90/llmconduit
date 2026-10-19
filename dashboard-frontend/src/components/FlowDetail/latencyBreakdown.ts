@@ -1,10 +1,38 @@
 /**
- * Request latency from measured phase timestamps. The dashboard's TTFT means
- * ingress → first upstream response byte (including response headers). Reasoning,
- * content and tool generation clocks remain separate, and drive decode timing.
- * Missing endpoints remain unavailable; no token/monitor fallback supplies a byte.
+ * latencyBreakdown (gap 10) — decompose a turn's wall-clock into its phases for the FlowDetail
+ * inspector waterfall. Pure + DOM-free (sibling of `tokenEconomics.ts`/`contextUtilization.ts`)
+ * so it is unit-testable and the bar can never disagree with the numbers it derives.
+ *
+ * "Was it slow at the provider (prefill/TTFT) or just a long generation?" — the answer is the
+ * SEGMENTED decomposition of the turn:
+ *
+ *   ingress → normalize/queue → routing → upstream wait (wire TTFB) → prefill→first content
+ *           → generation/streaming → finalize
+ *
+ * SOURCES (spec 10 — the oracle):
+ *  - the gap-02 phase epochs (`ingress_ms`, `normalization_done_ms`, `routing_decision_ms`,
+ *    `first_content_delta_ms`, `stream_end_ms`, `finalize_ms`) flattened on the flow — MEASURED.
+ *  - the gap-03 served attempt's `first_upstream_byte_ms` (flow-level `first_upstream_byte_ms`
+ *    fallback) — MEASURED wire TTFB that ENRICHES the upstream-wait segment.
+ *  - the monitor `output` segments' `timestamp_ms` — the honest DERIVED fallback for TTFT until
+ *    `first_content_delta_ms` is populated for a flow ("first-visible-activity latency", labelled
+ *    as dashboard-visible activity, NOT upstream first byte).
+ *
+ * DATA-QUALITY INVARIANTS (the heart of an honest breakdown — every one is asserted in tests):
+ *  - A segment is derived from a PAIR of KNOWN epoch timestamps. If EITHER endpoint is unknown the
+ *    sub-duration is UNAVAILABLE — rendered as a gap/`—`, NEVER a `0ms`/zero-width segment.
+ *  - "phase didn't happen / unmeasured" (`unavailable`) is DISTINCT from "phase took ~0ms"
+ *    (`measured`/`derived`, `durationMs === 0`): the former carries no bar width + reads `—`; the
+ *    latter is a real (possibly hairline) segment that reads `0ms`.
+ *  - NO negative durations: clocks that disorder (end < start) are CLAMPED to 0 and FLAGGED
+ *    (`disordered`) rather than rendered negative.
+ *  - NO fabricated total: the wall-clock total is itself derived from a known pair (ingress→the
+ *    latest known right edge); when no usable span exists it is `unavailable` (`—`).
+ *  - Every segment is TAGGED `measured | derived | estimated | unavailable`; an `estimated`
+ *    segment (the derived first-visible-activity TTFT fallback) is LABELLED as such.
+ *  - Stream `tok/s` is `derived` (completion ÷ stream duration); unavailable ⇒ `—`, never `0`.
  */
-import type { DebugSegment, FlowDetail, FlowSummary, Usage } from '../../api/types';
+import type { Attempt, DebugSegment, FlowDetail, FlowSummary, Usage } from '../../api/types';
 
 /** Provenance of a derived figure — mirrors the dashboard's measured/derived/unavailable tags. */
 export type Quality = 'measured' | 'derived' | 'estimated' | 'unavailable';
@@ -66,7 +94,13 @@ export interface RateFigure {
 export interface LatencyBreakdown {
   /** Total wall-clock (ingress → latest known right edge). `unavailable` ⇒ `—`, never fabricated. */
   total: Figure;
-  /** Dashboard TTFT: request ingress → first upstream response byte. */
+  /**
+   * True TTFT — the first CONTENT delta the client saw, relative to ingress.
+   *  - `measured` from `first_content_delta_ms − ingress_ms` (gap 02).
+   *  - else `estimated` from the first monitor `output` segment `timestamp_ms − started_ms`
+   *    (the "first-visible-activity" fallback) — LABELLED as dashboard-visible activity.
+   *  - else `unavailable` (`—`).
+   */
   ttft: Figure;
   /** Wire TTFB — the served attempt's first upstream byte, relative to ingress (gap 03). */
   ttfb: Figure;
@@ -135,14 +169,22 @@ function span(
   return { id, label, durationMs: raw, quality, disordered: false, detail: okDetail };
 }
 
-/** The serving response's header/first-byte clock, including failed-only responses. */
-export function firstUpstreamByteMs(flow: Pick<FlowSummary, 'attempts' | 'first_upstream_byte_ms'> | null | undefined): number | null {
-  const served = flow?.attempts?.find(attempt => attempt.status === 'served');
-  const measured = epoch(served?.first_upstream_byte_ms) ?? epoch(flow?.first_upstream_byte_ms);
-  if (measured != null || served) return measured;
-  const responseTimes = flow?.attempts?.map(attempt => epoch(attempt.first_upstream_byte_ms))
-    .filter((time): time is number => time != null) ?? [];
-  return responseTimes.length ? Math.min(...responseTimes) : null;
+/** The first monitor `output` segment's epoch (the derived "first-visible-activity" instant). */
+function firstOutputEpoch(segments: DebugSegment[] | undefined): number | null {
+  if (!segments) return null;
+  for (const s of segments) {
+    if (s.kind === 'output') {
+      const e = epoch(s.timestamp_ms);
+      if (e !== null) return e;
+    }
+  }
+  return null;
+}
+
+/** The SERVED attempt (status `served`), if any — its `first_upstream_byte_ms` is the wire TTFB. */
+function servedAttempt(attempts: Attempt[] | undefined): Attempt | null {
+  if (!attempts) return null;
+  return attempts.find((a) => a.status === 'served') ?? null;
 }
 
 /** completion tokens from usage, or null when unreported. */
@@ -154,12 +196,11 @@ function completionTokens(usage: Usage | null | undefined): number | null {
 /**
  * Build the latency breakdown from the (merged live+frozen) flow spine + the monitor output
  * segments. `flow` is the freshest spine source (caller merges live row + frozen detail);
- * The legacy monitor argument is accepted for caller compatibility; first-byte
- * timing never uses generated output or monitor events.
+ * `monitorOutputs` are the joined monitor segments (for the derived TTFT fallback).
  */
 export function latencyBreakdown(
   flow: SpineFlow | null | undefined,
-  _monitorOutputs?: DebugSegment[],
+  monitorOutputs?: DebugSegment[],
 ): LatencyBreakdown {
   // Anchor (ingress): prefer the measured `ingress_ms`; else `started_ms` (≈ ingress, always set).
   const startedMs = flow ? epoch(flow.started_ms) : null;
@@ -171,7 +212,9 @@ export function latencyBreakdown(
   const finalize = flow ? epoch(flow.finalize_ms) : null;
 
   // Wire TTFB: the served attempt's first byte, else the flow-level `first_upstream_byte_ms`.
-  const upstreamByte = firstUpstreamByteMs(flow);
+  const served = flow ? servedAttempt(flow.attempts) : null;
+  const upstreamByte = (served ? epoch(served.first_upstream_byte_ms) : null)
+    ?? (flow ? epoch(flow.first_upstream_byte_ms) : null);
 
   // ---- Segments (each from a KNOWN pair; a missing endpoint ⇒ unavailable, never 0ms) ----
   const segments: PhaseSegment[] = [
@@ -267,11 +310,20 @@ export function latencyBreakdown(
       }
     : { valueMs: null, quality: 'unavailable', detail: 'total unavailable — no measured span yet' };
 
-  // The operator-defined TTFT is first upstream byte, before reasoning/content.
-  const ttft: Figure = ingress != null && upstreamByte != null
-    ? {valueMs:Math.max(0,upstreamByte-ingress),quality:'measured',detail:'Request ingress to first upstream response byte (response headers); excludes waiting for reasoning, content or tool arguments.'}
-    : {valueMs:null,quality:'unavailable',detail:'TTFT unavailable: no upstream first-byte timestamp was captured.'};
-  const ttfb = ttft;
+  // ---- TTFT: measured from first_content, else the derived first-visible-activity fallback ----
+  const generated = flow ? epoch(flow.first_generation_delta_ms) : null;
+  const ttft: Figure = generated != null && ingress != null
+    ? {valueMs:Math.max(0,generated-ingress),quality:'measured',detail:'Gateway-observed first generated text/reasoning/refusal/tool arguments, relative to ingress.'}
+    : computeTtft(ingress, startedMs, firstContent, monitorOutputs);
+
+  // ---- Wire TTFB relative to ingress (gap 03) ----
+  const ttfb: Figure = ingress !== null && upstreamByte !== null
+    ? {
+        valueMs: Math.max(0, upstreamByte - ingress),
+        quality: 'measured',
+        detail: 'wire time-to-first-byte: ingress → the served attempt’s first upstream byte',
+      }
+    : { valueMs: null, quality: 'unavailable', detail: 'wire TTFB unavailable — no upstream first byte measured' };
 
   // ---- Stream tok/s (derived) ----
   const rate: RateFigure = flow?.generation_timing_complete != null
@@ -281,6 +333,37 @@ export function latencyBreakdown(
     : computeRate(flow?.usage, firstContent, streamEnd);
 
   return { total, ttft, ttfb, rate, segments, knownSpanMs };
+}
+
+/** TTFT figure: measured (first content) → derived (first visible activity) → unavailable. */
+function computeTtft(
+  ingress: number | null,
+  startedMs: number | null,
+  firstContent: number | null,
+  monitorOutputs: DebugSegment[] | undefined,
+): Figure {
+  // 1. MEASURED — the true client TTFT (first content delta), relative to ingress (gap 02).
+  if (ingress !== null && firstContent !== null) {
+    return {
+      valueMs: Math.max(0, firstContent - ingress),
+      quality: 'measured',
+      detail: 'true TTFT: ingress → first content delta to the client (measured)',
+    };
+  }
+  // 2. ESTIMATED — the derived "first-visible-activity latency": the first monitor `output`
+  // segment timestamp relative to `started_ms`. This is DASHBOARD-VISIBLE activity, NOT the
+  // upstream first byte — labelled as such so it is never mistaken for the measured TTFT.
+  const firstOutput = firstOutputEpoch(monitorOutputs);
+  const anchor = startedMs ?? ingress;
+  if (anchor !== null && firstOutput !== null) {
+    return {
+      valueMs: Math.max(0, firstOutput - anchor),
+      quality: 'estimated',
+      detail: 'first-visible-activity latency (derived from the first monitor output segment — not upstream first byte)',
+    };
+  }
+  // 3. UNAVAILABLE — no measured TTFT and no visible activity yet (`—`, never a fabricated 0).
+  return { valueMs: null, quality: 'unavailable', detail: 'TTFT unavailable — no first content delta and no visible activity' };
 }
 
 /** tok/s figure (derived): completion ÷ (stream_end − first_content) seconds; else unavailable. */

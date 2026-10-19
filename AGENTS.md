@@ -60,10 +60,10 @@ uses same-origin `Origin`/`Host` validation for dashboard WebSockets. Kill requi
 
 Request inspectors use full-width HTTP body tabs, with Copy and Download, rather
 than transformation/diff panes. Valid JSON displays with whitespace-only pretty
-printing; Copy/Download retain original bytes. Request TTFT uses request ingress to the first upstream response byte, including
-response headers, per the operator definition. Generation/content clocks stay separate. Completed Decode speed
+printing; Copy/Download retain original bytes. Request TTFT uses first generated text/reasoning/tool arguments; the separate
+content-delivery clock retains its original semantics. Completed Decode speed
 uses persisted per-round monotonic windows and reported tokens, labeled as a
-derived gateway rate. Never substitute reasoning/content/monitor timing for a missing first-byte clock.
+derived gateway rate. Never use HTTP headers as a missing-token substitute.
 Request tables expose client-supplied
 reasoning/thinking/clear_thinking/token limits from a small persisted inbound
 projection, with historical page backfill independent of raw capture.

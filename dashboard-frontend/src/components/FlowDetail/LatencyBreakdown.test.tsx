@@ -33,7 +33,7 @@ describe('LatencyBreakdown component (gap 10)', () => {
     // TTFT is measured ⇒ no estimated badge inside the TTFT cell.
     const ttft = getByTestId('latency-ttft');
     expect(ttft.getAttribute('data-quality')).toBe('measured');
-    expect(ttft.textContent).toContain('270ms');
+    expect(ttft.textContent).toContain('450ms');
     expect(ttft.querySelector('[data-testid="latency-quality-badge"]')).toBeNull();
 
     // tok/s is derived (500/s) and labelled derived.
@@ -96,15 +96,16 @@ describe('LatencyBreakdown component (gap 10)', () => {
     expect(getByTestId('latency-ttfb').getAttribute('data-quality')).toBe('unavailable');
   });
 
-  it('leaves TTFT unavailable when only a later monitor output is known', () => {
+  it('labels a DERIVED first-visible-activity TTFT with an `est` badge', () => {
     const { getByTestId } = renderModel(
       flow({ started_ms: T, ingress_ms: T, routing_decision_ms: T + 50 }),
       [{ timestamp_ms: T + 320, kind: 'output', text: 'hi' }],
     );
     const ttft = getByTestId('latency-ttft');
-    expect(ttft.getAttribute('data-quality')).toBe('unavailable');
+    expect(ttft.getAttribute('data-quality')).toBe('estimated');
     const badge = ttft.querySelector('[data-testid="latency-quality-badge"]');
-    expect(badge).toBeNull();
+    expect(badge).toBeTruthy();
+    expect(badge?.textContent).toBe('est');
   });
 
   it('flags a clock-disordered segment with a skew marker (clamped, not negative)', () => {
