@@ -1,11 +1,13 @@
 import {test,expect,login} from './harness';
-for(const width of [1600,390])test(`Full request body tabs and exact clipboard at ${width}px`,async({page,consoleErrors},info)=>{
- await page.context().grantPermissions(['clipboard-read','clipboard-write']);await page.setViewportSize({width,height:1000});await login(page);await page.evaluate(()=>{location.hash='#/requests';});await page.getByLabel('Open request api_002',{exact:true}).locator('td').first().click();
+for(const [width,height] of [[1600,1000],[1280,720],[390,844]])test(`Full request body tabs and exact clipboard at ${width}x${height}`,async({page,consoleErrors},info)=>{
+ await page.context().grantPermissions(['clipboard-read','clipboard-write']);await page.setViewportSize({width,height});await login(page);await page.evaluate(()=>{location.hash='#/requests';});await page.getByLabel('Open request api_002',{exact:true}).locator('td').first().click();
  const inspector=page.getByTestId('flow-detail');await expect(inspector.getByRole('tab',{name:'Inbound request',exact:true})).toHaveAttribute('aria-selected','true');
  await expect(inspector.getByRole('button',{name:'Show raw',exact:true})).toBeVisible();
  await inspector.getByRole('button',{name:'Show raw',exact:true}).click();
  await expect(inspector.getByRole('button',{name:'Format JSON',exact:true})).toBeVisible();
  await inspector.getByRole('button',{name:'Format JSON',exact:true}).click();
+ await inspector.locator('.view-lines .view-line').nth(2).waitFor();
+ expect((await inspector.locator('.monaco-editor').boundingBox())!.height).toBeGreaterThan(150);
  for(const tab of ['Inbound request','Upstream request','Upstream response','Inbound response']){
   await inspector.getByRole('tab',{name:tab,exact:true}).click();await expect(inspector.getByRole('button',{name:'Copy body',exact:true})).toBeEnabled();await inspector.getByRole('button',{name:'Copy body',exact:true}).click();
   const copied=await page.evaluate(()=>navigator.clipboard.readText());

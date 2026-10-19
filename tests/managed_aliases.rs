@@ -331,3 +331,81 @@ async fn corrupt_sql_aliases_do_not_fall_back_to_bootstrap_or_default_provider()
     assert!(g.request_snapshot().await.is_err());
     assert!(g.upstream_client().supported_model_catalog().await.is_err());
 }
+
+#[tokio::test]
+async fn remapped_profile_effort_is_scoped_for_canonical_and_sql_alias_routes() {
+    use llmconduit::config::PersistedModelProfile;
+    use std::collections::BTreeMap;
+    let store = Arc::new(SqlStore::connect_sqlite("sqlite::memory:").await.unwrap());
+    let mut routes = vec![];
+    let mut profiles = BTreeMap::new();
+    let mut servers = vec![];
+    for (name, native) in [("profile-a", "xhigh"), ("profile-b", "low")] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"data":[{"id":"served-shared"}]})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST")).and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).insert_header("content-type","text/event-stream")
+                .set_body_string("data: {\"id\":\"test\",\"model\":\"served-shared\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"OK\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n"))
+            .mount(&server).await;
+        let mut route = profile(Uuid::new_v4(), name, &server);
+        route.providers[0].upstream_model = Some("served-shared".into());
+        let mut alias = route.clone();
+        alias.route_id = Uuid::new_v4();
+        alias.name = format!("public-{name}");
+        routes.extend([route, alias]);
+        profiles.insert(name.to_string(), PersistedModelProfile {
+            reasoning_effort_default:Some("high".into()),
+            reasoning_effort_map:BTreeMap::from([("high".into(),json!({"reasoning_effort":native,"chat_template_kwargs":{"reasoning_effort":"high","clear_thinking":false}}))]),
+            ..Default::default()
+        });
+        servers.push((server, name, native));
+    }
+    let config = Config::from_persisted(&PersistedConfig {
+        upstream_base_url: "http://127.0.0.1:9/v1/".into(),
+        model_profiles: profiles,
+        ..Default::default()
+    })
+    .unwrap();
+    let (_, gateway) = llmconduit::build_app_with_gateway_control_plane_runtime(
+        config,
+        None,
+        AppOptions::default(),
+        routes,
+        UnknownModelPolicy::Passthrough,
+        None,
+        ControlPlaneRuntime {
+            persistence_store: Some(store),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    for (_, name, _) in &servers {
+        assert_eq!(generate(&gateway, name).await, "OK");
+        assert_eq!(
+            generate(
+                &gateway.request_snapshot().await.unwrap(),
+                &format!("public-{name}")
+            )
+            .await,
+            "OK"
+        );
+    }
+    for (server, _, native) in servers {
+        let requests = server.received_requests().await.unwrap();
+        let posts: Vec<_> = requests.iter().filter(|r| r.method == "POST").collect();
+        assert_eq!(posts.len(), 2);
+        for request in posts {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            assert_eq!(body["model"], "served-shared");
+            assert_eq!(body["reasoning_effort"], native);
+            assert_eq!(body["chat_template_kwargs"]["reasoning_effort"], "high");
+            assert_eq!(body["chat_template_kwargs"]["clear_thinking"], false);
+        }
+    }
+}

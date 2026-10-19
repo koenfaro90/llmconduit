@@ -569,6 +569,12 @@ pub fn build_runtime_generation(
                             provider.base_url.clone(),
                             provider.api_key.clone(),
                             provider.request_log_path.clone(),
+                        )
+                        .with_finalization_policies(
+                            finalization_policies.for_profile(
+                                &provider.profile_name,
+                                provider.upstream_model.as_deref(),
+                            ),
                         ),
                         provider.upstream_model.clone(),
                         None,

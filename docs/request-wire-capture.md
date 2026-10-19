@@ -12,6 +12,9 @@ highlighting by default, with a Show raw toggle. Display formatting changes only
 whitespace between JSON tokens, preserving large numeric literals, duplicate keys
 and string escapes. Copy and Download always export the original body. There is
 no body-size ceiling, preview clipping, redaction or media substitution in this archive.
+Header timing/usage details are collapsible at every screen size. The inspector
+uses the full viewport on mobile and short desktop screens; a side dock is used
+only when the viewport is at least1024px wide and900px high.
 Existing request-admission and inference-protocol limits remain separate from
 capture; a cancelled transport is recorded as incomplete, never as a full response.
 

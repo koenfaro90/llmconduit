@@ -188,7 +188,7 @@ export function FlowDetail({ apiCallId, onClose, historyRequest }: { apiCallId: 
   );
 
   return (
-    <section className="fixed inset-0 z-30 flex min-h-0 min-w-0 flex-col border-l border-line bg-panel lg:static lg:w-[55%] lg:min-w-[420px]" data-testid="flow-detail" aria-label="flow detail">
+    <section className="request-detail-dock fixed inset-0 z-30 flex min-h-0 min-w-0 flex-col border-l border-line bg-panel" data-testid="flow-detail" aria-label="flow detail">
       <DetailHeader
         apiCallId={apiCallId}
         displayNumber={historyRequest?.display_number ?? liveFlow?.display_number ?? frozenDetail?.display_number}
@@ -298,7 +298,7 @@ function DetailHeader({
         )}
         <div className="ml-auto flex items-center gap-2">
           <KillControl isActive={isActive} mutationsEnabled={mutationsEnabled} seeking={seeking} killState={killState} onKill={onKill} />
-          <Button variant="ghost" className="md:hidden" aria-expanded={detailsOpen} onClick={()=>setDetailsOpen(!detailsOpen)}>Details</Button>
+          <Button variant="ghost" aria-expanded={detailsOpen} onClick={()=>setDetailsOpen(!detailsOpen)}>Details</Button>
           <button
             type="button"
             onClick={onClose}
@@ -309,8 +309,8 @@ function DetailHeader({
           </button>
         </div>
       </div>
-      <p className="truncate font-mono text-xs text-text-muted md:hidden" title={fmtModelPair(modelReq,modelServed)}>{fmtModelPair(modelReq,modelServed)}</p>
-      <dl className={`${detailsOpen?'grid':'hidden md:grid'} max-h-[50dvh] grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 overflow-auto text-xs`}>
+      <p className="truncate font-mono text-xs text-text-muted" title={fmtModelPair(modelReq,modelServed)}>{fmtModelPair(modelReq,modelServed)}</p>
+      <dl className={`${detailsOpen?'grid':'hidden'} max-h-[30dvh] grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 overflow-auto text-xs`}>
         <dt className="text-text-muted">model</dt>
         <dd className="font-mono text-text">{fmtModelPair(modelReq, modelServed)}</dd>
         <dt className="text-text-muted">upstream</dt>

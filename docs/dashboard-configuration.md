@@ -35,6 +35,11 @@ fields; profiles and providers use shared tables with add/copy/edit and ordered
 backend selectors showing readable names. Copies receive fresh IDs and do not
 reuse masked credentials. Existing custom fields survive structured edits.
 
+Operational profile reasoning maps, template families and default kwargs bind to
+that profile's actual upstream model ID at its own backend leaf. Canonical names
+and SQL aliases share this behavior. Two profiles serving the same upstream model
+may retain different policies without leaking one profile's defaults into another.
+
 Host settings use numeric sampling intervals with unit selectors and Collect
 toggles, plus RAM/GPU budget and allowlist controls. Physical GPU totals and GPU
 identity are read-only; Fleet still validates policy changes against loaded workloads.

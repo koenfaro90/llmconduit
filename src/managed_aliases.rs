@@ -281,7 +281,11 @@ impl AliasRegistry {
                             self.options.min_completion_tokens,
                             self.options.max_sse_frame_bytes,
                         )
-                        .with_finalization_policies(self.options.finalization_policies.clone())
+                        .with_finalization_policies(
+                            self.options
+                                .finalization_policies
+                                .for_profile(&p.profile_name, p.upstream_model.as_deref()),
+                        )
                         .with_flow_store(self.options.flow_store.clone())
                         .with_traffic(self.options.traffic.clone()),
                         p.upstream_model.clone(),

@@ -22,7 +22,7 @@ export function legacyHeaders(detail:StoredRequestDetail|undefined):Array<{id:st
 /** Display whitespace only: retain large numbers, duplicate keys and escapes. */
 export function bodyPresentation(text:string):{value:string;language:'json'|'plaintext'} {
  try { JSON.parse(text); } catch { return {value:text,language:'plaintext'}; }
- const tokens=text.match(/"(?:\\.|[^"\\])*"|[{}\[\],:]|[^\s{}\[\],:]+/g)??[];
+ const tokens=text.match(/"(?:\\.|[^"\\])*"|[{}[\],:]|[^\s{}[\],:]+/g)??[];
  let depth=0,value='';
  for(let i=0;i<tokens.length;i++) {
   const token=tokens[i]!,previous=tokens[i-1],next=tokens[i+1];

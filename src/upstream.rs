@@ -4386,6 +4386,25 @@ pub struct BackendFinalizationPolicies {
 }
 
 impl BackendFinalizationPolicies {
+    /// Operational profiles can remap a public name to an unrelated HF model
+    /// ID. Bind that profile's policy to this leaf's actual model, without
+    /// leaking it to another profile serving the same model ID.
+    pub(crate) fn for_profile(&self, profile: &str, model: Option<&str>) -> Self {
+        let mut scoped = self.clone();
+        let Some(model) = model else { return scoped };
+        if let Some(policy) = policy_for_model(&self.effort, profile) {
+            Arc::make_mut(&mut scoped.effort).insert(model.to_owned(), policy.clone());
+        }
+        if let Some(family) = policy_for_model(&self.template_family, profile) {
+            Arc::make_mut(&mut scoped.template_family).insert(model.to_owned(), family.clone());
+        }
+        if let Some(kwargs) = policy_for_model(&self.upstream_chat_kwargs, profile) {
+            Arc::make_mut(&mut scoped.upstream_chat_kwargs)
+                .insert(model.to_owned(), kwargs.clone());
+        }
+        scoped
+    }
+
     /// Build the leaf finalization policies from config: effort map,
     /// `template_family` override, and `upstream_chat_kwargs` (global base +
     /// per-model). Built once at startup and shared (cheap `Arc` clone) across

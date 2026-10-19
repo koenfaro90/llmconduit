@@ -2,6 +2,11 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Dock only where the request filters leave enough height for a useful editor. */
+@media (min-width: 1024px) and (min-height: 900px) {
+  .request-detail-dock { position: static; width: 55%; min-width: 420px; }
+}
+
 /* Compact mobile is an explicit preference; desktop layout and column choices
    keep their existing behavior. Shared tables expose the same details below rows. */
 .compact-mobile-only, .compact-mobile-details { display: none; }
