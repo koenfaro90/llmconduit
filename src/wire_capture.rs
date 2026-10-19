@@ -346,20 +346,35 @@ pub async fn served_response(
             .headers
             .insert(axum::http::header::CONTENT_LENGTH, size.into());
     }
+    let exact_length = parts
+        .headers
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok());
     let capture = turn
         .response("client_out", parts.status.as_u16(), &parts.headers)
         .await?;
     // Own the guard before first poll: dropping an unpolled response body must
     // still close its archive as incomplete rather than leave it "recording".
+    if exact_length == Some(0) {
+        capture.finish(true, None).await?;
+    }
     let guard = BodyGuard {
         body: Arc::clone(&capture),
-        clean: false,
+        clean: exact_length == Some(0),
     };
     let stream = async_stream::stream! {
         let mut guard=guard;
-        let mut body=body;
+        let mut body=body;let mut captured=0u64;
         while let Some(frame)=body.frame().await {
             if let Ok(frame)=&frame && let Some(data)=frame.data_ref() && let Err(error)=capture.write(data).await {yield Err::<http_body::Frame<Bytes>,_>(std::io::Error::other(error));return;}
+            if let Ok(frame)=&frame && let Some(data)=frame.data_ref() {
+                captured+=data.len()as u64;
+                // Hyper may stop polling exactly at Content-Length and never
+                // request EOF. Commit the complete entity before yielding its
+                // last data frame; lack of a subsequent poll is not data loss.
+                if exact_length==Some(captured) {match capture.finish(true,None).await {Ok(())=>guard.clean=true,Err(error)=>{yield Err(std::io::Error::other(error));return;}}}
+            }
             match frame {Ok(frame)=>yield Ok(frame),Err(error)=>{yield Err(std::io::Error::other(error));return;}}
         }
         match capture.finish(true,None).await {Ok(())=>guard.clean=true,Err(error)=>yield Err(std::io::Error::other(error))}
@@ -436,6 +451,29 @@ async fn deduplicate(path: &Path, root: &Path) -> std::io::Result<Vec<WireChunk>
     Ok(chunks)
 }
 
+/// Earlier collectors waited for an EOF poll even after the whole declared
+/// entity was committed. Correct only that status; never rewrite archived bytes.
+fn reconcile_fixed_length(part: &mut WirePart) {
+    if part.error.as_deref() != Some("HTTP body did not reach clean EOF") || part.sha256.is_none() {
+        return;
+    }
+    use base64::Engine;
+    let expected = part
+        .headers
+        .iter()
+        .find(|h| h.name.eq_ignore_ascii_case("content-length"))
+        .and_then(|h| {
+            base64::engine::general_purpose::STANDARD
+                .decode(&h.value_base64)
+                .ok()
+        })
+        .and_then(|v| String::from_utf8(v).ok())
+        .and_then(|v| v.trim().parse::<u64>().ok());
+    if expected == Some(part.bytes) {
+        part.complete = true;
+        part.error = None;
+    }
+}
 fn admin(session: &crate::dashboard_auth::AuthSession) -> bool {
     session
         .user
@@ -477,13 +515,16 @@ pub async fn manifest_api(
         Err(response) => return response,
     };
     match tokio::fs::read(root.join(&id).join("manifest.json")).await {
-        Ok(bytes) => crate::dashboard_auth::no_store(
-            (
-                [(axum::http::header::CONTENT_TYPE, "application/json")],
-                bytes,
-            )
-                .into_response(),
-        ),
+        Ok(bytes) => {
+            let mut manifest: WireManifest = match serde_json::from_slice(&bytes) {
+                Ok(v) => v,
+                Err(_) => return axum::http::StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            };
+            for part in manifest.parts.values_mut() {
+                reconcile_fixed_length(part);
+            }
+            crate::dashboard_auth::no_store(axum::Json(manifest).into_response())
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             crate::dashboard_auth::no_store(
                 axum::Json(Option::<WireManifest>::None).into_response(),
@@ -784,6 +825,64 @@ mod tests {
         let part = turn.manifest.lock().await.parts["client_out"].clone();
         assert!(!part.complete);
         assert_eq!(part.bytes, 0);
+    }
+    #[tokio::test]
+    async fn fixed_length_entity_is_complete_without_an_eof_poll() {
+        let temp = tempfile::tempdir().unwrap();
+        let turn = WireTurn::start(
+            temp.path(),
+            "api_length",
+            "POST",
+            "/v1/responses",
+            &HeaderMap::new(),
+            b"{}",
+        )
+        .await
+        .unwrap();
+        let response = served_response(
+            Response::new(Body::from("complete body")),
+            Arc::clone(&turn),
+        )
+        .await
+        .unwrap();
+        let mut body = response.into_body();
+        let frame = body.frame().await.unwrap().unwrap();
+        assert_eq!(frame.data_ref().unwrap().as_ref(), b"complete body");
+        drop(body);
+        let part = turn.manifest.lock().await.parts["client_out"].clone();
+        assert!(part.complete);
+        assert!(part.error.is_none());
+        assert_eq!(
+            stored(temp.path(), "api_length", "client_out").await,
+            b"complete body"
+        );
+    }
+    #[test]
+    fn older_fixed_length_status_is_corrected_only_with_a_complete_entity() {
+        let mut values = HeaderMap::new();
+        values.insert("content-length", "10".parse().unwrap());
+        let mut part = WirePart {
+            file: "client_out.body".into(),
+            chunks: vec![],
+            headers: headers(&values),
+            method: None,
+            target: None,
+            status: Some(200),
+            bytes: 9,
+            sha256: Some("committed-hash".into()),
+            complete: false,
+            error: Some("HTTP body did not reach clean EOF".into()),
+        };
+        reconcile_fixed_length(&mut part);
+        assert!(!part.complete);
+        part.bytes = 10;
+        reconcile_fixed_length(&mut part);
+        assert!(part.complete);
+        assert!(part.error.is_none());
+        part.complete = false;
+        part.error = Some("storage failure".into());
+        reconcile_fixed_length(&mut part);
+        assert!(!part.complete);
     }
     #[test]
     fn wire_capture_configuration_round_trips() {
