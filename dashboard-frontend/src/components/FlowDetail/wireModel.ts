@@ -10,7 +10,7 @@ export function legacyResponse(detail:StoredRequestDetail|undefined,hop:string):
  try{const envelope=JSON.parse(event.payload) as {content?:unknown};return typeof envelope.content==='string'?new TextEncoder().encode(envelope.content):undefined;}catch{return undefined;}
 }
 export function partFor(tab:string,exchange:string):string {
- if(tab==='inbound')return 'client_in';if(tab==='response')return 'client_out';return exchange+(tab==='upstream'?'_out':'_in');
+ if(tab==='inbound')return 'client_in';if(tab==='response'||tab==='output')return 'client_out';return exchange+(tab==='upstream'?'_out':'_in');
 }
 export function exchanges(manifest:WireManifest|null|undefined):string[] {return [...new Set(Object.keys(manifest?.parts??{}).filter(k=>k.startsWith('upstream_')).map(k=>k.replace(/_(?:in|out)$/,'')))].sort();}
 

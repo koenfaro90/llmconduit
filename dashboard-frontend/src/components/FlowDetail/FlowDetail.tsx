@@ -19,7 +19,6 @@ import { useCatalog } from '../FlowTable/useCatalog';
 import { joinMonitor } from './monitorJoin';
 import { mergeDeltas, normalizeRestDeltas, type SeqSegment } from './deltas';
 import { DeltasPanel } from './DeltasPanel';
-import { Timeline } from './Timeline';
 import { useFlowDetail, type KillState } from './useFlowDetail';
 import {RequestBodyTabs} from './RequestBodyTabs';
 import { divergenceLabel } from '../RequestTable/lineageModel';
@@ -158,6 +157,10 @@ export function FlowDetail({ apiCallId, onClose, historyRequest }: { apiCallId: 
           normalization_done_ms: liveFlow?.normalization_done_ms ?? frozenDetail?.normalization_done_ms,
           routing_decision_ms: liveFlow?.routing_decision_ms ?? frozenDetail?.routing_decision_ms,
           first_content_delta_ms: liveFlow?.first_content_delta_ms ?? frozenDetail?.first_content_delta_ms,
+          first_generation_delta_ms: liveFlow?.first_generation_delta_ms ?? frozenDetail?.first_generation_delta_ms,
+          generation_duration_us: liveFlow?.generation_duration_us ?? frozenDetail?.generation_duration_us,
+          generation_tokens: liveFlow?.generation_tokens ?? frozenDetail?.generation_tokens,
+          generation_timing_complete: liveFlow?.generation_timing_complete ?? frozenDetail?.generation_timing_complete,
           stream_end_ms: liveFlow?.stream_end_ms ?? frozenDetail?.stream_end_ms,
           finalize_ms: liveFlow?.finalize_ms ?? frozenDetail?.finalize_ms,
           finished_ms: liveFlow?.finished_ms ?? frozenDetail?.finished_ms,
@@ -210,11 +213,8 @@ export function FlowDetail({ apiCallId, onClose, historyRequest }: { apiCallId: 
         onClose={onClose}
       />
 
-      <RequestBodyTabs key={apiCallId} request={historyRequest??{id:apiCallId,status:status==='open'?'running':status??'running'}} allowBodies={!seeking||inCut} snapshot={seeking} fallbackHeaders={frozenDetail?.inbound_headers} extras={[
-        {id:'timeline',label:'Timeline',content:<Timeline events={join.events}/>},
+      <RequestBodyTabs key={apiCallId} request={historyRequest??{id:apiCallId,status:status==='open'?'running':status??'running'}} allowBodies={!seeking||inCut} snapshot={seeking} fallbackHeaders={frozenDetail?.inbound_headers} outputFallback={segments.length?<DeltasPanel segments={segments}/>:undefined} extras={[
         {id:'error',label:'Error',content:<ErrorTab detail={frozenDetail} liveFlow={liveFlow} joinError={join.error} seeking={seeking} historical={historical}/>},
-        {id:'output',label:'Output',content:<DeltasPanel segments={segments}/>},
-        {id:'chain',label:'Chain',content:<ChainTab flow={liveFlow} predecessorId={liveFlow?.chain_parent_request_id??null} error={null}/>},
       ]}/>
     </section>
   );
@@ -311,6 +311,10 @@ function DetailHeader({
       </div>
       <p className="truncate font-mono text-xs text-text-muted" title={fmtModelPair(modelReq,modelServed)}>{fmtModelPair(modelReq,modelServed)}</p>
       <dl className={`${detailsOpen?'grid':'hidden'} max-h-[30dvh] grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 overflow-auto text-xs`}>
+        <dt className="text-text-muted">Termination / stop reason</dt>
+        <dd className="break-all font-mono text-text" data-testid="request-stop-reason">{flow?.terminal_reason??detail?.terminal_reason??(isActive?'In progress':'Not recorded')}</dd>
+        <dt className="text-text-muted">chain</dt>
+        <dd className="min-w-0"><ChainDetails flow={flow} predecessorId={flow?.chain_parent_request_id??null} error={null}/></dd>
         <dt className="text-text-muted">model</dt>
         <dd className="font-mono text-text">{fmtModelPair(modelReq, modelServed)}</dd>
         <dt className="text-text-muted">upstream</dt>
@@ -450,11 +454,11 @@ function KillControl({
   );
 }
 
-function ChainTab({ flow, predecessorId, error }: { flow: FlowSummary | null; predecessorId: string | null; error: string | null }) {
+function ChainDetails({ flow, predecessorId, error }: { flow: FlowSummary | null; predecessorId: string | null; error: string | null }) {
   const lineage = divergenceLabel(flow?.divergence_kind);
   const known = !!flow?.divergence_kind;
   return (
-    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 px-3 py-2 text-xs" data-testid="chain-tab" data-cache-bust={flow?.cache_bust === true ? 'true' : 'false'}>
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs" data-testid="chain-tab" data-cache-bust={flow?.cache_bust === true ? 'true' : 'false'}>
       <span className="text-text-muted">harness</span>
       <span className="font-mono" data-testid="chain-harness">{flow?.harness ?? '—'}</span>
       <span className="text-text-muted">session</span>
@@ -469,7 +473,7 @@ function ChainTab({ flow, predecessorId, error }: { flow: FlowSummary | null; pr
         {known ? (lineage.bust ? `cache bust · ${lineage.label}` : lineage.label) : '—'}
       </span>
       <span className="text-text-muted">predecessor</span>
-      <span className="font-mono" data-testid="chain-predecessor">{predecessorId ?? '—'}</span>
+      <span className="break-all font-mono" data-testid="chain-predecessor">{predecessorId ?? '—'}</span>
       {error && (
         <span className="text-status-down" data-testid="chain-error" title={error}>
           {error.includes('503') ? 'durable history disabled' : 'body fetch failed'}
@@ -489,11 +493,8 @@ function ErrorTab({ detail, liveFlow, joinError, seeking, historical = false }: 
   const isError = status === 'failed' || !!joinError;
   const captured = capturedErrorBody(detail?.upstream_response);
 
-  // "No error." ONLY when there is genuinely nothing to show: NOT an error AND no terminal reason to
-  // display. A failed flow (`isError`) NEVER reaches here — regardless of `seeking` or whether the
-  // live body is suppressed (review round-3 HIGH). A clean completed flow with a benign
-  // `terminal_reason` shows that reason (below) but no capture block (it is not an error).
-  if (!isError && !reason) {
+  // Successful termination belongs in Details, not in the error panel.
+  if (!isError) {
     return <div className="px-3 py-3 text-xs italic text-text-muted" data-testid="error-empty">No error.</div>;
   }
 

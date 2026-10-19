@@ -35,7 +35,7 @@ describe('FlowDetail — HTTP body tabs (mock backend)', () => {
   });
 
 
-  it('Timeline tab populates from monitor event_append; deltas render output + tool card', async () => {
+  it('omits obsolete Timeline and keeps live output/tool fallback', async () => {
     const { getByTestId, getByRole } = renderWithQuery(<FlowDetail apiCallId="api_001" onClose={noop} />);
     await waitFor(() => expect(getByTestId('flow-detail')).toBeTruthy());
 
@@ -55,9 +55,8 @@ describe('FlowDetail — HTTP body tabs (mock backend)', () => {
     fireEvent.click(card.querySelector('button')!);
     expect(getByTestId('tool-card-body')).toBeTruthy();
 
-    // Timeline tab populates.
-    fireEvent.click(getByRole('tab', { name: 'Timeline' }));
-    expect(within(getByTestId('tabpanel-timeline')).getByText('response.created')).toBeTruthy();
+    expect(()=>getByRole('tab',{name:'Timeline'})).toThrow();
+    expect(document.querySelector('[data-testid="tabpanel-timeline"]')).toBeNull();
   });
 
   it('kill POSTs with the CSRF header and optimistically flips the row to cancelled', async () => {
@@ -653,7 +652,7 @@ describe('FlowDetail — ErrorTab captured upstream body (gap 14)', () => {
 
   it('SUCCESSFUL flow with no error still reads "No error." (the distinction is preserved)', async () => {
     // An id the mock does NOT know; a COMPLETED store row + an injected detail with no error/no body.
-    seedFlows([makeFlow({ api_call_id: 'api_ok_noerr', status: 'completed', started_ms: 1_700_000_000_000 })]);
+    seedFlows([makeFlow({ api_call_id: 'api_ok_noerr', status: 'completed', terminal_reason:'response.completed', started_ms: 1_700_000_000_000 })]);
     const ok: FlowDetailDto = {
       flow_seq: 1, api_call_id: 'api_ok_noerr', status: 'completed', cost_confidence: 'unavailable',
       deltas: [], started_ms: 1_700_000_000_000,
@@ -665,6 +664,11 @@ describe('FlowDetail — ErrorTab captured upstream body (gap 14)', () => {
     // A clean success ⇒ "No error." (no capture-disabled nag on a non-error flow).
     await waitFor(() => expect(getByTestId('error-empty')).toBeTruthy());
     expect(getByTestId('error-empty').textContent).toContain('No error.');
+    fireEvent.click(getByRole('button',{name:'Details'}));
+    expect(getByTestId('request-stop-reason').textContent).toBe('response.completed');
+    const details=getByTestId('request-stop-reason').closest('dl')!;
+    expect(details.firstElementChild?.textContent).toBe('Termination / stop reason');
+    expect(within(details).getByTestId('chain-tab')).toBeTruthy();
     expect(queryByTestId('error-capture')).toBeNull();
   });
 });
@@ -878,7 +882,8 @@ describe('FlowDetail — Chain tab (predecessor diff from the durable content st
     const { getByTestId, getByRole, queryByTestId } = renderWithQuery(<FlowDetail apiCallId="api_004" onClose={noop} />);
     await waitFor(() => expect(getByTestId('flow-detail')).toBeTruthy());
     expect(queryByTestId('chain-pane-row')).toBeNull();
-    fireEvent.click(getByRole('tab', { name: 'Chain' }));
+    expect(()=>getByRole('tab',{name:'Chain'})).toThrow();
+    fireEvent.click(getByRole('button', { name: 'Details' }));
     const tab = getByTestId('chain-tab');
     expect(tab.getAttribute('data-cache-bust')).toBe('true');
     expect(getByTestId('chain-harness').textContent).toBe('codex');
@@ -893,7 +898,8 @@ describe('FlowDetail — Chain tab (predecessor diff from the durable content st
     seedFlows([makeFlow({ api_call_id: 'api_005', status: 'completed', harness: 'codex', session_id: 'sess_codex', divergence_kind: 'new_chain', cache_bust: false, started_ms: 1_700_000_000_000 })]);
     const { getByTestId, getByRole } = renderWithQuery(<FlowDetail apiCallId="api_005" onClose={noop} />);
     await waitFor(() => expect(getByTestId('flow-detail')).toBeTruthy());
-    fireEvent.click(getByRole('tab', { name: 'Chain' }));
+    expect(()=>getByRole('tab',{name:'Chain'})).toThrow();
+    fireEvent.click(getByRole('button', { name: 'Details' }));
     expect(getByTestId('chain-predecessor').textContent).toBe('—');
     expect(getByTestId('chain-lineage').textContent).toBe('new');
     expect(document.querySelector('[data-testid="chain-pane-row"]')).toBeNull();

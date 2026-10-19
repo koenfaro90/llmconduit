@@ -28,7 +28,15 @@ describe('complete HTTP body tabs',()=>{
   for(const [label,key] of [['Inbound request','client_in'],['Upstream request','upstream_000001_out'],['Upstream response','upstream_000001_in'],['Inbound response','client_out']]){
    fireEvent.click(screen.getByRole('tab',{name:label}));await waitFor(()=>expect(screen.getByRole('button',{name:'Copy body'})).toBeEnabled());fireEvent.click(screen.getByRole('button',{name:'Copy body'}));await waitFor(()=>expect(copy).toHaveBeenLastCalledWith(raw));expect(read).toHaveBeenCalledWith(request.id,key);
   }
-  expect(screen.queryByRole('button',{name:'Format JSON'})).not.toBeInTheDocument();expect(screen.getAllByRole('tab')).toHaveLength(5);
+  expect(screen.queryByRole('button',{name:'Format JSON'})).not.toBeInTheDocument();expect(screen.getAllByRole('tab')).toHaveLength(6);
+ });
+ it('assembles archived SSE into readable output without changing raw response copy',async()=>{
+  const response='data: '+JSON.stringify({choices:[{index:0,delta:{reasoning:'Think',content:'Hel'}}]})+'\n\n'+'data: '+JSON.stringify({choices:[{index:0,delta:{content:'lo'},finish_reason:'stop'}]})+'\n\ndata: [DONE]\n\n';
+  const {client}=getConnection();vi.spyOn(client,'wireManifest').mockResolvedValue(manifest);vi.spyOn(client,'historyBodyBytes').mockImplementation(async(_id,hop)=>new TextEncoder().encode(hop==='client_out'?response:'{}'));
+  renderWithQuery(<RequestBodyTabs request={request}/>);fireEvent.click(screen.getByRole('tab',{name:'Output'}));
+  await screen.findByTestId('assembled-output');expect(screen.getByText('Hello',{selector:'pre'})).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button',{name:'Copy assembled output'}));await waitFor(()=>expect(copy).toHaveBeenCalledWith('Hello\n\nReasoning\nThink'));
+  fireEvent.click(screen.getByRole('tab',{name:'Inbound response'}));await waitFor(()=>expect(screen.getByRole('button',{name:'Copy body'})).toBeEnabled());fireEvent.click(screen.getByRole('button',{name:'Copy body'}));await waitFor(()=>expect(copy).toHaveBeenLastCalledWith(response));
  });
  it('keeps every upstream call selectable instead of overwriting failed attempts',async()=>{
   const {client}=getConnection();vi.spyOn(client,'wireManifest').mockResolvedValue({...manifest,parts:{...manifest.parts,upstream_000002_out:part('upstream_000002_out'),upstream_000002_in:part('upstream_000002_in')}});const read=vi.spyOn(client,'historyBodyBytes').mockResolvedValue(new TextEncoder().encode('data: [DONE]\r\n\r\n'));

@@ -58,6 +58,10 @@ when no token is configured it also permits fully unauthenticated non-loopback d
 uses same-origin `Origin`/`Host` validation for dashboard WebSockets. Kill requires `LLMCONDUIT_DASHBOARD_ALLOW_MUTATIONS=1`
 + a CSRF token.
 
+Request Details starts with termination/stop reason and chain metadata; neither
+Chain nor Timeline has a separate tab. Output assembles stored response JSON/SSE
+into readable text, reasoning and tool calls, retaining raw response exports.
+Successful termination is not an error.
 Request inspectors use full-width HTTP body tabs, with Copy and Download, rather
 than transformation/diff panes. Valid JSON displays with whitespace-only pretty
 printing; Copy/Download retain original bytes. Request TTFT uses first generated text/reasoning/tool arguments; the separate

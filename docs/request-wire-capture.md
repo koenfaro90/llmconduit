@@ -86,3 +86,17 @@ a first-token timestamp remain unavailable. HTTP TTFB is never substituted for T
 New timings are flattened onto REST list/detail and WebSocket flow updates, stored
 independently of bounded live-flow retention, and reused for numeric sorting and
 filtering in the shared request table.
+
+
+## Readable response reference
+
+Output assembles the stored client response into readable answer text, collapsible
+reasoning and tool arguments. It handles buffered JSON and SSE in Chat Completions,
+Responses and Anthropic Messages formats, including SSE event names, indexed tool
+fragments and final snapshots. Final snapshots replace delta fragments so the output
+is not doubled. Partial streams are identified. This is a derived reference view;
+raw response tabs and their Copy/Download operations keep original bytes.
+Termination/stop reason appears first inside Details, followed by chain information.
+Successful completion reasons do not populate the Error tab. Timeline and Chain
+have no separate tabs. Live monitor segments remain an explicitly bounded fallback
+when stored response assembly is unavailable.
