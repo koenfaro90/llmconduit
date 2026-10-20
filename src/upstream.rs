@@ -23,6 +23,7 @@ use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::Map as JsonMap;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs::OpenOptions;
@@ -555,7 +556,7 @@ impl ProxyCompletionsRequest {
 
 /// One entry of the upstream `/v1/models` catalog: the model id plus its
 /// context-window length (`None` when the upstream reports no positive context
-/// length for it). Ids and context limits are derived from a SINGLE
+/// length for it) and explicit capability metadata. These come from a SINGLE
 /// `/v1/models` snapshot so they always describe the same provider/state (G3:
 /// a separate context-limit fetch could otherwise pair one provider's ids with
 /// another's limits under failover).
@@ -563,6 +564,19 @@ impl ProxyCompletionsRequest {
 pub struct UpstreamModelEntry {
     pub id: String,
     pub context_limit: Option<i64>,
+    /// Explicit provider metadata, retained across managed provider/alias layers.
+    /// Absence means unknown; a model name never supplies a capability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<Value>,
+}
+
+/// A transformed catalogue must not retain the validator of its unmodified provider body.
+pub(crate) fn catalogue_etag(bytes: &[u8]) -> HeaderValue {
+    HeaderValue::from_str(&format!(
+        "\"sha256-{}\"",
+        hex::encode(Sha256::digest(bytes))
+    ))
+    .expect("hex digest is a valid ETag")
 }
 
 /// One concrete provider resource advertised to the gateway. Unlike the union
@@ -3849,6 +3863,7 @@ impl UpstreamClient for FailoverUpstreamClient {
                         .retain(|candidate| candidate.id.eq_ignore_ascii_case(model));
                     if entry.models.is_empty() {
                         entry.models.push(UpstreamModelEntry {
+                            capabilities: None,
                             id: model.to_string(),
                             context_limit: None,
                         });
@@ -4277,7 +4292,18 @@ impl UpstreamClient for RoutingUpstreamClient {
             .into_iter()
             .map(|id| {
                 let context_limit = catalog.union_context_limit_by_id.get(&id).copied();
-                UpstreamModelEntry { id, context_limit }
+                let capabilities = catalog
+                    .union_entries
+                    .iter()
+                    .find(|entry| entry.get("id").and_then(Value::as_str) == Some(&id))
+                    .and_then(|entry| entry.get("capabilities"))
+                    .filter(|value| value.is_object())
+                    .cloned();
+                UpstreamModelEntry {
+                    capabilities,
+                    id,
+                    context_limit,
+                }
             })
             .collect())
     }
@@ -6288,12 +6314,17 @@ fn extract_supported_model_catalog(body: &Value) -> Vec<UpstreamModelEntry> {
         .iter()
         .filter_map(|entry| match entry {
             Value::String(id) => Some(UpstreamModelEntry {
+                capabilities: None,
                 id: id.clone(),
                 context_limit: None,
             }),
             Value::Object(map) => {
                 let id = map.get("id").and_then(Value::as_str)?;
                 Some(UpstreamModelEntry {
+                    capabilities: map
+                        .get("capabilities")
+                        .filter(|value| value.is_object())
+                        .cloned(),
                     id: id.to_string(),
                     context_limit: entry_context_limit(map),
                 })
@@ -7752,6 +7783,7 @@ mod tests {
         assert_eq!(
             extract_supported_model_catalog(&body),
             vec![UpstreamModelEntry {
+                capabilities: None,
                 id: "glm-5.1".to_string(),
                 context_limit: None,
             }]
@@ -7798,38 +7830,47 @@ mod tests {
             extract_supported_model_catalog(&body),
             vec![
                 UpstreamModelEntry {
+                    capabilities: None,
                     id: "k_max_input_tokens".to_string(),
                     context_limit: Some(1000)
                 },
                 UpstreamModelEntry {
+                    capabilities: None,
                     id: "k_context_length".to_string(),
                     context_limit: Some(8192)
                 },
                 UpstreamModelEntry {
+                    capabilities: None,
                     id: "k_context_window".to_string(),
                     context_limit: Some(2048)
                 },
                 UpstreamModelEntry {
+                    capabilities: None,
                     id: "k_max_context_length".to_string(),
                     context_limit: Some(32768)
                 },
                 UpstreamModelEntry {
+                    capabilities: None,
                     id: "k_max_model_len".to_string(),
                     context_limit: Some(4096)
                 },
                 UpstreamModelEntry {
+                    capabilities: None,
                     id: "precedence".to_string(),
                     context_limit: Some(11)
                 },
                 UpstreamModelEntry {
+                    capabilities: None,
                     id: "zero".to_string(),
                     context_limit: None
                 },
                 UpstreamModelEntry {
+                    capabilities: None,
                     id: "missing".to_string(),
                     context_limit: None
                 },
                 UpstreamModelEntry {
+                    capabilities: None,
                     id: "bare".to_string(),
                     context_limit: None
                 },

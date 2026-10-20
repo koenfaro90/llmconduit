@@ -693,6 +693,7 @@ impl UpstreamClient for ServingUpstream {
 
     async fn supported_model_catalog(&self) -> Result<Vec<UpstreamModelEntry>, AppError> {
         Ok(vec![UpstreamModelEntry {
+            capabilities: None,
             id: "glm-5.1".to_owned(),
             context_limit: None,
         }])

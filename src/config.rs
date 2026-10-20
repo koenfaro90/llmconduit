@@ -205,7 +205,7 @@ fn supported_obj(supported: bool) -> JsonValue {
     )]))
 }
 
-/// Anthropic capability with a single support flag. A bare boolean is accepted
+/// Catalogue capability with a single support flag. A bare boolean is accepted
 /// as shorthand for `{ supported: ... }`.
 #[derive(Debug, Clone, PartialEq, Default, Serialize)]
 pub struct SimpleCap {
@@ -304,7 +304,7 @@ impl ContextManagementCap {
     }
 }
 
-/// Per-profile capability overrides used by Anthropic-compatible `/v1/models`.
+/// Per-profile capability overrides advertised by `/v1/models`.
 /// Each configured capability replaces that one key while unconfigured keys
 /// retain the upstream/default advertisement.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -314,6 +314,11 @@ pub struct CapabilitiesConfig {
     pub citations: Option<SimpleCap>,
     pub code_execution: Option<SimpleCap>,
     pub image_input: Option<SimpleCap>,
+    pub image_generation: Option<SimpleCap>,
+    pub image_editing: Option<SimpleCap>,
+    pub audio_transcription: Option<SimpleCap>,
+    pub speech_generation: Option<SimpleCap>,
+    pub video_generation: Option<SimpleCap>,
     pub pdf_input: Option<SimpleCap>,
     pub structured_outputs: Option<SimpleCap>,
     pub thinking: Option<ThinkingCap>,
@@ -337,6 +342,11 @@ impl CapabilitiesConfig {
         replace!(citations);
         replace!(code_execution);
         replace!(image_input);
+        replace!(image_generation);
+        replace!(image_editing);
+        replace!(audio_transcription);
+        replace!(speech_generation);
+        replace!(video_generation);
         replace!(pdf_input);
         replace!(structured_outputs);
         replace!(thinking);

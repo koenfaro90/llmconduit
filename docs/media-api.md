@@ -8,6 +8,41 @@ use the existing gateway mechanisms. Unknown media models are rejected rather th
 falling back to the first text model. Endpoint support does not load a media model;
 prepare its recipe, deploy it through Fleet and configure the model's gateway route.
 
+`GET /v1/models` advertises explicit task capabilities under each entry's
+`capabilities` object. Consumers select models only when the relevant
+`supported` value is `true`:
+
+| Capability | Task |
+| --- | --- |
+| `image_generation` | Generate images |
+| `image_editing` | Edit images |
+| `audio_transcription` | Transcribe audio |
+| `speech_generation` | Generate speech |
+| `video_generation` | Generate video |
+
+These are optional profile settings, also available under **Advertised
+capabilities** in the profile editor. For example, a verified video backend's
+profile can declare:
+
+```yaml
+capabilities:
+  video_generation:
+    supported: true
+```
+
+Provider catalogue capabilities are retained; configured profile values override
+the matching fields. `image_input` remains a separate chat-input capability.
+No task capability is inferred from a model name. An absent flag means unknown;
+it does not mean supported. Advertising support does not add an API adapter,
+deploy a model or verify its current readiness.
+
+An alias advertises a capability only when every enabled target profile
+explicitly declares the same support.
+Unknown or mixed targets cannot advertise support; an explicit refusal remains
+false. Disabled targets do not add capability claims. Alias changes take effect
+in the next catalogue request, and transformed catalogue ETags follow the returned
+metadata. Existing key/model authorization still filters the catalogue.
+
 | Task | Gateway endpoint | Request / response |
 | --- | --- | --- |
 | Generate images | `POST /v1/images/generations` | JSON / JSON or image bytes |

@@ -175,6 +175,7 @@ impl UpstreamClient for MockUpstream {
             .await
             .iter()
             .map(|id| UpstreamModelEntry {
+                capabilities: None,
                 id: id.clone(),
                 context_limit: limits
                     .iter()

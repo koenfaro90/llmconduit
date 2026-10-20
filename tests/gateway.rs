@@ -210,6 +210,7 @@ impl UpstreamClient for MockUpstream {
             .await
             .iter()
             .map(|id| UpstreamModelEntry {
+                capabilities: None,
                 id: id.clone(),
                 context_limit: limits
                     .iter()
@@ -281,6 +282,7 @@ impl UpstreamClient for PendingChunkUpstream {
         &self,
     ) -> Result<Vec<UpstreamModelEntry>, llmconduit::error::AppError> {
         Ok(vec![UpstreamModelEntry {
+            capabilities: None,
             id: "glm-5.1".to_string(),
             context_limit: None,
         }])
@@ -343,6 +345,7 @@ impl UpstreamClient for ChunkThenPendingUpstream {
         &self,
     ) -> Result<Vec<UpstreamModelEntry>, llmconduit::error::AppError> {
         Ok(vec![UpstreamModelEntry {
+            capabilities: None,
             id: "glm-5.1".to_string(),
             context_limit: None,
         }])
@@ -409,6 +412,7 @@ impl UpstreamClient for FloodThenParkUpstream {
         &self,
     ) -> Result<Vec<UpstreamModelEntry>, llmconduit::error::AppError> {
         Ok(vec![UpstreamModelEntry {
+            capabilities: None,
             id: "glm-5.1".to_string(),
             context_limit: None,
         }])
@@ -15823,6 +15827,7 @@ impl UpstreamClient for RepairRoundPendingUpstream {
         &self,
     ) -> Result<Vec<UpstreamModelEntry>, llmconduit::error::AppError> {
         Ok(vec![UpstreamModelEntry {
+            capabilities: None,
             id: "glm-5.1".to_string(),
             context_limit: None,
         }])

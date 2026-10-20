@@ -1,5 +1,6 @@
 //! Durable client-facing aliases. SQL stores profile references, never backend credentials.
 use crate::{
+    config::{CapabilitiesConfig, Config},
     control_plane::{OperationalProviderPlan, OperationalRoutePlan},
     control_plane_store::PersistenceStore,
     error::{AppError, AppResult},
@@ -13,6 +14,7 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
 };
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
@@ -72,6 +74,7 @@ pub struct SaveAliases {
 struct Target {
     view: AliasTarget,
     providers: Vec<OperationalProviderPlan>,
+    capabilities: Option<CapabilitiesConfig>,
 }
 /// Shared across all requests at one revision. Old requests retain this Arc through streaming.
 pub struct AliasSnapshot {
@@ -121,6 +124,7 @@ struct RegistryState {
 pub struct AliasRegistry {
     store: Option<Arc<dyn PersistenceStore>>,
     targets: BTreeMap<Uuid, Target>,
+    catalog_config: Config,
     reserved: BTreeSet<String>,
     options: ManagedProviderOptions,
     cooldown: Duration,
@@ -131,6 +135,7 @@ impl AliasRegistry {
     pub fn new(
         store: Option<Arc<dyn PersistenceStore>>,
         routes: &[OperationalRoutePlan],
+        config: &Config,
         reserved: BTreeSet<String>,
         options: ManagedProviderOptions,
         cooldown: Duration,
@@ -149,6 +154,10 @@ impl AliasRegistry {
                         available: false,
                     },
                     providers: Vec::new(),
+                    capabilities: config
+                        .model_profiles
+                        .get(&route.primary_profile_name)
+                        .and_then(|profile| profile.capabilities.clone()),
                 });
             for p in &route.providers {
                 let target = targets.entry(p.profile_id).or_insert_with(|| Target {
@@ -160,6 +169,10 @@ impl AliasRegistry {
                         available: true,
                     },
                     providers: Vec::new(),
+                    capabilities: config
+                        .model_profiles
+                        .get(&p.profile_name)
+                        .and_then(|profile| profile.capabilities.clone()),
                 });
                 if !target
                     .providers
@@ -213,6 +226,7 @@ impl AliasRegistry {
         });
         let mut registry = Self {
             store,
+            catalog_config: config.clone(),
             targets,
             reserved,
             options,
@@ -502,6 +516,38 @@ pub struct AliasUpstream {
     registry: Arc<AliasRegistry>,
     frozen: Option<Arc<AliasSnapshot>>,
 }
+
+/// A client may use any enabled target. Unknown or conflicting declarations
+/// therefore cannot imply support; one explicit refusal is enough to refuse.
+fn shared_capabilities(targets: &[Value]) -> Option<Value> {
+    if targets.is_empty() {
+        return None;
+    }
+    let keys = targets
+        .iter()
+        .filter_map(Value::as_object)
+        .flat_map(|object| object.keys())
+        .collect::<BTreeSet<_>>();
+    let mut common = serde_json::Map::new();
+    for key in keys {
+        let first = targets[0].get(key);
+        if let Some(value) = first
+            && targets.iter().all(|target| target.get(key) == Some(value))
+        {
+            common.insert(key.clone(), value.clone());
+        } else if targets.iter().any(|target| {
+            target
+                .get(key)
+                .and_then(|cap| cap.get("supported"))
+                .and_then(Value::as_bool)
+                == Some(false)
+        }) {
+            common.insert(key.clone(), json!({"supported":false}));
+        }
+    }
+    (!common.is_empty()).then_some(Value::Object(common))
+}
+
 impl AliasUpstream {
     pub fn new(base: DynUpstreamClient, registry: Arc<AliasRegistry>) -> Self {
         Self {
@@ -585,6 +631,17 @@ impl UpstreamClient for AliasUpstream {
                     .iter()
                     .any(|a| a.name.eq_ignore_ascii_case(&m.id))
         });
+        for entry in &mut catalog {
+            if let Some(configured) = self
+                .registry
+                .catalog_config
+                .resolve_capabilities_for_upstream(&entry.id)
+            {
+                entry.capabilities = Some(
+                    configured.merge_into(entry.capabilities.take().unwrap_or_else(|| json!({}))),
+                );
+            }
+        }
         // Profile routes already advertise conservative backend context limits. Reuse their
         // catalogs rather than refetching every backend once for each alias on every request.
         let aliases = s
@@ -604,7 +661,24 @@ impl UpstreamClient for AliasUpstream {
                             .and_then(|m| m.context_limit)
                     })
                     .min();
+                let target_capabilities = a
+                    .profiles
+                    .iter()
+                    .filter_map(|id| self.registry.targets.get(id))
+                    .filter(|target| !target.providers.is_empty())
+                    .map(|target| {
+                        // Union model IDs do not retain backend ownership. Taking
+                        // another backend's same-ID metadata could incorrectly
+                        // certify an unknown alias target. Profile declarations
+                        // are the authoritative contract for these route chains.
+                        target
+                            .capabilities
+                            .as_ref()
+                            .map_or_else(|| json!({}), |caps| caps.merge_into(json!({})))
+                    })
+                    .collect::<Vec<_>>();
                 UpstreamModelEntry {
+                    capabilities: shared_capabilities(&target_capabilities),
                     id: a.name.clone(),
                     context_limit,
                 }
@@ -614,19 +688,25 @@ impl UpstreamClient for AliasUpstream {
         Ok(catalog)
     }
     async fn list_models(&self) -> AppResult<UpstreamModelsResponse> {
-        let data=self.supported_model_catalog().await?.into_iter().map(|m|serde_json::json!({"id":m.id,"object":"model","owned_by":"llmconduit","context_window":m.context_limit})).collect::<Vec<_>>();
+        let data = self.supported_model_catalog().await?.into_iter().map(|model| {
+            let mut entry = json!({"id":model.id,"object":"model","owned_by":"llmconduit","context_window":model.context_limit});
+            if let Some(capabilities) = model.capabilities {
+                entry["capabilities"] = capabilities;
+            }
+            entry
+        }).collect::<Vec<_>>();
+        let body = serde_json::to_vec(&json!({"object":"list","data":data}))
+            .map_err(|error| AppError::internal(error.to_string()))?;
         let mut headers = HeaderMap::new();
         headers.insert(
             header::CONTENT_TYPE,
             header::HeaderValue::from_static("application/json"),
         );
+        headers.insert(header::ETAG, catalogue_etag(&body));
         Ok(UpstreamModelsResponse {
             status: StatusCode::OK,
             headers,
-            body: Bytes::from(
-                serde_json::to_vec(&serde_json::json!({"object":"list","data":data}))
-                    .map_err(|e| AppError::internal(e.to_string()))?,
-            ),
+            body: Bytes::from(body),
         })
     }
     async fn provider_inventory(&self) -> AppResult<Vec<ProviderInventoryEntry>> {
@@ -655,5 +735,26 @@ impl UpstreamClient for AliasUpstream {
     }
     fn model_catalog_cache_ttl(&self) -> Duration {
         Duration::ZERO
+    }
+}
+
+#[cfg(test)]
+mod catalogue_tests {
+    use super::*;
+
+    #[test]
+    fn catalogue_capabilities_require_explicit_consensus_and_preserve_refusal() {
+        let yes = json!({"video_generation":{"supported":true}});
+        let no = json!({"video_generation":{"supported":false}});
+        let unknown = json!({});
+        assert_eq!(shared_capabilities(&[]), None);
+        assert_eq!(shared_capabilities(std::slice::from_ref(&unknown)), None);
+        assert_eq!(shared_capabilities(&[yes.clone(), unknown.clone()]), None);
+        assert_eq!(
+            shared_capabilities(&[yes.clone(), yes.clone()]),
+            Some(yes.clone())
+        );
+        assert_eq!(shared_capabilities(&[yes, no.clone()]), Some(no.clone()));
+        assert_eq!(shared_capabilities(&[unknown, no.clone()]), Some(no));
     }
 }

@@ -2956,6 +2956,7 @@ mod tests {
                 route: Some("gpu-0".into()),
                 base_url: "mesh://worker-a/gpu-0".into(),
                 models: vec![crate::upstream::UpstreamModelEntry {
+                    capabilities: None,
                     id: "local-model".into(),
                     context_limit: Some(32_768),
                 }],

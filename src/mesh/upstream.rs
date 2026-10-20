@@ -227,6 +227,7 @@ impl UpstreamClient for MeshUpstreamClient {
             .model_catalog()
             .into_iter()
             .map(|model| UpstreamModelEntry {
+                capabilities: None,
                 id: model.id,
                 context_limit: model.context_limit,
             })

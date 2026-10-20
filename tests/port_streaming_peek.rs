@@ -124,6 +124,7 @@ impl UpstreamClient for PendingUpstream {
 
     async fn supported_model_catalog(&self) -> Result<Vec<UpstreamModelEntry>, AppError> {
         Ok(vec![UpstreamModelEntry {
+            capabilities: None,
             id: "glm-5.1".to_string(),
             context_limit: None,
         }])

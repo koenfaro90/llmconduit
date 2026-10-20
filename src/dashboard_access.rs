@@ -1098,6 +1098,7 @@ mod tests {
         assert_eq!(
             json_body(response).await,
             json!({
+                "revision": 1,
                 "id": "key_created",
                 "principal_id": "usr_target",
                 "name": "automation",

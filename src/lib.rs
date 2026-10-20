@@ -661,6 +661,7 @@ pub fn build_runtime_generation(
         Some(crate::managed_aliases::AliasRegistry::new(
             runtime.persistence_store.clone(),
             &operational_routes,
+            &config,
             config
                 .model_profiles
                 .keys()

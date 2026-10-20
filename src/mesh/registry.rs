@@ -562,6 +562,7 @@ impl MeshRegistry {
                             ))
                         })
                         .map(|model| crate::upstream::UpstreamModelEntry {
+                            capabilities: None,
                             id: model.id.clone(),
                             context_limit: model.context_limit,
                         })

@@ -816,6 +816,9 @@ fn models_response(catalog: Vec<UpstreamModelEntry>) -> AppResult<UpstreamModels
                     Value::Number(context_limit.into()),
                 );
             }
+            if let Some(capabilities) = entry.capabilities {
+                value["capabilities"] = capabilities;
+            }
             value
         })
         .collect::<Vec<_>>();
@@ -932,6 +935,7 @@ mod tests {
                 base_url: "https://api.example.com/v1/".to_string(),
                 api_key: "secret".to_string(),
                 models: vec![UpstreamModelEntry {
+                    capabilities: None,
                     id: "model-a".to_string(),
                     context_limit: Some(4096),
                 }],
@@ -962,6 +966,7 @@ mod tests {
                 base_url: "https://api.example.com/v1/".to_string(),
                 api_key: "secret".to_string(),
                 models: vec![UpstreamModelEntry {
+                    capabilities: None,
                     id: "model-a".to_string(),
                     context_limit: None,
                 }],
@@ -1134,10 +1139,12 @@ mod tests {
                 api_key: "secret".to_string(),
                 models: vec![
                     UpstreamModelEntry {
+                        capabilities: None,
                         id: "base-model".to_string(),
                         context_limit: Some(123),
                     },
                     UpstreamModelEntry {
+                        capabilities: None,
                         id: "dynamic-model".to_string(),
                         context_limit: Some(456),
                     },
@@ -1152,6 +1159,7 @@ mod tests {
         let upstream = ManagedProviderUpstream::new(
             Arc::new(CatalogOnlyUpstream {
                 models: vec![UpstreamModelEntry {
+                    capabilities: None,
                     id: "base-model".to_string(),
                     context_limit: Some(999),
                 }],

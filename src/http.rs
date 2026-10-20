@@ -4777,6 +4777,12 @@ async fn get_models(
     let anthropic_models = is_anthropic_models_request(&headers);
     let response = gateway.upstream_client().list_models().await?;
     let (status, mut body, etag) = collect_models_response(response).await?;
+    // Managed aliases already merge each enabled target's explicit metadata
+    // against one immutable alias snapshot. Reapplying a wildcard profile here
+    // could turn an unknown/mixed alias into a false capability advertisement.
+    let metadata_changed = !anthropic_models
+        && gateway.alias_registry().is_none()
+        && apply_configured_model_capabilities(&mut body, gateway.config());
     let identity_filtered = if let Some(Extension(identity)) = identity.as_ref() {
         if identity.allowed_models().is_empty() {
             false
@@ -4791,23 +4797,65 @@ async fn get_models(
         filter_models_body(&mut body, &context.0);
     }
     let body = if anthropic_models {
-        transform_models_response_for_anthropic(body, &query, gateway.config())?
+        transform_models_response_for_anthropic(
+            body,
+            &query,
+            gateway.alias_registry().is_none().then(|| gateway.config()),
+        )?
     } else {
         body
     };
     let mut headers = HeaderMap::new();
-    if auth.is_none()
-        && !identity_filtered
-        && !anthropic_models
-        && let Some(etag) = etag
-    {
-        headers.insert(
-            http::header::ETAG,
-            HeaderValue::from_str(&etag)
-                .map_err(|err| AppError::internal(format!("invalid ETag header: {err}")))?,
-        );
+    if auth.is_none() && !identity_filtered && !anthropic_models {
+        if metadata_changed {
+            let bytes =
+                serde_json::to_vec(&body).map_err(|err| AppError::internal(err.to_string()))?;
+            headers.insert(http::header::ETAG, crate::upstream::catalogue_etag(&bytes));
+        } else if let Some(etag) = etag {
+            headers.insert(
+                http::header::ETAG,
+                HeaderValue::from_str(&etag)
+                    .map_err(|err| AppError::internal(format!("invalid ETag header: {err}")))?,
+            );
+        }
     }
     Ok((status, headers, Json(body)).into_response())
+}
+
+fn apply_configured_model_capabilities(body: &mut Value, config: &crate::config::Config) -> bool {
+    let entries = match body {
+        Value::Array(entries) => Some(entries),
+        Value::Object(map) => {
+            let key = if map.contains_key("data") {
+                "data"
+            } else {
+                "models"
+            };
+            map.get_mut(key).and_then(Value::as_array_mut)
+        }
+        _ => None,
+    };
+    let mut changed = false;
+    for entry in entries.into_iter().flatten() {
+        let Some(id) = model_id_from_value(entry) else {
+            continue;
+        };
+        let Some(configured) = config.resolve_capabilities_for_upstream(&id) else {
+            continue;
+        };
+        let before = entry.clone();
+        if entry.is_string() {
+            *entry = serde_json::json!({"id":id,"object":"model"});
+        }
+        let base = entry
+            .get("capabilities")
+            .filter(|value| value.is_object())
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        entry["capabilities"] = configured.merge_into(base);
+        changed |= *entry != before;
+    }
+    changed
 }
 
 fn filter_models_body_for_identity(body: &mut Value, identity: &ClientIdentity) {
@@ -4869,7 +4917,7 @@ fn is_anthropic_models_request(headers: &HeaderMap) -> bool {
 fn transform_models_response_for_anthropic(
     body: Value,
     query: &ModelsListQuery,
-    config: &crate::config::Config,
+    config: Option<&crate::config::Config>,
 ) -> AppResult<Value> {
     if query.after_id.is_some() && query.before_id.is_some() {
         return Err(AppError::bad_request(
@@ -4931,7 +4979,7 @@ fn extract_model_entries(body: &Value) -> Vec<Value> {
     }
 }
 
-fn anthropic_model_entry(entry: &Value, config: &crate::config::Config) -> Option<Value> {
+fn anthropic_model_entry(entry: &Value, config: Option<&crate::config::Config>) -> Option<Value> {
     match entry {
         Value::String(id) => {
             let caps =
@@ -5006,9 +5054,13 @@ fn infer_capabilities_from_model_id(_id: &str) -> Value {
     default_anthropic_model_capabilities()
 }
 
-fn merge_configured_capabilities(config: &crate::config::Config, id: &str, base: Value) -> Value {
+fn merge_configured_capabilities(
+    config: Option<&crate::config::Config>,
+    id: &str,
+    base: Value,
+) -> Value {
     config
-        .resolve_capabilities_for_upstream(id)
+        .and_then(|config| config.resolve_capabilities_for_upstream(id))
         .map_or(base.clone(), |capabilities| capabilities.merge_into(base))
 }
 

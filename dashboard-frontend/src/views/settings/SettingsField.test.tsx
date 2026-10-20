@@ -5,6 +5,17 @@ import {SettingsField} from './SettingsField';
 import {hostPolicySchema,schemaFor} from './settingsSchema';
 import {SECRET,type Json} from './settingsModel';
 afterEach(()=>cleanup());
+it('edits explicit media capability flags without inferring support',()=>{
+ const capabilities=schemaFor('/model_profiles').item!.fields!.capabilities!.fields!;
+ for(const name of ['image_generation','image_editing','audio_transcription','speech_generation','video_generation']){
+  expect(capabilities[name]?.fields?.supported?.kind).toBe('boolean');
+ }
+ const change=vi.fn();
+ render(<SettingsField schema={capabilities.video_generation!.fields!.supported!} value={true} onChange={change}/>);
+ expect(screen.getByLabelText('Supported')).toBeChecked();
+ fireEvent.click(screen.getByLabelText('Supported'));
+ expect(change).toHaveBeenCalledWith(false);
+});
 it('edits nested metrics with units while preserving extension fields',()=>{
  const change=vi.fn();render(<SettingsField schema={schemaFor('/control_plane/metrics')} value={{enabled:true,scrape_interval_secs:15,backends:{},extension:{keep:true}}} onChange={change}/>);
  expect(screen.queryByRole('textbox',{name:'Backend metrics JSON'})).toBeNull();fireEvent.change(screen.getByLabelText('Scrape interval'),{target:{value:'10'}});
